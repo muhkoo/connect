@@ -1,0 +1,6 @@
+{
+  "plugin": ["typedoc-plugin-markdown"],
+  "out": "./connect-docs/docs",
+  "entryPointStrategy": "expand",
+  "entryPoints": ["./src/index.ts"]
+}

@@ -1,0 +1,112 @@
+{
+  "name": "@muhkoo/connect",
+  "version": "0.1.0-alpha.1",
+  "description": "Simple client SDK for building distributed edge based applications",
+  "main": "dist/server/index.js",
+  "module": "dist/server/index.js",
+  "browser": "dist/browser/index.js",
+  "typings": "dist/connect.d.ts",
+  "repository": "https://github.com/muhkoo/connect.git",
+  "author": "muhkoo",
+  "license": "GPL-3.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/connect.d.ts",
+      "browser": "./dist/browser/index.js",
+      "default": "./dist/server/index.js"
+    },
+    "./crypto": {
+      "types": "./src/crypto/index.ts",
+      "import": "./src/crypto/index.ts"
+    },
+    "./types": {
+      "types": "./src/types/index.ts",
+      "import": "./src/types/index.ts"
+    },
+    "./api": {
+      "types": "./src/api/index.ts",
+      "import": "./src/api/index.ts"
+    },
+    "./events": {
+      "types": "./src/events/index.ts",
+      "import": "./src/events/index.ts"
+    },
+    "./messaging": {
+      "types": "./src/messaging/index.ts",
+      "import": "./src/messaging/index.ts"
+    },
+    "./utilities": {
+      "types": "./src/utilities/index.ts",
+      "import": "./src/utilities/index.ts"
+    }
+  },
+  "scripts": {
+    "build:dts": "rollup -c rollup.dts.config.js",
+    "build:typedoc": "rm -rf docs && typedoc",
+    "build:docs": "rm -rf docs && typedoc",
+    "clean": "rm -rf dist && rm -rf coverage && rm -rf node_modules && rm -rf yarn.lock",
+    "build": "rm -rf dist && yarn rollup:browser && yarn rollup:server",
+    "dev": "concurrently --names \"SERVER,BROWSER\" --prefix-colors \"blue,magenta\" \"yarn rollup:server:dev\" \"yarn rollup:browser:dev\"",
+    "rollup:server:dev": "BUILD_ENV=server rollup -c --watch",
+    "rollup:browser:dev": "BUILD_ENV=browser rollup -c --watch",
+    "rollup:server": "BUILD_ENV=server rollup -c",
+    "rollup:browser": "BUILD_ENV=browser rollup -c",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:unit": "vitest --run",
+    "test:integration": "TEST_TYPE=integration vitest --run tests/integration",
+    "lint": "eslint ./src",
+    "lint:fix": "eslint ./src --fix",
+    "watch:dts": "nodemon --watch src --ext ts --exec 'yarn build:dts'",
+    "watch:typedoc": "nodemon --watch src --ext ts --exec 'yarn build:typedoc'",
+    "watch:docs": "nodemon --watch src --ext ts --exec 'yarn build:docs'",
+    "watch:lint": "nodemon --watch src --ext ts --exec 'yarn lint'",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "o1js": "^2.10.0",
+    "pako": "^2.1.0",
+    "semver": "^7.7.3",
+    "uuid": "^13.0.0",
+    "wasm-reed-solomon-erasure": "^0.2.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.21.0",
+    "@rollup/plugin-alias": "^5.1.1",
+    "@rollup/plugin-commonjs": "^28.0.2",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^16.0.0",
+    "@rollup/plugin-replace": "^6.0.2",
+    "@types/node": "^24.9.1",
+    "@types/pako": "^2.0.4",
+    "@types/semver": "^7.7.1",
+    "@typescript-eslint/parser": "^8.26.1",
+    "concurrently": "^9.1.2",
+    "dotenv": "^17.2.3",
+    "eslint": "^9.22.0",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-prettier": "^5.2.1",
+    "eslint-plugin-tsdoc": "^0.4.0",
+    "nodemon": "^3.1.9",
+    "prettier": "^3.3.3",
+    "rollup": "^4.25.0",
+    "rollup-plugin-dts": "^6.2.1",
+    "rollup-plugin-node-polyfills": "^0.2.1",
+    "rollup-plugin-polyfill-node": "^0.13.0",
+    "rollup-plugin-typescript2": "^0.36.0",
+    "tsx": "^4.19.2",
+    "typedoc": "^0.28.0",
+    "typedoc-plugin-markdown": "^4.5.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.24.1",
+    "vite": "^7.0.0",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.0.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+}
