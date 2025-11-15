@@ -17,8 +17,9 @@ export default defineConfig({
     },
     include: [
       // Crypto and API tests
+      // "**/client.test.ts",
       // "**/ecdh.test.ts",
-      // "**/ratchet.test.ts",
+      "**/tests/crypto/ratchet.test.ts",
       // "**/session-manager.test.ts",
       // "**/api-client.test.ts",
       // Salvaged tests
@@ -28,7 +29,7 @@ export default defineConfig({
       // "**/message.test.ts",
       // Integration tests (require Accelerator to be running)
       // "**/*.integration.test.ts",
-      "tests/**/*.{test,spec}.{ts,tsx,js,jsx}"
+      // "tests/**/*.{test,spec}.{ts,tsx,js,jsx}"
     ], // Include all test files
     exclude: [
       "node_modules",

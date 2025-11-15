@@ -16,13 +16,19 @@ describe('Client - Initialization', () => {
         client = new Client({
             apiKey: 'test-api-key',
             network: {
-                url: 'https://api.test.com',
+                url: 'http://localhost:8787',
                 clientId: 'test-client-id',
                 serverId: 'test-server-id',
             },
         });
     });
     it('should initialize with basic config', () => {
+        console.log('Client initialized with config:', client);
+        expect(client).toBeDefined();
+    });
+
+    it('should initialize with basic config', () => {
+        console.log('Client initialized with config:', client);
         expect(client).toBeDefined();
     });
 });

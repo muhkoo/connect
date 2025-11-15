@@ -9,19 +9,6 @@ export {
 }
 //0ba25dcb0db07dbac27435857ab55150d2a2e6c8f73a969c74b7659c7a8dd3a3
 
-
-/**
- * @public
- * @remarks Converts a string to a Uint8Array
- * @param str - The string to convert
- * @returns Uint8Array
- */
-export function getSwarmKey(key: string = "n1ce1bfc2a47e208fd668b4d3cbcf7b89ce5cf4c21d489056f11118ae8086836f"): Uint8Array {
-    const swarmKeyString = `/key/swarm/psk/1.0.0/\n/base16/\n${key}`;
-    const swarmKey = new TextEncoder().encode(swarmKeyString)
-    return swarmKey;
-}
-
 /**
  * @public
  * @remarks Asserts the basic type of a variable
@@ -508,7 +495,7 @@ export function isNumber(value: string | number): boolean {
     return false;
 }
 
-export function getId(row: {insertId?: number, id?: number}): number {
+export function getId(row: { insertId?: number, id?: number }): number {
     if (row.insertId) {
         return row.insertId;
     } else if (row.id) {
