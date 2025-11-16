@@ -4,8 +4,23 @@ import { subtle } from 'crypto';
 
 import { DoubleRatchetManager } from '../../src/crypto/DoubleRatchetManager';
 import { KeyStore } from '../../src/crypto/KeyStore';
-import { PreimagePoK,AuthPublicInput } from '../../src/crypto/ZeroKnowledge';
-import { Field, Poseidon } from 'o1js';
+import {
+  PreimagePoK,
+  AuthPublicInput,
+  Field,
+  Poseidon,
+  VerificationKey
+} from '../../src/crypto/ZeroKnowledge';
+
+// Mock logger for tests
+const appLogger = {
+  debug: (...args: any[]) => console.log('[DEBUG]', ...args),
+  error: (...args: any[]) => console.error('[ERROR]', ...args),
+  info: (...args: any[]) => console.log('[INFO]', ...args)
+};
+
+// Make appLogger available globally for the test
+(global as any).appLogger = appLogger;
 
 const _dir = './tests/v1/crypto/keys';
 // Cleanup JSON files before and after tests
@@ -19,14 +34,94 @@ async function cleanupFiles() {
   }
 }
 
-describe('Double Ratchet with ZK Registration and JWK/Base58 Keys', () => {
-  let verificationKey: { data: string; hash: Field };
+// Setup circuits - use real ones if available, otherwise mock
+async function setupCircuits() {
+  const fs = await import('fs');
+  const path = await import('path');
 
+  // Check if real circuit files exist
+  const circuitPath = path.join(process.cwd(), 'circuits', 'build', 'preimagePoK_0001.zkey');
+  const hasRealCircuits = fs.existsSync(circuitPath);
+
+  if (hasRealCircuits) {
+    console.log('Using REAL circuits from circuits/build/');
+    // Real circuits will be loaded automatically by the classes
+    return;
+  }
+
+  console.log('Real circuits not found, using MOCK circuits for testing');
+  // For testing without real circuits, mock the circuit behavior
+  // Override the prove and verify methods for testing
+  (PreimagePoK as any).prove = async (
+    publicInput: AuthPublicInput,
+    secret: Field,
+    salt: Field,
+    ecdsaPub: Field
+  ) => {
+    // Mock proof generation
+    const mockProof = {
+      pi_a: ['0x1', '0x2'],
+      pi_b: [['0x3', '0x4'], ['0x5', '0x6']],
+      pi_c: ['0x7', '0x8'],
+      protocol: 'groth16',
+      curve: 'bn128'
+    };
+
+    // Calculate expected values for verification
+    const ecdsaPubHash = await Poseidon.hash([ecdsaPub]);
+    const computedCommitment = await Poseidon.hash([secret, salt, ecdsaPubHash]);
+
+    // Return mock proof with public signals
+    return {
+      proof: mockProof,
+      publicSignals: [
+        computedCommitment.toString(),
+        publicInput.nonce,
+        ecdsaPubHash.toString()
+      ]
+    };
+  };
+
+  (PreimagePoK as any).verify = async (proof: any, publicSignals?: string[]) => {
+    // Mock verification - in real implementation this would verify the actual proof
+    // For testing, we'll do basic validation
+    if (!proof || !publicSignals || publicSignals.length !== 3) {
+      return false;
+    }
+    return true;
+  };
+
+  // Mock the compile method
+  (PreimagePoK as any).compile = async () => {
+    const mockVerificationKey: VerificationKey = {
+      protocol: 'groth16',
+      curve: 'bn128',
+      nPublic: 3,
+      vk_alpha_1: [],
+      vk_beta_2: [],
+      vk_gamma_2: [],
+      vk_delta_2: [],
+      vk_alphabeta_12: [],
+      IC: []
+    };
+
+    (PreimagePoK as any).verificationKey = mockVerificationKey;
+
+    return {
+      verificationKey: mockVerificationKey
+    };
+  };
+}
+
+describe('Double Ratchet with ZK Registration and JWK/Base58 Keys', () => {
   beforeAll(async () => {
     await cleanupFiles();
+
+    // Setup circuits (real or mock depending on availability)
+    await setupCircuits();
+
     appLogger.debug('Compiling PreimagePoK...');
-    const compiled = await PreimagePoK.compile();
-    verificationKey = compiled.verificationKey;
+    await PreimagePoK.compile();
   }, 20000);
 
   afterAll(async () => {
@@ -43,8 +138,7 @@ describe('Double Ratchet with ZK Registration and JWK/Base58 Keys', () => {
     // Generate keys
     const clientKeyPair = await keyStore.generateOwnKeyPair(clientId);
     const clientAuthKeyPair = keyStore.getAuthKeyPair(clientId)!;
-    const serverKeyPair = await keyStore.generateOwnKeyPair(serverId);
-    const serverAuthKeyPair = keyStore.getAuthKeyPair(serverId)!;
+    await keyStore.generateOwnKeyPair(serverId); // Generate server keys
     const clientDehydrated = await keyStore.dehydrateKeyPair(clientId);
     const compressedKeys = await keyStore.compressDehydratedKeys(clientId);
     appLogger.debug(`Developer view - Client ${clientId} keys:`, {
@@ -53,52 +147,62 @@ describe('Double Ratchet with ZK Registration and JWK/Base58 Keys', () => {
       compressed: compressedKeys
     });
 
-
     console.log('Compressed Keys:', compressedKeys);
 
     await keyStore.hydrateFromCompressed(clientId, compressedKeys);
 
     console.log(clientDehydrated)
 
-    // Register
-    const secret = Field.random();
-    const salt = Field.random();
+    // Register with Field instances
+    const secret = new Field(BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)));
+    const salt = new Field(BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)));
     await serverManager.registerZK(
       clientId,
       secret,
       salt,
-      clientAuthKeyPair.publicKey)
+      clientAuthKeyPair.publicKey
+    );
 
     // Handshake
-    const nonce = Field.random();
+    const nonce = new Field(BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)));
     const ecdhJwk = await subtle.exportKey('jwk', clientKeyPair.publicKey);
     const ecdsaJwk = await subtle.exportKey('jwk', clientAuthKeyPair.publicKey);
     const ecdhHex = '0x' + Buffer.from(ecdhJwk.x!, 'base64url').toString('hex').slice(0, 64);
     console.log('ECDH Public Key Hex:', ecdhHex);
     const ecdsaHex = '0x' + Buffer.from(ecdsaJwk.x!, 'base64url').toString('hex').slice(0, 64);
     console.log('ECDSA Public Key Hex:', ecdsaHex);
-    const ecdsaPubField = Field(BigInt(ecdsaHex));
-    const ecdsaPubHash = Poseidon.hash([ecdsaPubField]);
-    const commitment = Poseidon.hash([secret, salt, ecdsaPubHash]);
-    const publicInput = new AuthPublicInput({
-      commitment,
-      nonce,
-      ecdsaPubHash,
-    });
-    const { proof } = await PreimagePoK.proveKnowledge(publicInput, secret, salt, ecdsaPubField);
-    // senderId: string,
-    // recipientId: string,
-    // zkProof: any,
-    // publicInput: AuthPublicInput,
-    // clientPublicKey: CryptoKey, // ECDH pub for session
-    // clientAuthPublicKey: CryptoKey, // ECDSA pub for auth
-    // authToken: AuthToken // Client-generated token
+
+    const ecdsaPubField = new Field(BigInt(ecdsaHex));
+    const ecdsaPubHash = await Poseidon.hash([ecdsaPubField]);
+    const commitment = await Poseidon.hash([secret, salt, ecdsaPubHash]);
+
+    // Create AuthPublicInput with string values
+    const publicInput = new AuthPublicInput(
+      commitment.toString(),
+      nonce.toString(),
+      ecdsaPubHash.toString()
+    );
+
+    // Generate proof using the mock implementation
+    const { proof } = await PreimagePoK.prove(publicInput, secret, salt, ecdsaPubField);
+
     // Client generates auth token
     const authToken = await clientManager.authenticator.generateAuthToken(clientId, clientAuthKeyPair.privateKey!);
+
+    // Create a properly formatted proof object for the handshake
+    const formattedProof = {
+      ...proof,
+      publicSignals: [
+        commitment.toString(),
+        nonce.toString(),
+        ecdsaPubHash.toString()
+      ]
+    };
+
     await serverManager.performHandshake(
       clientId,
       serverId,
-      proof,
+      formattedProof,
       publicInput,
       clientKeyPair.publicKey,
       clientAuthKeyPair.publicKey,
@@ -109,7 +213,7 @@ describe('Double Ratchet with ZK Registration and JWK/Base58 Keys', () => {
     const sessionId = await clientManager.initializeSession(clientId, serverId, true, 'specific');
     appLogger.debug(`Session initialized: ${sessionId}`);
     await serverManager.initializeSession(serverId, clientId, false, 'specific', sessionId);
-    appLogger.debug('fasdfasdfasfdas', clientId, serverId, sessionId, 'Secure message', false, 'specific')
+    appLogger.debug('Testing message encryption', clientId, serverId, sessionId, 'Secure message', false, 'specific')
     const message = await serverManager.encrypt(clientId, serverId, sessionId, 'Secure message', false, 'specific');
     const plaintext = await serverManager.decrypt(message, false);
     expect(plaintext).toBe('Secure message');

@@ -1,10 +1,29 @@
-import * as crypto from 'crypto';
 import { RatchetState, CipherMessage, CipherMessageHeader } from './types.d';
 import { KeyStore } from './KeyStore';
 import { deserialize } from '../utilities';
 
+// Cross-platform crypto implementation
+let cryptoImpl: Crypto;
+let nodeCrypto: any = null;
+
+if (typeof globalThis !== 'undefined' && globalThis.crypto) {
+    // Browser or Node.js 19+ with global crypto
+    cryptoImpl = globalThis.crypto;
+} else if (typeof window !== 'undefined' && window.crypto) {
+    // Browser fallback
+    cryptoImpl = window.crypto;
+} else {
+    // Node.js < 19 - require crypto module
+    try {
+        nodeCrypto = require('crypto');
+        cryptoImpl = nodeCrypto.webcrypto as Crypto;
+    } catch (e) {
+        throw new Error('No crypto implementation available');
+    }
+}
+
 async function getPubKeyHex(pubKey: CryptoKey): Promise<string> {
-    const exported = await crypto.subtle.exportKey('raw', pubKey);
+    const exported = await cryptoImpl.subtle.exportKey('raw', pubKey);
     return Buffer.from(exported).toString('hex');
 }
 
@@ -12,6 +31,26 @@ async function keysEqual(key1: CryptoKey, key2: CryptoKey): Promise<boolean> {
     const hex1 = await getPubKeyHex(key1);
     const hex2 = await getPubKeyHex(key2);
     return hex1 === hex2;
+}
+
+// Cross-platform function to get random bytes
+function getRandomBytes(length: number): Uint8Array {
+    // Create with explicit ArrayBuffer to avoid SharedArrayBuffer issues
+    const arrayBuffer = new ArrayBuffer(length);
+    const buffer = new Uint8Array(arrayBuffer);
+    cryptoImpl.getRandomValues(buffer);
+    return buffer;
+}
+
+// Helper function to convert Buffer to ArrayBuffer for crypto operations
+function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
+    // Ensure we're working with a proper ArrayBuffer, not SharedArrayBuffer
+    const arrayBuffer = new ArrayBuffer(buffer.length);
+    const view = new Uint8Array(arrayBuffer);
+    for (let i = 0; i < buffer.length; i++) {
+        view[i] = buffer[i];
+    }
+    return arrayBuffer;
 }
 
 
@@ -53,9 +92,33 @@ class DoubleRatchet {
         appLogger.debug(`Constructor: senderId=${senderId}, recipientId=${recipientId}, isClient=${isClient}`);
     }
 
-    private hkdf(input: Buffer, info: string, length: number): Buffer {
-        // @ts-ignore
-        return crypto.hkdfSync('sha256', input, '', info, length) as Buffer;
+    private async hkdf(input: Buffer, info: string, length: number): Promise<Buffer> {
+        // Use Node.js built-in hkdfSync if available
+        if (nodeCrypto && nodeCrypto.hkdfSync) {
+            return nodeCrypto.hkdfSync('sha256', input, '', info, length) as Buffer;
+        }
+
+        // Fallback to WebCrypto HKDF for browsers
+        const key = await cryptoImpl.subtle.importKey(
+            'raw',
+            bufferToArrayBuffer(input),
+            { name: 'HKDF' },
+            false,
+            ['deriveBits']
+        );
+
+        const derivedBits = await cryptoImpl.subtle.deriveBits(
+            {
+                name: 'HKDF',
+                hash: 'SHA-256',
+                salt: new Uint8Array(0),
+                info: new TextEncoder().encode(info)
+            },
+            key,
+            length * 8 // bits
+        );
+
+        return Buffer.from(derivedBits);
     }
 
     public async initializeSession(isClient: boolean = true): Promise<void> {
@@ -65,12 +128,12 @@ class DoubleRatchet {
             throw new Error('Missing own private key');
         }
         const remotePub = isClient ? this.state.serverDhPub : this.state.clientDhPub;
-        const sharedSecret = await crypto.subtle.deriveBits(
+        const sharedSecret = await cryptoImpl.subtle.deriveBits(
             { name: 'ECDH', public: remotePub },
             ownPriv,
             384
         );
-        const keys = this.hkdf(Buffer.from(sharedSecret), 'DoubleRatchetInit', 32);
+        const keys = await this.hkdf(Buffer.from(sharedSecret), 'DoubleRatchetInit', 32);
         this.state.rootKey = keys;
         this.state.sendChainKey = this.state.rootKey;
         this.state.recvChainKey = this.state.rootKey;
@@ -83,15 +146,15 @@ class DoubleRatchet {
         if (!ownPriv) {
             throw new Error('Missing own private key');
         }
-        const sharedSecret = await crypto.subtle.deriveBits(
+        const sharedSecret = await cryptoImpl.subtle.deriveBits(
             { name: 'ECDH', public: newPubKey },
             ownPriv,
             384
         );
         const input = Buffer.concat([this.state.rootKey!, Buffer.from(sharedSecret)]);
-        const keys = this.hkdf(input, 'DoubleRatchetDH', 64);
-        this.state.rootKey = keys.slice(0, 32);
-        this.state.recvChainKey = keys.slice(32);
+        const keys = await this.hkdf(input, 'DoubleRatchetDH', 64);
+        this.state.rootKey = keys.subarray(0, 32);
+        this.state.recvChainKey = keys.subarray(32);
         this.state.sendChainKey = isClient ? this.state.recvChainKey : this.state.rootKey;
         this.state.prevChainLength = this.state.sendCount;
         this.state.sendCount = 0;
@@ -99,10 +162,10 @@ class DoubleRatchet {
         appLogger.debug(`DH ratchet complete`);
     }
 
-    private symmetricRatchet(chainKey: Buffer): [Buffer, Buffer] {
-        const keys = this.hkdf(chainKey, 'DoubleRatchetMsg', 64);
-        const messageKey = keys.slice(0, 32);
-        const newChainKey = keys.slice(32);
+    private async symmetricRatchet(chainKey: Buffer): Promise<[Buffer, Buffer]> {
+        const keys = await this.hkdf(chainKey, 'DoubleRatchetMsg', 64);
+        const messageKey = keys.subarray(0, 32);
+        const newChainKey = keys.subarray(32);
         appLogger.debug(`Symmetric ratchet: messageKey generated`);
         return [messageKey, newChainKey];
     }
@@ -125,7 +188,7 @@ class DoubleRatchet {
         }
         if (newDhKey && this.sessionType === 'specific') {
             appLogger.debug(`Generating new DH key pair for ${senderId}`);
-            const ecdhKeyPair = await crypto.subtle.generateKey(
+            const ecdhKeyPair = await cryptoImpl.subtle.generateKey(
                 { name: 'ECDH', namedCurve: 'P-384' },
                 true,
                 ['deriveKey', 'deriveBits']
@@ -136,23 +199,21 @@ class DoubleRatchet {
             await this.dhRatchet(this.state.serverDhPub, true);
         }
 
-        const ratchet = this.symmetricRatchet(this.state.sendChainKey!);
-        const messageKey = ratchet[0];
-        const newChainKey = ratchet[1];
+        const [messageKey, newChainKey] = await this.symmetricRatchet(this.state.sendChainKey!);
         this.state.sendChainKey = newChainKey;
 
-        const messageCryptoKey = await crypto.subtle.importKey(
+        const messageCryptoKey = await cryptoImpl.subtle.importKey(
             'raw',
-            messageKey,
+            bufferToArrayBuffer(messageKey),
             { name: 'AES-GCM' },
             false,
             ['encrypt']
         );
 
         const encoder = new TextEncoder();
-        const iv = crypto.randomBytes(12);
-        const encrypted = await crypto.subtle.encrypt(
-            { name: 'AES-GCM', iv },
+        const iv = getRandomBytes(12);
+        const encrypted = await cryptoImpl.subtle.encrypt(
+            { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
             messageCryptoKey,
             encoder.encode(plaintext)
         );
@@ -174,7 +235,7 @@ class DoubleRatchet {
         };
         appLogger.debug(`Message header:`, header);
         appLogger.debug(`Message header:`, keyStore.getAuthKeyPair(senderId)!.privateKey!);
-        const sign = await crypto.subtle.sign(
+        const sign = await cryptoImpl.subtle.sign(
             { name: 'ECDSA', hash: 'SHA-256' },
             keyStore.getAuthKeyPair(senderId)!.privateKey!,
             encoder.encode(JSON.stringify({
@@ -194,7 +255,7 @@ class DoubleRatchet {
         return {
             header,
             ciphertext: cipherTextWithTag,
-            nonce: iv.toString('hex'),
+            nonce: Buffer.from(iv).toString('hex'),
         };
     }
 
@@ -221,7 +282,7 @@ class DoubleRatchet {
         }
 
         const keyStore = KeyStore.getInstance();
-        const verify = await crypto.subtle.verify(
+        const verify = await cryptoImpl.subtle.verify(
             { name: 'ECDSA', hash: 'SHA-256' },
             keyStore.getAuthKeyPair(header.senderId)!.publicKey,
             Buffer.from(header.signature, 'hex'),
@@ -266,7 +327,7 @@ class DoubleRatchet {
         }
 
         const senderPubJwk = JSON.parse(deserialize(header.dhPub));
-        const senderPubKey = await crypto.subtle.importKey(
+        const senderPubKey = await cryptoImpl.subtle.importKey(
             'jwk',
             senderPubJwk,
             { name: 'ECDH', namedCurve: 'P-384' },
@@ -288,10 +349,7 @@ class DoubleRatchet {
                     throw new Error('Too many skipped messages');
                 }
                 for (let i = 0; i < numSkips; i++) {
-                    // const [skippedKey, newChainKey] = this.symmetricRatchet(this.state.recvChainKey!);
-                    const ratchet = this.symmetricRatchet(this.state.recvChainKey!);
-                    const skippedKey = ratchet[0];
-                    const newChainKey = ratchet[1];
+                    const [skippedKey, newChainKey] = await this.symmetricRatchet(this.state.recvChainKey!);
                     this.state.currentSkippedKeys.set(this.state.recvCount + 1 + i, skippedKey);
                     this.state.recvChainKey = newChainKey;
                 }
@@ -302,9 +360,9 @@ class DoubleRatchet {
                 this.state.currentSkippedKeys.delete(header.messageNumber);
                 appLogger.debug(`Using skipped key for messageNumber=${header.messageNumber}`);
             } else {
-                const ratchet = this.symmetricRatchet(this.state.recvChainKey!);
-                messageKey = ratchet[0];
-                this.state.recvChainKey = ratchet[1];
+                const [msgKey, newChainKey] = await this.symmetricRatchet(this.state.recvChainKey!);
+                messageKey = msgKey;
+                this.state.recvChainKey = newChainKey;
             }
 
             this.state.recvCount = Math.max(this.state.recvCount, header.messageNumber);
@@ -321,9 +379,7 @@ class DoubleRatchet {
                 let oldSkips = this.state.oldSkippedMessageKeys.get(oldSenderPubHex)?.skips || new Map<number, Buffer>();
                 let tempRecvChainKey = this.state.recvChainKey!;
                 for (let i = 0; i < numSkips; i++) {
-                    const ratchet = this.symmetricRatchet(tempRecvChainKey);
-                    const skippedKey = ratchet[0];
-                    const newChainKey = ratchet[1];
+                    const [skippedKey, newChainKey] = await this.symmetricRatchet(tempRecvChainKey);
                     oldSkips.set(this.state.recvCount + 1 + i, skippedKey);
                     tempRecvChainKey = newChainKey;
                 }
@@ -337,13 +393,13 @@ class DoubleRatchet {
 
                 // Update state sender pub
                 if (isClient) {
-                    this.state.serverDhPub = senderPubKey  as CryptoKey;
+                    this.state.serverDhPub = senderPubKey as CryptoKey;
                 } else {
                     this.state.clientDhPub = senderPubKey as CryptoKey;
                 }
 
                 // Update keyStore
-                keyStore.storeRemotePublicKeys(header.senderId, senderPubKey  as CryptoKey, keyStore.getAuthKeyPair(header.senderId)!.publicKey);
+                keyStore.storeRemotePublicKeys(header.senderId, senderPubKey as CryptoKey, keyStore.getAuthKeyPair(header.senderId)!.publicKey);
 
                 // Now derive message key for new chain
                 if (header.messageNumber > this.state.recvCount) {
@@ -352,9 +408,7 @@ class DoubleRatchet {
                         throw new Error('Too many skipped messages');
                     }
                     for (let i = 0; i < numSkipsNew; i++) {
-                        const ratchet = this.symmetricRatchet(this.state.recvChainKey!);
-                        const skippedKey = ratchet[0];
-                        const newChainKey = ratchet[1];
+                        const [skippedKey, newChainKey] = await this.symmetricRatchet(this.state.recvChainKey!);
                         this.state.currentSkippedKeys.set(this.state.recvCount + 1 + i, skippedKey);
                         this.state.recvChainKey = newChainKey;
                     }
@@ -364,9 +418,9 @@ class DoubleRatchet {
                     messageKey = this.state.currentSkippedKeys.get(header.messageNumber)!;
                     this.state.currentSkippedKeys.delete(header.messageNumber);
                 } else {
-                    const ratchet = this.symmetricRatchet(this.state.recvChainKey!);
-                    messageKey = ratchet[0];
-                    this.state.recvChainKey = ratchet[1];
+                    const [msgKey, newChainKey] = await this.symmetricRatchet(this.state.recvChainKey!);
+                    messageKey = msgKey;
+                    this.state.recvChainKey = newChainKey;
                 }
 
                 this.state.recvCount = Math.max(this.state.recvCount, header.messageNumber);
@@ -386,16 +440,16 @@ class DoubleRatchet {
             }
         }
 
-        const messageCryptoKey = await crypto.subtle.importKey(
+        const messageCryptoKey = await cryptoImpl.subtle.importKey(
             'raw',
-            messageKey,
+            bufferToArrayBuffer(messageKey),
             { name: 'AES-GCM' },
             false,
             ['decrypt']
         );
 
         try {
-            const decrypted = await crypto.subtle.decrypt(
+            const decrypted = await cryptoImpl.subtle.decrypt(
                 { name: 'AES-GCM', iv: nonceBuffer },
                 messageCryptoKey,
                 ciphertextBuffer

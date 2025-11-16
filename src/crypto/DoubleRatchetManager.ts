@@ -1,19 +1,13 @@
-import { AuthPublicInput } from './ZeroKnowledge';
+import { AuthPublicInput, Field, Poseidon } from './ZeroKnowledge';
 import { Authenticator, AuthToken } from './Authenticator';
 import { DoubleRatchet } from './DoubleRatchet';
 import { KeyStore } from './KeyStore';
-import { Field, Poseidon } from 'o1js';
 import { CipherMessage, RatchetState } from './types.d';
-import fs from 'fs/promises';
-import * as fsSync from 'fs';
 
-const _dir = './tests/v1/crypto/keys';
-if (!fsSync.existsSync(_dir)) {
-    fsSync.mkdirSync(_dir, { recursive: true });
-}
 
 class DoubleRatchetManager {
     private sessions: Map<string, DoubleRatchet> = new Map();
+    private sessionStates: Map<string, RatchetState> = new Map(); // In-memory storage for session states
     private keyStore: KeyStore;
     private _authenticator: Authenticator;
     private registeredUsers: Map<string, { commitment: Field; salt: Field }> = new Map();
@@ -44,58 +38,14 @@ class DoubleRatchetManager {
         console.log('ECDSA Public Key:', ecdsaPub);
         const ecdsaJwk = await crypto.subtle.exportKey('jwk', ecdsaPub);
         const ecdsaHex = Buffer.from(ecdsaJwk.x!, 'base64url').toString('hex').slice(0, 64);
-        const ecdsaPubField = Field(BigInt('0x' + ecdsaHex));
-        const ecdsaPubHash = Poseidon.hash([ecdsaPubField]);
-        const commitment = Poseidon.hash([secret, salt, ecdsaPubHash]);
+        const ecdsaPubField = new Field(BigInt('0x' + ecdsaHex));
+        const ecdsaPubHash = await Poseidon.hash([ecdsaPubField]);
+        const commitment = await Poseidon.hash([secret, salt, ecdsaPubHash]);
         console.log(`Commitment for ${clientId}:`, { commitment, salt });
         this.registeredUsers.set(clientId, { commitment, salt });
         appLogger.debug(`Registered ${clientId}: commitment=${commitment.toString()}, salt=${salt.toString()}`);
 
     }
-
-    // public async performHandshake(
-    //     senderId: string,
-    //     recipientId: string,
-    //     zkProof: any,
-    //     publicInput: AuthPublicInput,
-    //     clientPublicKey: CryptoKey,
-    //     clientAuthPublicKey: CryptoKey,
-    //     clientEcdhPrivateKey?: CryptoKey,
-    //     clientAuthPrivateKey?: CryptoKey
-    // ): Promise<void> {
-    //     await this._authenticator.initializeZK();
-
-    //     const userData = this.registeredUsers.get(senderId);
-    //     if (!userData) {
-    //         throw new Error(`No registered commitment for ${senderId}`);
-    //     }
-
-    //     const isZKValid = await this._authenticator.verifyZKProof(
-    //         zkProof,
-    //         publicInput,
-    //         userData.commitment,
-    //         clientAuthPublicKey
-    //     );
-    //     if (!isZKValid) {
-    //         throw new Error(`ZK handshake failed for ${senderId}`);
-    //     }
-
-    //     const authKeyPair = this.keyStore.getAuthKeyPair(senderId);
-    //     const token = await this._authenticator.generateAuthToken(senderId, clientAuthPrivateKey || authKeyPair!.privateKey!);
-    //     if (!await this._authenticator.verifyAuthToken(token, clientAuthPublicKey)) {
-    //         throw new Error(`Token verification failed for ${senderId}`);
-    //     }
-    //     const existing = this.keyStore.keys.get(senderId);
-    //     this.keyStore.keys.set(senderId, { privateKey: existing?.privateKey || null, publicKey: clientPublicKey });
-    //     this.keyStore.authKeys.set(senderId, { privateKey: null, publicKey: clientAuthPublicKey });
-    //     await this.keyStore.storeRemotePublicKeys(senderId, clientPublicKey, clientAuthPublicKey);
-    //     if (clientEcdhPrivateKey) {
-    //         this.keyStore.keys.set(senderId, { privateKey: clientEcdhPrivateKey, publicKey: clientPublicKey });
-    //     }
-    //     const serverKeyPair = this.keyStore.getKeyPair(recipientId)!;
-    //     const serverAuth = this.keyStore.getAuthKeyPair(recipientId)!;
-    //     await this.keyStore.storeRemotePublicKeys(recipientId, serverKeyPair.publicKey, serverAuth.publicKey);
-    // }
 
     public async performHandshake(
         senderId: string,
@@ -153,10 +103,10 @@ class DoubleRatchetManager {
         const recipientKeyPair = keyStore.getKeyPair(recipientId);
         if (!recipientKeyPair?.publicKey && sessionType === 'specific' && isClient) {
             // Generate auth token from client auth private key if provided
-            const authToken = clientAuthPrivateKey ? 
+            const authToken = clientAuthPrivateKey ?
                 await this._authenticator.generateAuthToken(senderId, clientAuthPrivateKey) :
                 await this._authenticator.generateAuthToken(senderId, this.keyStore.getAuthKeyPair(senderId)!.privateKey!);
-            
+
             await this.performHandshake(
                 senderId,
                 recipientId,
@@ -243,80 +193,17 @@ class DoubleRatchetManager {
     }
 
     private async saveState(sessionId: string, state: RatchetState): Promise<void> {
-        appLogger.debug(`Saving state: sessionId=${sessionId}`);
-        const stateJson = {
-            clientDhPriv: state.clientDhPriv ? await crypto.subtle.exportKey('jwk', state.clientDhPriv) : null,
-            clientDhPub: await crypto.subtle.exportKey('jwk', state.clientDhPub),
-            serverDhPriv: state.serverDhPriv ? await crypto.subtle.exportKey('jwk', state.serverDhPriv) : null,
-            serverDhPub: await crypto.subtle.exportKey('jwk', state.serverDhPub),
-            rootKey: state.rootKey ? state.rootKey.toString('hex') : null,
-            sendChainKey: state.sendChainKey ? state.sendChainKey.toString('hex') : null,
-            recvChainKey: state.recvChainKey ? state.recvChainKey.toString('hex') : null,
-            sendCount: state.sendCount,
-            recvCount: state.recvCount,
-            prevChainLength: state.prevChainLength,
-            currentSkippedKeys: Array.from(state.currentSkippedKeys.entries()).map(([num, key]) => ({
-                number: num,
-                key: key.toString('hex'),
-            })),
-            oldSkippedMessageKeys: Array.from(state.oldSkippedMessageKeys.entries()).map(([pubHex, { skips, created }]) => ({
-                pubHex,
-                created,
-                skips: Array.from(skips.entries()).map(([num, key]) => ({
-                    number: num,
-                    key: key.toString('hex'),
-                })),
-            })),
-        };
-        await fs.writeFile(`${_dir}/${this.id}-${sessionId}.json`, JSON.stringify(stateJson, null, 2));
+        appLogger.debug(`Saving state in memory: sessionId=${sessionId}`);
+        // Store the state directly in memory
+        // No need to serialize/deserialize as we're keeping it in memory
+        this.sessionStates.set(`${this.id}-${sessionId}`, state);
     }
 
     private async loadState(sessionId: string): Promise<RatchetState | null> {
-        appLogger.debug(`Loading state: sessionId=${sessionId}`);
-        try {
-            const data = await fs.readFile(`${_dir}/${this.id}-${sessionId}.json`, 'utf8');
-            const stateJson = JSON.parse(data);
-            const state: RatchetState = {
-                clientDhPriv: stateJson.clientDhPriv
-                    ? await crypto.subtle.importKey('jwk', stateJson.clientDhPriv, { name: 'ECDH', namedCurve: 'P-384' }, true, ['deriveKey', 'deriveBits'])
-                    : null,
-                clientDhPub: await crypto.subtle.importKey('jwk', stateJson.clientDhPub, { name: 'ECDH', namedCurve: 'P-384' }, true, []),
-                serverDhPriv: stateJson.serverDhPriv
-                    ? await crypto.subtle.importKey('jwk', stateJson.serverDhPriv, { name: 'ECDH', namedCurve: 'P-384' }, true, ['deriveKey', 'deriveBits'])
-                    : null,
-                serverDhPub: await crypto.subtle.importKey('jwk', stateJson.serverDhPub, { name: 'ECDH', namedCurve: 'P-384' }, true, []),
-                rootKey: stateJson.rootKey ? Buffer.from(stateJson.rootKey, 'hex') : null,
-                sendChainKey: stateJson.sendChainKey ? Buffer.from(stateJson.sendChainKey, 'hex') : null,
-                recvChainKey: stateJson.recvChainKey ? Buffer.from(stateJson.recvChainKey, 'hex') : null,
-                sendCount: stateJson.sendCount,
-                recvCount: stateJson.recvCount,
-                prevChainLength: stateJson.prevChainLength,
-                currentSkippedKeys: new Map(
-                    stateJson.currentSkippedKeys.map(({ number, key }: { number: number; key: string }) =>
-                        [number, Buffer.from(key, 'hex')]
-                    )
-                ),
-                oldSkippedMessageKeys: new Map(
-                    stateJson.oldSkippedMessageKeys.map(({ pubHex, created, skips }: { pubHex: string; created: number; skips: { number: number; key: string }[] }) =>
-                        [
-                            pubHex,
-                            {
-                                created,
-                                skips: new Map(
-                                    skips.map(({ number, key }) =>
-                                        [number, Buffer.from(key, 'hex')]
-                                    )
-                                ),
-                            },
-                        ]
-                    )
-                ),
-            };
-            return state;
-        } catch (error) {
-            appLogger.error(`Failed to load state for ${sessionId}: ${error instanceof Error ? error.message : 'unknown error'}`);
-            return null;
-        }
+        appLogger.debug(`Loading state from memory: sessionId=${sessionId}`);
+        // Retrieve the state directly from memory
+        const state = this.sessionStates.get(`${this.id}-${sessionId}`);
+        return state || null;
     }
 }
 

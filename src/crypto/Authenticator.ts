@@ -1,16 +1,14 @@
-import { PreimagePoK, AuthPublicInput } from './ZeroKnowledge';
-import { subtle } from 'crypto';
-import { verify, Field, Poseidon } from 'o1js';
+import { PreimagePoK, AuthPublicInput, Field, Poseidon, verify, VerificationKey } from './ZeroKnowledge';
 
 interface AuthToken {
-  peerId: string;
-  timestamp: number;
-  signature: string;
+    peerId: string;
+    timestamp: number;
+    signature: string;
 }
 
 class Authenticator {
     private trustedKeys: Map<string, CryptoKey> = new Map();
-    private zkVerificationKey: { data: string; hash: Field } | null = null;
+    private zkVerificationKey: VerificationKey | null = null;
 
     public async initializeZK(): Promise<void> {
         if (!this.zkVerificationKey) {
@@ -20,7 +18,7 @@ class Authenticator {
         }
     }
 
-    public getZKVerificationKey(): { data: string; hash: Field } | null {
+    public getZKVerificationKey(): VerificationKey | null {
         return this.zkVerificationKey;
     }
 
@@ -65,17 +63,33 @@ class Authenticator {
         if (!this.zkVerificationKey) {
             throw new Error('ZK verification key not initialized');
         }
-        const isValid = await verify(proof.toJSON(), this.zkVerificationKey);
+
+        // Convert publicInput to signals array for snarkjs
+        const publicSignals = publicInput.toPublicSignals();
+
+        // Verify the proof using snarkjs
+        const isValid = await verify('PreimagePoK', proof, { publicSignals });
         if (!isValid) {
             appLogger.debug('ZK proof verification failed');
             return false;
         }
-        const matchesCommitment = proof.publicInput.commitment.equals(storedCommitment).toBoolean();
-        const matchesNonce = proof.publicInput.nonce.equals(publicInput.nonce).toBoolean();
+
+        // Verify the commitment matches stored value
+        const proofCommitment = new Field(publicSignals[0]);
+        const matchesCommitment = proofCommitment.equals(storedCommitment);
+
+        // Verify nonce matches
+        const proofNonce = new Field(publicSignals[1]);
+        const expectedNonce = new Field(publicInput.nonce);
+        const matchesNonce = proofNonce.equals(expectedNonce);
+
+        // Verify ECDSA public key hash
         const ecdsaJwk = await crypto.subtle.exportKey('jwk', ecdsaPub);
         const ecdsaHex = Buffer.from(ecdsaJwk.x!, 'base64url').toString('hex').slice(0, 64);
-        const ecdsaPubField = Field(BigInt('0x' + ecdsaHex));
-        const matchesEcdsaPub = proof.publicInput.ecdsaPubHash.equals(Poseidon.hash([ecdsaPubField])).toBoolean();
+        const ecdsaPubField = new Field(BigInt('0x' + ecdsaHex));
+        const expectedEcdsaPubHash = await Poseidon.hash([ecdsaPubField]);
+        const proofEcdsaPubHash = new Field(publicSignals[2]);
+        const matchesEcdsaPub = proofEcdsaPubHash.equals(expectedEcdsaPubHash);
 
         appLogger.debug('ZK proof valid:', isValid, 'Commitment:', matchesCommitment, 'Nonce:', matchesNonce, 'ECDSA:', matchesEcdsaPub);
         return isValid && matchesCommitment && matchesNonce && matchesEcdsaPub;
