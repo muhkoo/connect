@@ -1,15 +1,13 @@
 import { webcrypto } from 'crypto';
 import { serialize, deserialize } from '../utilities';
-import * as pako from 'pako';
-
 interface KeyPair {
-    privateKey: CryptoKey  | null;
-    publicKey: CryptoKey ;
+    privateKey: CryptoKey | null;
+    publicKey: CryptoKey;
 }
 
 interface AuthKeyPair {
-    privateKey: CryptoKey  | null;
-    publicKey: CryptoKey ;
+    privateKey: CryptoKey | null;
+    publicKey: CryptoKey;
 }
 
 interface DehydratedKeys {
@@ -168,20 +166,15 @@ class KeyStore {
         return new Uint8Array(rawKey);
     }
 
-    // In dehydrateKeyPair or a new method
-    public async compressDehydratedKeys(id: string): Promise<string> {
-        const dehydrated = await this.dehydrateKeyPair(id);  // Your existing method
-        const combined = JSON.stringify(dehydrated);  // {ecdhPub: "...", ecdhPriv: "...", ecdsaPub: "...", ecdsaPriv: "..."}
-        const compressed = pako.gzip(combined);  // Use pako for gzip compression
-        return Buffer.from(compressed).toString('base64');  // Single base64 string
+    public async packDehydratedKeys(id: string): Promise<string> {
+        const dehydrated = await this.dehydrateKeyPair(id);
+        const combined = JSON.stringify(dehydrated);
+        return Buffer.from(combined).toString('base64');
     }
 
-    public async hydrateFromCompressed(id: string, masterKey: string): Promise<void> {
-        const compressedBytes = Buffer.from(masterKey, 'base64');
-        const decompressed = pako.ungzip(compressedBytes, { to: 'string' });
-        const dehydrated: DehydratedKeys = JSON.parse(decompressed);
-        console.log('Dehydrated keys:', dehydrated);
-        // Now call your existing hydrateKeyPair(id, dehydrated)
+    public async hydrateFromPacked(id: string, masterKey: string): Promise<void> {
+        const decoded = Buffer.from(masterKey, 'base64').toString('utf-8');
+        const dehydrated: DehydratedKeys = JSON.parse(decoded);
         await this.hydrateKeyPair(id, dehydrated);
     }
 }

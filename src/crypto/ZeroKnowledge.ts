@@ -1,20 +1,8 @@
-import { groth16 } from 'snarkjs';
-import * as crypto from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
+import { prove as groth16Prove, verify as groth16Verify } from '@zk-kit/groth16';
+import type { Groth16Proof, PublicSignals as Groth16PublicSignals } from '@zk-kit/groth16';
 
-// Type definitions for snarkjs
-export interface SnarkProof {
-    pi_a: string[];
-    pi_b: string[][];
-    pi_c: string[];
-    protocol: string;
-    curve: string;
-}
-
-export interface PublicSignals {
-    [key: string]: string;
-}
+// Re-export types from @zk-kit/groth16 with aliases
+export type SnarkProof = Groth16Proof;
 
 export interface VerificationKey {
     protocol: string;
@@ -108,13 +96,13 @@ async function loadPoseidon() {
         } catch (error) {
             console.warn('Failed to load circomlibjs poseidon, using fallback:', error);
             // Fallback implementation for testing - this is NOT cryptographically secure
-            poseidonModule = (inputs: any[]) => {
-                const hash = crypto.createHash('sha256');
-                for (const input of inputs) {
-                    hash.update(input.toString());
-                }
-                const result = hash.digest('hex');
-                return BigInt('0x' + result) % Field.FIELD_SIZE;
+            poseidonModule = async (inputs: any[]) => {
+                const data = inputs.map(i => i.toString()).join('');
+                const encoder = new TextEncoder();
+                const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(data));
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                return BigInt('0x' + hashHex) % Field.FIELD_SIZE;
             };
             poseidonF = {
                 toString: (val: any) => val.toString()
@@ -124,7 +112,7 @@ async function loadPoseidon() {
     return { poseidon: poseidonModule, F: poseidonF };
 }
 
-// Poseidon hash implementation for snarkjs compatibility
+// Poseidon hash implementation
 export class Poseidon {
     static async hash(inputs: Field[]): Promise<Field> {
         const { poseidon, F } = await loadPoseidon();
@@ -145,83 +133,38 @@ export function decodeFromHex(hexStr: string): Field {
     return Field.fromHex(hexStr);
 }
 
+// Circuit configuration - buffers only
+export interface CircuitBufferConfig {
+    wasm: Uint8Array;
+    zkey: Uint8Array;
+    verificationKey: VerificationKey;
+}
+
 // Circuit wrapper for HashKnowledge
 export class HashKnowledge {
-    private static wasmPath?: string;
-    private static zkeyPath?: string;
+    private static wasmBuffer?: Uint8Array;
+    private static zkeyBuffer?: Uint8Array;
     private static verificationKey?: VerificationKey;
 
-    static setCircuitPaths(wasmPath: string, zkeyPath: string) {
-        this.wasmPath = wasmPath;
-        this.zkeyPath = zkeyPath;
-    }
-
-    static async loadCircuitFiles(): Promise<void> {
-        if (!this.wasmPath || !this.zkeyPath) {
-            // Try default paths if not set
-            const basePath = path.join(process.cwd(), 'circuits', 'build');
-            this.wasmPath = path.join(basePath, 'hashKnowledge_js', 'hashKnowledge.wasm');
-            this.zkeyPath = path.join(basePath, 'hashKnowledge_0001.zkey');
-        }
-
-        // Files will be loaded when needed by snarkjs
+    static setCircuitBuffers(wasm: Uint8Array, zkey: Uint8Array, verificationKey: VerificationKey) {
+        this.wasmBuffer = wasm;
+        this.zkeyBuffer = zkey;
+        this.verificationKey = verificationKey;
     }
 
     static async compile(): Promise<ZkCompiled> {
-        // Load verification key from JSON file if it exists
-        const basePath = path.join(process.cwd(), 'circuits', 'build');
-        const vkPath = path.join(basePath, 'hashKnowledge_verification_key.json');
-
-        try {
-            if (typeof window === 'undefined' && fs.existsSync(vkPath)) {
-                // Node.js environment
-                const vkData = fs.readFileSync(vkPath, 'utf-8');
-                this.verificationKey = JSON.parse(vkData);
-            } else {
-                // Browser or file doesn't exist - use default
-                this.verificationKey = {
-                    protocol: 'groth16',
-                    curve: 'bn128',
-                    nPublic: 1,
-                    vk_alpha_1: [],
-                    vk_beta_2: [],
-                    vk_gamma_2: [],
-                    vk_delta_2: [],
-                    vk_alphabeta_12: [],
-                    IC: []
-                };
-            }
-        } catch (error) {
-            console.error('Failed to load verification key:', error);
-            // Use default verification key
-            this.verificationKey = {
-                protocol: 'groth16',
-                curve: 'bn128',
-                nPublic: 1,
-                vk_alpha_1: [],
-                vk_beta_2: [],
-                vk_gamma_2: [],
-                vk_delta_2: [],
-                vk_alphabeta_12: [],
-                IC: []
-            };
+        if (!this.verificationKey) {
+            throw new Error('Circuit not initialized. Call setCircuitBuffers() first.');
         }
-
-        return {
-            verificationKey: this.verificationKey!
-        };
+        return { verificationKey: this.verificationKey };
     }
 
     static async prove(secret: Field): Promise<{ proof: SnarkProof; publicSignals: string[] }> {
-        // Load circuit files if not already loaded
-        await this.loadCircuitFiles();
-
-        if (!this.wasmPath || !this.zkeyPath) {
-            throw new Error('Circuit paths not set. Call setCircuitPaths or place circuits in default location.');
+        if (!this.wasmBuffer || !this.zkeyBuffer) {
+            throw new Error('Circuit not initialized. Call setCircuitBuffers() first.');
         }
 
         // Calculate the hash (this should match what the circuit computes)
-        // Note: The hash is computed internally by the circuit
         await Poseidon.hash([secret]);
 
         // Create input for the circuit
@@ -229,26 +172,25 @@ export class HashKnowledge {
             secret: secret.toString()
         };
 
-        // Generate the proof using snarkjs
-        const { proof, publicSignals } = await groth16.fullProve(
+        // Generate the proof using @zk-kit/groth16
+        const { proof, publicSignals } = await groth16Prove(
             input,
-            this.wasmPath,
-            this.zkeyPath
+            this.wasmBuffer,
+            this.zkeyBuffer
         );
 
-        return { proof: proof as SnarkProof, publicSignals };
+        return { proof, publicSignals: publicSignals as string[] };
     }
 
     static async verify(proof: SnarkProof, publicSignals?: string[]): Promise<boolean> {
         if (!this.verificationKey) {
-            throw new Error('Verification key not loaded. Call compile() first.');
+            throw new Error('Circuit not initialized. Call setCircuitBuffers() first.');
         }
 
         try {
-            const result = await groth16.verify(
+            const result = await groth16Verify(
                 this.verificationKey,
-                publicSignals || [],
-                proof
+                { proof, publicSignals: (publicSignals || []) as Groth16PublicSignals }
             );
             return result;
         } catch (error) {
@@ -260,69 +202,21 @@ export class HashKnowledge {
 
 // Circuit wrapper for PreimagePoK (Proof of Knowledge)
 export class PreimagePoK {
-    private static wasmPath?: string;
-    private static zkeyPath?: string;
+    private static wasmBuffer?: Uint8Array;
+    private static zkeyBuffer?: Uint8Array;
     private static verificationKey?: VerificationKey;
 
-    static setCircuitPaths(wasmPath: string, zkeyPath: string) {
-        this.wasmPath = wasmPath;
-        this.zkeyPath = zkeyPath;
-    }
-
-    static async loadCircuitFiles(): Promise<void> {
-        if (!this.wasmPath || !this.zkeyPath) {
-            // Try default paths if not set
-            const basePath = path.join(process.cwd(), 'circuits', 'build');
-            this.wasmPath = path.join(basePath, 'preimagePoK_js', 'preimagePoK.wasm');
-            this.zkeyPath = path.join(basePath, 'preimagePoK_0001.zkey');
-        }
-
-        // Files will be loaded when needed by snarkjs
+    static setCircuitBuffers(wasm: Uint8Array, zkey: Uint8Array, verificationKey: VerificationKey) {
+        this.wasmBuffer = wasm;
+        this.zkeyBuffer = zkey;
+        this.verificationKey = verificationKey;
     }
 
     static async compile(): Promise<ZkCompiled> {
-        // Load verification key from JSON file if it exists
-        const basePath = path.join(process.cwd(), 'circuits', 'build');
-        const vkPath = path.join(basePath, 'preimagePoK_verification_key.json');
-
-        try {
-            if (typeof window === 'undefined' && fs.existsSync(vkPath)) {
-                // Node.js environment
-                const vkData = fs.readFileSync(vkPath, 'utf-8');
-                this.verificationKey = JSON.parse(vkData);
-            } else {
-                // Browser or file doesn't exist - use default
-                this.verificationKey = {
-                    protocol: 'groth16',
-                    curve: 'bn128',
-                    nPublic: 3, // commitment, nonce, ecdsaPubHash
-                    vk_alpha_1: [],
-                    vk_beta_2: [],
-                    vk_gamma_2: [],
-                    vk_delta_2: [],
-                    vk_alphabeta_12: [],
-                    IC: []
-                };
-            }
-        } catch (error) {
-            console.error('Failed to load verification key:', error);
-            // Use default verification key
-            this.verificationKey = {
-                protocol: 'groth16',
-                curve: 'bn128',
-                nPublic: 3,
-                vk_alpha_1: [],
-                vk_beta_2: [],
-                vk_gamma_2: [],
-                vk_delta_2: [],
-                vk_alphabeta_12: [],
-                IC: []
-            };
+        if (!this.verificationKey) {
+            throw new Error('Circuit not initialized. Call setCircuitBuffers() first.');
         }
-
-        return {
-            verificationKey: this.verificationKey!
-        };
+        return { verificationKey: this.verificationKey };
     }
 
     static async prove(
@@ -331,11 +225,8 @@ export class PreimagePoK {
         salt: Field,
         ecdsaPub: Field
     ): Promise<{ proof: SnarkProof; publicSignals: string[] }> {
-        // Load circuit files if not already loaded
-        await this.loadCircuitFiles();
-
-        if (!this.wasmPath || !this.zkeyPath) {
-            throw new Error('Circuit paths not set. Call setCircuitPaths or place circuits in default location.');
+        if (!this.wasmBuffer || !this.zkeyBuffer) {
+            throw new Error('Circuit not initialized. Call setCircuitBuffers() first.');
         }
 
         // Create input for the circuit
@@ -350,26 +241,25 @@ export class PreimagePoK {
             ecdsaPub: ecdsaPub.toString()
         };
 
-        // Generate the proof using snarkjs
-        const { proof, publicSignals } = await groth16.fullProve(
+        // Generate the proof using @zk-kit/groth16
+        const { proof, publicSignals } = await groth16Prove(
             input,
-            this.wasmPath,
-            this.zkeyPath
+            this.wasmBuffer,
+            this.zkeyBuffer
         );
 
-        return { proof: proof as SnarkProof, publicSignals };
+        return { proof, publicSignals: publicSignals as string[] };
     }
 
     static async verify(proof: SnarkProof, publicSignals?: string[]): Promise<boolean> {
         if (!this.verificationKey) {
-            throw new Error('Verification key not loaded. Call compile() first.');
+            throw new Error('Circuit not initialized. Call setCircuitBuffers() first.');
         }
 
         try {
-            const result = await groth16.verify(
+            const result = await groth16Verify(
                 this.verificationKey,
-                publicSignals || [],
-                proof
+                { proof, publicSignals: (publicSignals || []) as Groth16PublicSignals }
             );
             return result;
         } catch (error) {
@@ -462,21 +352,23 @@ export async function quickVerify(
     }
 }
 
-// Function to initialize circuit paths
+// Function to initialize circuits with buffers
 export function initializeCircuits(config: {
-    hashKnowledge?: { wasmPath: string; zkeyPath: string };
-    preimagePoK?: { wasmPath: string; zkeyPath: string };
+    hashKnowledge?: CircuitBufferConfig;
+    preimagePoK?: CircuitBufferConfig;
 }) {
     if (config.hashKnowledge) {
-        HashKnowledge.setCircuitPaths(
-            config.hashKnowledge.wasmPath,
-            config.hashKnowledge.zkeyPath
+        HashKnowledge.setCircuitBuffers(
+            config.hashKnowledge.wasm,
+            config.hashKnowledge.zkey,
+            config.hashKnowledge.verificationKey
         );
     }
     if (config.preimagePoK) {
-        PreimagePoK.setCircuitPaths(
-            config.preimagePoK.wasmPath,
-            config.preimagePoK.zkeyPath
+        PreimagePoK.setCircuitBuffers(
+            config.preimagePoK.wasm,
+            config.preimagePoK.zkey,
+            config.preimagePoK.verificationKey
         );
     }
 }

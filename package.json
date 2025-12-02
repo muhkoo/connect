@@ -13,6 +13,7 @@
   "exports": {
     ".": {
       "types": "./dist/connect.d.ts",
+      "workerd": "./dist/workers/index.js",
       "browser": "./dist/browser/index.js",
       "default": "./dist/server/index.js"
     },
@@ -46,8 +47,10 @@
     "build:typedoc": "rm -rf docs && typedoc",
     "build:docs": "rm -rf docs && typedoc",
     "clean": "rm -rf dist && rm -rf coverage && rm -rf node_modules && rm -rf yarn.lock",
-    "build": "rm -rf dist && yarn rollup:browser && yarn rollup:server",
-    "dev": "concurrently --names \"SERVER,BROWSER\" --prefix-colors \"blue,magenta\" \"yarn rollup:server:dev\" \"yarn rollup:browser:dev\"",
+    "build": "rm -rf dist && yarn rollup:browser && yarn rollup:server && yarn rollup:workers",
+    "rollup:workers": "BUILD_ENV=workers rollup -c",
+    "rollup:workers:dev": "BUILD_ENV=workers rollup -c --watch",
+    "dev": "concurrently --names \"SERVER,BROWSER,WORKERD\" --prefix-colors \"blue,magenta,yellow\" \"yarn rollup:server:dev\" \"yarn rollup:browser:dev\" \"yarn rollup:workers:dev\" ",
     "rollup:server:dev": "BUILD_ENV=server rollup -c --watch",
     "rollup:browser:dev": "BUILD_ENV=browser rollup -c --watch",
     "rollup:server": "BUILD_ENV=server rollup -c",
@@ -65,14 +68,14 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@zk-kit/groth16": "^0.5.0",
     "chalk": "^5.4.1",
-    "circomlibjs": "^0.1.7",
-    "o1js": "^2.10.0",
-    "pako": "^2.1.0",
     "semver": "^7.7.3",
-    "snarkjs": "^0.7.5",
     "uuid": "^13.0.0",
     "wasm-reed-solomon-erasure": "^0.2.2"
+  },
+  "optionalDependencies": {
+    "circomlibjs": "^0.1.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
@@ -81,11 +84,10 @@
     "@rollup/plugin-json": "^6.1.0",
     "@rollup/plugin-node-resolve": "^16.0.0",
     "@rollup/plugin-replace": "^6.0.2",
+    "@rollup/plugin-wasm": "^6.2.2",
     "@types/circomlibjs": "^0.1.6",
     "@types/node": "^24.9.1",
-    "@types/pako": "^2.0.4",
     "@types/semver": "^7.7.1",
-    "@types/snarkjs": "^0.7.9",
     "@typescript-eslint/parser": "^8.26.1",
     "circomlib": "^2.0.5",
     "concurrently": "^9.1.2",
@@ -101,6 +103,7 @@
     "rollup-plugin-node-polyfills": "^0.2.1",
     "rollup-plugin-polyfill-node": "^0.13.0",
     "rollup-plugin-typescript2": "^0.36.0",
+    "rollup-plugin-wasm": "^3.0.0",
     "tsx": "^4.19.2",
     "typedoc": "^0.28.0",
     "typedoc-plugin-markdown": "^4.5.0",
