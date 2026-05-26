@@ -37,17 +37,16 @@ Muhkoo Connect is a client SDK for building distributed edge-based applications.
 # Install dependencies
 yarn install
 
-# Development mode with watch (builds both server and browser versions)
+# Development mode with watch (builds server, browser, and workers in parallel)
 yarn dev
 
-# Production build (creates dist/server and dist/browser)
+# Production build (creates dist/server, dist/browser, and dist/workers)
 yarn build
 
-# Build server version only
-yarn rollup:server
-
-# Build browser version only
-yarn rollup:browser
+# Build a single target
+yarn rollup:server     # Node.js
+yarn rollup:browser    # Browser
+yarn rollup:workers    # Cloudflare Workers
 ```
 
 ### Testing
@@ -87,25 +86,28 @@ yarn watch:docs
 
 ### Source Code Organization
 - `/src/core/` - Core client implementation (Client.ts is main entry)
-- `/src/crypto/` - Cryptographic utilities (ECDH, Double Ratchet, Zero Knowledge, Key Store)
+- `/src/crypto/` - Cryptographic utilities (ECDH, Double Ratchet, ZeroKnowledge with snarkjs-based proof generation, Key Store)
 - `/src/messaging/` - Message and packet handling with serialization
 - `/src/network/` - Network layer implementation
 - `/src/storage/` - Storage abstraction and encoding (Reed-Solomon)
 - `/src/events/` - Event emitter and handling
 - `/src/utilities/` - Helper functions, decorators, and logging
-- `/src/types/` - TypeScript type definitions
-- `/src/browser/` - Browser-specific implementations
-- `/src/server/` - Node.js-specific implementations
+- `/src/types/` - TypeScript type definitions (includes `zk.ts` with shared Groth16 types and `PREIMAGE_POK_VERIFICATION_KEY`)
+- `/src/browser/` - Browser-specific entry
+- `/src/server/` - Node.js-specific entry
+- `/src/workers/` - Cloudflare-Workers-compatible entry. Contains `groth16-verifier.ts` (drives `bn128.wasm` directly, no snarkjs/ffjavascript dependency) and `wasm/bn128.wasm` (~86KB BN128 curve module). The verifier is re-exported from the browser and server entries too, so it's a universal Groth16 verification primitive
 
 ### Build Configuration
 - **TypeScript**: ESNext target with strict mode enabled
-- **Rollup**: Separate builds for server (Node.js) and browser environments
-- **Exports**: Multiple entry points for different modules (crypto, types, api, events, messaging, utilities)
+- **Rollup**: Three separate builds — browser (`dist/browser/`), Node.js server (`dist/server/`), and Cloudflare Workers (`dist/workers/`). The build target is selected by `BUILD_ENV={browser,server,workers}`
+- **`@rollup/plugin-wasm`** is enabled in all three builds with `targetEnv: 'auto-inline'` — `.wasm` imports are base64-inlined so the Groth16 verifier's bundled-WASM fallback works in any runtime
+- **Exports**: Multiple entry points for different modules (crypto, types, api, events, messaging, utilities). The `.` export uses conditional resolution (`workerd` / `browser` / `default`) to pick the right bundle
 
 ## Important Technical Details
 
 ### Crypto Implementation
-- Uses o1js library for zero-knowledge proofs
+- **Zero-knowledge proofs**: snarkjs (via `@zk-kit/groth16`) for proof generation in the browser/server builds (see `src/crypto/ZeroKnowledge.ts` — `HashKnowledge`, `PreimagePoK`). Proof generation is NOT possible in the CF Workers build because snarkjs/ffjavascript depend on `URL.createObjectURL` and worker_threads, which CF Workers don't expose
+- **Edge ZK verification**: `src/workers/groth16-verifier.ts` drives `bn128.wasm` directly to verify Groth16 proofs. Workers-safe (no snarkjs/ffjavascript). Available from all three builds; under `workerd` consumers get the same code path as Node/browser
 - Implements Double Ratchet algorithm for end-to-end encryption
 - ECDH key exchange for secure session establishment
 - ED25519 keypairs for identity

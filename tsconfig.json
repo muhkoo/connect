@@ -3,8 +3,7 @@
     "baseUrl": ".",
     "outDir": "./lib",
     "paths": {
-      "*": ["node_modules/*"],
-      "ffjavascript": ["src/workers/shims/ffjavascript-workers.ts"]
+      "*": ["node_modules/*"]
     },
     "resolveJsonModule": false,
     "allowJs": true,
