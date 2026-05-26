@@ -1,20 +1,12 @@
 import { prove as groth16Prove, verify as groth16Verify } from '@zk-kit/groth16';
-import type { Groth16Proof, PublicSignals as Groth16PublicSignals } from '@zk-kit/groth16';
+import type { PublicSignals as Groth16PublicSignals } from '@zk-kit/groth16';
+// Shared ZK types live in src/types/zk so the workers build (which can't pull
+// in snarkjs) sees the same VerificationKey / Groth16Proof shapes used here.
+import type { Groth16Proof, VerificationKey } from '../types/zk';
 
-// Re-export types from @zk-kit/groth16 with aliases
+// Re-export so existing consumers of crypto/* keep working
 export type SnarkProof = Groth16Proof;
-
-export interface VerificationKey {
-    protocol: string;
-    curve: string;
-    nPublic: number;
-    vk_alpha_1: string[];
-    vk_beta_2: string[][];
-    vk_gamma_2: string[][];
-    vk_delta_2: string[][];
-    vk_alphabeta_12: string[][][];
-    IC: string[][];
-}
+export type { VerificationKey } from '../types/zk';
 
 export interface ZkCompiled {
     verificationKey: VerificationKey;
@@ -188,9 +180,11 @@ export class HashKnowledge {
         }
 
         try {
+            // Cast to satisfy @zk-kit/groth16's stricter Groth16Proof type
+            // (protocol/curve required there, optional in our shared type).
             const result = await groth16Verify(
                 this.verificationKey,
-                { proof, publicSignals: (publicSignals || []) as Groth16PublicSignals }
+                { proof: proof as unknown as Parameters<typeof groth16Verify>[1]["proof"], publicSignals: (publicSignals || []) as Groth16PublicSignals }
             );
             return result;
         } catch (error) {
@@ -257,9 +251,11 @@ export class PreimagePoK {
         }
 
         try {
+            // Cast to satisfy @zk-kit/groth16's stricter Groth16Proof type
+            // (protocol/curve required there, optional in our shared type).
             const result = await groth16Verify(
                 this.verificationKey,
-                { proof, publicSignals: (publicSignals || []) as Groth16PublicSignals }
+                { proof: proof as unknown as Parameters<typeof groth16Verify>[1]["proof"], publicSignals: (publicSignals || []) as Groth16PublicSignals }
             );
             return result;
         } catch (error) {

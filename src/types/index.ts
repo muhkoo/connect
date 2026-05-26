@@ -7,3 +7,4 @@ export * from './crypto';
 export * from './identity';
 export * from './permissions';
 export * from './messaging';
+export * from './zk';

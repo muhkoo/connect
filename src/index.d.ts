@@ -5,6 +5,11 @@ export * from './messaging';
 export * from './types';
 export * from './utilities';
 export * from './core';
+// Workers-only Groth16 verifier. Types are exposed in all builds so consumers
+// (e.g. accelerator) see them, but the JS implementation is only present in
+// dist/workers/index.js. Calling verifyGroth16/initBn128Wasm from the browser
+// or server bundles will fail at runtime — they only work under workerd.
+export * from './workers/groth16-verifier';
 
 export interface Attribute {
     dataType: string;

@@ -13,7 +13,7 @@ export * from "../crypto/KeyStore";
 export * from "../crypto/DoubleRatchet";
 export * from "../events";
 
-// Re-export @zk-kit/groth16 verify for Workers-compatible ZK proof verification
-// Note: Only verification is supported in Workers (no proof generation)
-// The rollup config patches ffjavascript to avoid URL.createObjectURL
-export { verify as verifyGroth16Proof, buildBn128 } from "@zk-kit/groth16";
+// Workers-compatible Groth16 verification. Drives bn128.wasm directly; does
+// not pull in @zk-kit/groth16, snarkjs, or ffjavascript (all incompatible with
+// CF Workers — see src/workers/groth16-verifier.ts).
+export * from "./groth16-verifier";

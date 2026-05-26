@@ -21,9 +21,41 @@ const input = isWorkers
     ? "src/browser/index.ts"
     : "src/server/index.ts";
 
+// Redirect ffjavascript/src/random.js (which statically imports Node's `crypto`)
+// to a Web-Crypto-backed shim. The `@rollup/plugin-alias` `find` field matches
+// against the import specifier (which is `./random.js` here, not the resolved
+// path), so we need importer-context — hence a small custom plugin.
+const ffjavascriptRandomShim = path.resolve(
+  __dirname,
+  "src/workers/shims/ffjavascript-random.ts",
+);
+const ffjavascriptRandomRedirect = isWorkers && {
+  name: "ffjavascript-random-redirect",
+  resolveId(source, importer) {
+    if (
+      source === "./random.js" &&
+      importer &&
+      /[/\\]ffjavascript[/\\]src[/\\][^/\\]+\.js$/.test(importer)
+    ) {
+      return ffjavascriptRandomShim;
+    }
+    return null;
+  },
+};
+
+// For library builds (browser/server) externalize every bare specifier — npm
+// packages and Node builtins alike — so the consumer's bundler resolves them.
+// Rollup was already doing this implicitly (hence the "unresolved dependencies"
+// warnings); declaring it explicitly just silences the noise. The Workers build
+// must bundle everything, so externals stay disabled there.
+const externalFn = isWorkers
+  ? undefined
+  : (id) => !id.startsWith(".") && !path.isAbsolute(id);
+
 // JS build config
 const jsConfig = {
   input,
+  external: externalFn,
   output: [
     !isBrowser && !isWorkers && {
       file: "dist/server/index.js",
@@ -43,7 +75,7 @@ const jsConfig = {
     },
   ].filter(Boolean),
   plugins: [
-
+    ffjavascriptRandomRedirect,
     alias({
       entries: [
 
@@ -71,9 +103,10 @@ const jsConfig = {
       preferBuiltins: false,
     }),
     isWorkers && commonjs(),
-    // For Workers: handle .wasm imports for pre-compiled modules
-    isWorkers && wasm({
-      targetEnv: 'auto-inline', // Inlines WASM as base64 for Workers
+    // .wasm imports are auto-inlined as base64 in every build so the Groth16
+    // verifier's bundled-WASM fallback works in Node, browser, and Workers.
+    wasm({
+      targetEnv: 'auto-inline',
     }),
     replace({
       "process.env.npm_package_version": JSON.stringify(packageJson.version),
