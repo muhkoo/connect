@@ -3,6 +3,7 @@ import { Authenticator, AuthToken } from './Authenticator';
 import { DoubleRatchet } from './DoubleRatchet';
 import { KeyStore } from './KeyStore';
 import { CipherMessage, RatchetState } from './types.d';
+import { toHex, fromBase64Url } from '../utilities';
 
 
 class DoubleRatchetManager {
@@ -37,7 +38,7 @@ class DoubleRatchetManager {
         console.log(`Registering ZK for ${clientId}...`);
         console.log('ECDSA Public Key:', ecdsaPub);
         const ecdsaJwk = await crypto.subtle.exportKey('jwk', ecdsaPub);
-        const ecdsaHex = Buffer.from(ecdsaJwk.x!, 'base64url').toString('hex').slice(0, 64);
+        const ecdsaHex = toHex(fromBase64Url(ecdsaJwk.x!)).slice(0, 64);
         const ecdsaPubField = new Field(BigInt('0x' + ecdsaHex));
         const ecdsaPubHash = await Poseidon.hash([ecdsaPubField]);
         const commitment = await Poseidon.hash([secret, salt, ecdsaPubHash]);
@@ -172,7 +173,7 @@ class DoubleRatchetManager {
         return plaintext;
     }
 
-    public async getSessionSharedSecret(sessionId: string): Promise<Buffer | null> {
+    public async getSessionSharedSecret(sessionId: string): Promise<Uint8Array | null> {
         let ratchet = this.sessions.get(sessionId);
         if (!ratchet) {
             const state = await this.loadState(sessionId);

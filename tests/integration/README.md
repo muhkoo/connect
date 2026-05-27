@@ -1,254 +1,86 @@
 # Integration Tests
 
-Integration tests for Connect SDK with Accelerator infrastructure.
+Integration tests intended to exercise Connect against a real running
+Accelerator. **The test files in this directory are presently stale** — they
+import from paths that no longer exist in `src/` (`src/api/session`,
+`src/api/client`, `src/crypto/ecdh`). The companion `SETUP.md` describes the
+original design.
 
-## Overview
+Treat this directory as historical until it's rewritten against the current
+surface (`BroadcastChannel`, `EncryptedSession`, `PersonalSpaceClient`,
+`verifyGroth16`).
 
-These tests verify the full end-to-end integration between the Connect client SDK and the Accelerator server, including:
+## What was originally intended
 
-- **ECDH Handshake**: Key exchange and connection establishment
-- **Session Management**: Session creation, encryption/decryption, lifecycle
-- **API Client**: Full API operations including messages, storage, and permissions
+These tests were supposed to verify:
 
-## Requirements
+- ECDH handshake between the SDK and the accelerator's `/api/handshake`
+  endpoint
+- `SessionManager` lifecycle: create, complete, encrypt, decrypt, refresh,
+  expire, clear
+- `ApiClient` operations: messages, storage, permissions
 
-- **Accelerator** must be available in the parent directory: `../accelerator`
-- **Node.js** >= 20.0.0
-- **Yarn** 1.22.22+
+None of those classes / endpoints exist today. The actual chat flow is:
 
-## Understanding Integration vs Unit Tests
+- Client opens a WebSocket to a room DO and exchanges Double Ratchet
+  handshakes peer-to-peer (`BroadcastChannel`).
+- Personal storage goes through `PersonalSpaceClient` →
+  `/api/personal/:commitment/{challenge,kv,list}` (ZK-gated, not the old
+  ECDH handshake).
+- Groth16 verification on the worker uses `verifyGroth16` from this SDK.
 
-**Unit Tests** (`tests/api/`, `tests/crypto/`, etc.):
-- Use **mocked** dependencies (fetch, etc.)
-- Test Connect SDK logic in isolation
-- Fast, no external services needed
-- Run with: `yarn test:unit`
+## Files in this directory
 
-**Integration Tests** (`tests/integration/`):
-- Hit the **real** Accelerator server
-- Test full end-to-end Connect ↔ Accelerator communication
-- Slower, requires Accelerator to be running
-- Run with: `yarn test:integration`
+| File | Status |
+| --- | --- |
+| `ecdh-handshake.integration.test.ts` | Stale; targets a removed `/api/handshake` flow |
+| `session-management.integration.test.ts` | Stale; imports `SessionManager` from `../../src/api/session` (does not exist) |
+| `api-client.integration.test.ts` | Stale; imports `ApiClient` from `../../src/api/client` (does not exist) |
+| `manual-test.ts` | Stale; same as above |
+| `helpers/accelerator-server.ts` | Still relevant — wraps `wrangler dev` startup/teardown |
 
-## Running Integration Tests
-
-### Manual Testing (Recommended First)
-
-Start Accelerator manually to see what's happening:
+## Running
 
 ```bash
-# Terminal 1: Start Accelerator
+yarn test:integration
+# TEST_TYPE=integration vitest --run tests/integration
+```
+
+The above command will currently fail at module-resolution time. To get
+working integration tests, the files need to be rewritten against
+`BroadcastChannel` and `PersonalSpaceClient`. The helper
+(`helpers/accelerator-server.ts`) and the auto-detect-running-server pattern
+can be reused.
+
+## Auto-detecting a running accelerator
+
+The helper checks for an already-running server on the configured port
+(default 8787) and reuses it if found. Recommended dev workflow:
+
+```bash
+# Terminal 1
 cd ../accelerator
 yarn dev
 
-# Wait for: "Ready on http://localhost:8787"
-
-# Terminal 2: Run manual test
-cd ../connect
-npx tsx tests/integration/manual-test.ts
+# Terminal 2
+cd connect
+yarn test:integration   # will detect the running server and skip startup
 ```
 
-This will test the ECDH handshake and show you exactly what's happening.
+This is faster, surfaces Accelerator logs in the dev terminal, and keeps the
+server warm across runs.
 
-### Automatic Server Management
+## Next steps (rewrite checklist)
 
-Integration tests can automatically start and stop the Accelerator dev server:
+When somebody picks these up:
 
-```bash
-# Run all integration tests
-yarn test:integration
-
-# Run specific integration test file
-yarn vitest --run ecdh-handshake.integration.test.ts
-
-# Run with verbose output (see Accelerator logs)
-yarn vitest --run --reporter=verbose
-```
-
-The `AcceleratorServer` helper in `helpers/accelerator-server.ts` will:
-1. Start the Accelerator dev server on port 8787
-2. Wait for the server to be ready
-3. Run the tests
-4. Stop the server when tests complete
-
-### Manual Server Management (Recommended)
-
-**The tests will automatically detect if Accelerator is already running!**
-
-If you start Accelerator manually, the tests will use your running server instead of starting a new one:
-
-```bash
-# Terminal 1: Start Accelerator
-cd ../accelerator
-yarn dev
-
-# Wait for: "Ready on http://localhost:8787"
-
-# Terminal 2: Run integration tests
-cd ../connect
-yarn test:integration
-
-# Output will show:
-# ✓ Found Accelerator already running on port 8787
-#   Using existing server for tests
-```
-
-**Benefits:**
-- See Accelerator logs in real-time
-- Faster test runs (no server startup delay)
-- Keep server running between test runs
-- Easier debugging
-
-## Test Structure
-
-### Test Files
-
-- `ecdh-handshake.integration.test.ts` - ECDH key exchange tests
-- `session-management.integration.test.ts` - Session lifecycle and encryption tests
-- `api-client.integration.test.ts` - Full API client integration tests
-
-### Helpers
-
-- `helpers/accelerator-server.ts` - Server management utility
-
-## Configuration
-
-### Server Port
-
-By default, tests use port 8787 (Wrangler's default). To change:
-
-```typescript
-const server = new AcceleratorServer({
-  port: 9000, // Custom port
-  logOutput: true, // Enable server logs
-});
-```
-
-### Timeouts
-
-Integration tests have longer timeouts due to server startup:
-- Server startup: 60 seconds
-- Individual tests: 30 seconds (default)
-
-## Writing New Integration Tests
-
-Create a new test file with the `.integration.test.ts` suffix:
-
-```typescript
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { AcceleratorServer } from './helpers/accelerator-server';
-
-describe('My Integration Test', () => {
-  let server: AcceleratorServer;
-  let baseUrl: string;
-
-  beforeAll(async () => {
-    server = new AcceleratorServer({
-      port: 8787,
-      logOutput: false,
-    });
-
-    await server.start();
-    baseUrl = server.getBaseUrl();
-  }, 60000); // 60 second timeout for server startup
-
-  afterAll(async () => {
-    if (server) {
-      await server.stop();
-    }
-  });
-
-  it('should do something', async () => {
-    // Your test code here
-    const response = await fetch(`${baseUrl}/api/endpoint`);
-    expect(response.ok).toBe(true);
-  });
-});
-```
-
-## Test Coverage
-
-Current integration test coverage:
-
-### ECDH Handshake
-- ✅ P-256 curve handshake
-- ✅ P-384 curve handshake
-- ✅ Invalid public key rejection
-- ✅ Unsupported curve rejection
-- ✅ Unique connection ID generation
-
-### Session Management
-- ✅ Session creation (P-256 and P-384)
-- ✅ String encryption/decryption
-- ✅ JSON encryption/decryption
-- ✅ Unicode support
-- ✅ Session lifecycle (clear, expire, refresh)
-- ✅ Session export/import
-- ✅ Multiple independent sessions
-
-### API Client
-- ✅ Session initialization
-- ✅ Message operations (send, complex bodies, error handling)
-- ✅ Storage operations (set, get, update, delete, list)
-- ✅ Permission operations (check, grant, revoke)
-- ✅ Error handling (network errors, malformed requests)
-- ✅ Concurrent operations
-- ✅ Session persistence
-
-## Troubleshooting
-
-### Server Won't Start
-
-If the Accelerator server fails to start:
-
-1. Check if Accelerator directory exists at `../accelerator`
-2. Ensure Accelerator dependencies are installed: `cd ../accelerator && yarn`
-3. Check if port 8787 is already in use
-4. Enable server logs: `logOutput: true` in `AcceleratorServer` config
-
-### Tests Timing Out
-
-If tests timeout:
-
-1. Check Accelerator server logs for errors
-2. Verify network connectivity to `localhost:8787`
-3. Increase timeout in `beforeAll` if server startup is slow
-4. Check if Wrangler is installed: `yarn global add wrangler`
-
-### Connection Refused Errors
-
-If you see "connection refused" errors:
-
-1. Ensure Accelerator server is running
-2. Check the port matches (default: 8787)
-3. Verify firewall settings allow localhost connections
-
-## Performance Considerations
-
-- Integration tests are slower than unit tests (server startup + network requests)
-- Run unit tests (`yarn test:unit`) during development
-- Run integration tests before commits or in CI/CD pipeline
-- Consider using `test.only()` to focus on specific integration tests during debugging
-
-## CI/CD Integration
-
-For CI/CD pipelines:
-
-```yaml
-# Example GitHub Actions workflow
-- name: Run Integration Tests
-  run: |
-    cd accelerator
-    yarn install
-    cd ../connect
-    yarn install
-    yarn test:integration
-```
-
-## Future Enhancements
-
-- [ ] WebSocket integration tests
-- [ ] Real-time event subscription tests
-- [ ] Performance benchmarking
-- [ ] Load testing with concurrent clients
-- [ ] Error recovery and retry logic tests
+1. Delete the three `.integration.test.ts` files and `manual-test.ts`.
+2. Add `broadcast-channel.integration.test.ts` — two `BroadcastChannel`
+   instances against the room DO, verify handshake fan-out + decrypt.
+3. Add `personal-space.integration.test.ts` — `PersonalSpaceClient.put/get`
+   against the personal DO with snarkjs proof generation. Will require
+   the test environment to provide `snarkjs`, the compiled
+   `preimagePoK.wasm`, and the `.zkey`.
+4. Add `groth16-verifier.integration.test.ts` — verify a sample proof from
+   the accelerator against `verifyGroth16` directly.
+5. Keep `helpers/accelerator-server.ts` as-is.

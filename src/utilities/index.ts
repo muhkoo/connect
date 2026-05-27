@@ -1,4 +1,3 @@
-import { v4 as uuidv4 } from 'uuid';
 import log, { Logger } from './Logger';
 
 const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -7,6 +6,11 @@ export {
     log,
     Logger
 }
+
+// Browser-safe byte conversion helpers (hex / base64 / base64url / concat).
+// The crypto layer uses these instead of Node's Buffer so it runs in browsers
+// and CF Workers as well as Node.
+export * from './bytes';
 //0ba25dcb0db07dbac27435857ab55150d2a2e6c8f73a969c74b7659c7a8dd3a3
 
 /**
@@ -229,7 +233,10 @@ export function _messageId(): string {
  */
 
 export function generateId(): string {
-    return base58Encode(uuidv4());
+    // Web-standard UUID generator (available in every modern browser and
+    // Node 14+). Replaces the npm `uuid` dep so the browser bundle has one
+    // fewer external import to resolve.
+    return base58Encode(crypto.randomUUID());
 }
 
 /**

@@ -25,6 +25,7 @@ import { Packet, PacketOptions } from '../messaging/Packet';
 import { _socketId } from '../utilities';
 import { appLogger } from '../core';
 import { EventCore, EventCoreEvents } from '../events';
+import { WSTransport } from '../transport';
 
 export interface NetworkOptions {
   /** WebSocket URL (e.g., ws://localhost:8787 or wss://api.example.com) */
@@ -111,28 +112,16 @@ export class Network extends EventCore {
   private serverId: string;
   private sessionType: 'global' | 'specific';
   private sessionId: string | null = null;
-  private socket: WebSocket | null = null;
   private socketId: string = _socketId();
+
+  // WebSocket lifecycle is delegated to WSTransport. Network re-emits its
+  // events so existing consumers (Client.ts) keep working unchanged.
+  private transport: WSTransport;
 
   // HTTP configuration
   private httpTimeout: number;
   private httpRetry: { maxRetries: number; retryDelay: number };
   private defaultHeaders: Record<string, string>;
-
-  // Reconnection state
-  private autoReconnect: boolean;
-  private reconnectDelay: number;
-  private maxReconnectAttempts: number;
-  private reconnectAttempts: number = 0;
-  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
-
-  // Message queue for offline messages
-  private messageQueue: Packet[] = [];
-  private maxQueueSize: number = 100;
-
-  // Connection state
-  private _isConnected: boolean = false;
-  private _isConnecting: boolean = false;
 
   emit = EventCore.emit;
   on = EventCore.on;
@@ -148,9 +137,17 @@ export class Network extends EventCore {
     this.sessionType = options.sessionType || 'specific';
     this.ratchetManager = new DoubleRatchetManager(this.clientId);
     this.keyStore = KeyStore.getInstance();
-    this.autoReconnect = options.autoReconnect ?? true;
-    this.reconnectDelay = options.reconnectDelay || 3000;
-    this.maxReconnectAttempts = options.maxReconnectAttempts || 5;
+
+    this.transport = new WSTransport({
+      url: this.url,
+      autoReconnect: options.autoReconnect ?? true,
+      reconnectDelay: options.reconnectDelay || 3000,
+      maxReconnectAttempts: options.maxReconnectAttempts || 5,
+    });
+    // Route inbound frames through Network's decryption layer.
+    this.transport.on(EventCoreEvents.MESSAGE, (e: CustomEvent) => {
+      void this.handleIncomingMessage(e.detail as string);
+    });
 
     // HTTP configuration
     this.httpTimeout = options.httpTimeout || 30000;
@@ -193,126 +190,19 @@ export class Network extends EventCore {
   }
 
   /**
-   * Connect to the WebSocket server
+   * Connect to the WebSocket server. Delegates the actual socket lifecycle
+   * to WSTransport; Network only owns the encrypted-session layer above.
    */
   async connect(): Promise<void> {
-    if (this._isConnected || this._isConnecting) {
-      throw new Error('Already connected or connecting');
-    }
-
-    // Initialize session if not already done
+    // Initialize session before opening the socket so we have a ratchet
+    // ready by the time the first message can flow.
     await this.initializeSession();
-
-    this._isConnecting = true;
-
-    return new Promise((resolve, reject) => {
-      try {
-        this.socket = new WebSocket(this.url);
-
-        this.socket.onopen = () => {
-          this._isConnected = true;
-          this._isConnecting = false;
-          this.reconnectAttempts = 0;
-
-          console.log(`[Network] Connected to ${this.url}`);
-          // this.dispatchEvent(new CustomEvent('connected'));
-          this.emit(EventCoreEvents.CONNECTED, undefined);
-
-          // Flush queued messages
-          this.flushMessageQueue();
-
-          resolve();
-        };
-
-        this.socket.onmessage = async (event) => {
-          await this.handleIncomingMessage(event.data);
-        };
-
-        this.socket.onerror = (error) => {
-          console.error('[Network] WebSocket error:', error);
-          // this.dispatchEvent(new CustomEvent('error', { detail: error }));
-          this.emit(EventCoreEvents.ERROR, error);
-
-          if (this._isConnecting) {
-            this._isConnecting = false;
-            reject(error);
-          }
-        };
-
-        this.socket.onclose = () => {
-          const wasConnected = this._isConnected;
-          this._isConnected = false;
-          this._isConnecting = false;
-
-          console.log('[Network] Disconnected from server');
-          // this.dispatchEvent(new CustomEvent('disconnected'));
-          this.emit(EventCoreEvents.DISCONNECTED, undefined);
-
-          // Attempt reconnection if enabled and we were previously connected
-          if (this.autoReconnect && wasConnected) {
-            this.scheduleReconnect();
-          }
-        };
-
-      } catch (error) {
-        this._isConnecting = false;
-        reject(error);
-      }
-    });
+    return this.transport.connect();
   }
 
-  /**
-   * Disconnect from the WebSocket server
-   */
+  /** Close the WebSocket. */
   disconnect(): void {
-    // Cancel any pending reconnection
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = null;
-    }
-
-    // Disable auto-reconnect when manually disconnecting
-    this.autoReconnect = false;
-
-    if (this.socket) {
-      this.socket.close();
-      this.socket = null;
-    }
-
-    this._isConnected = false;
-    this._isConnecting = false;
-  }
-
-  /**
-   * Schedule a reconnection attempt
-   */
-  private scheduleReconnect(): void {
-    // Check if we've exceeded max attempts
-    if (this.maxReconnectAttempts > 0 && this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[Network] Max reconnection attempts reached');
-      // this.dispatchEvent(new CustomEvent('error', {
-      //   detail: new Error('Max reconnection attempts reached')
-      // }));
-      this.emit(EventCoreEvents.ERROR, new Error('Max reconnection attempts reached'));
-
-      return;
-    }
-
-    this.reconnectAttempts++;
-    console.log(`[Network] Reconnecting in ${this.reconnectDelay}ms (attempt ${this.reconnectAttempts})`);
-    // this.dispatchEvent(new CustomEvent('reconnecting', {
-    //   detail: { attempt: this.reconnectAttempts }
-    // }));
-    this.emit(EventCoreEvents.RECONNECTING, { attempt: this.reconnectAttempts });
-
-    this.reconnectTimeout = setTimeout(async () => {
-      try {
-        await this.connect();
-      } catch (error) {
-        console.error('[Network] Reconnection failed:', error);
-        // scheduleReconnect will be called again via socket.onclose
-      }
-    }, this.reconnectDelay);
+    this.transport.disconnect();
   }
 
   // ============================================================================
@@ -371,49 +261,11 @@ export class Network extends EventCore {
   }
 
   /**
-   * Send a packet over the WebSocket
+   * Send a packet over the WebSocket. WSTransport handles the connected /
+   * disconnected branch and queues frames when offline.
    */
   private async sendPacket(packet: Packet): Promise<void> {
-    if (!this._isConnected || !this.socket) {
-      // Queue message if not connected
-      if (this.messageQueue.length < this.maxQueueSize) {
-        this.messageQueue.push(packet);
-        console.log('[Network] Message queued (offline)');
-      } else {
-        throw new Error('Message queue full. Cannot send message.');
-      }
-      return;
-    }
-
-    try {
-      const serialized = packet.serialize();
-      this.socket.send(serialized);
-    } catch (error) {
-      console.error('[Network] Failed to send packet:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Flush queued messages after reconnection
-   */
-  private async flushMessageQueue(): Promise<void> {
-    if (this.messageQueue.length === 0) return;
-
-    console.log(`[Network] Flushing ${this.messageQueue.length} queued messages`);
-
-    const queue = [...this.messageQueue];
-    this.messageQueue = [];
-
-    for (const packet of queue) {
-      try {
-        await this.sendPacket(packet);
-      } catch (error) {
-        console.error('[Network] Failed to send queued packet:', error);
-        // Re-queue if failed
-        this.messageQueue.push(packet);
-      }
-    }
+    this.transport.send(packet.serialize());
   }
 
   // ============================================================================
@@ -683,14 +535,14 @@ export class Network extends EventCore {
    * Check if connected to server
    */
   isConnected(): boolean {
-    return this._isConnected;
+    return this.transport.isConnected();
   }
 
   /**
    * Check if currently connecting
    */
   isConnecting(): boolean {
-    return this._isConnecting;
+    return this.transport.isConnecting();
   }
 
   /**
@@ -711,14 +563,14 @@ export class Network extends EventCore {
    * Get number of queued messages
    */
   getQueuedMessageCount(): number {
-    return this.messageQueue.length;
+    return this.transport.queuedFrames();
   }
 
   /**
    * Get reconnection attempt count
    */
   getReconnectAttempts(): number {
-    return this.reconnectAttempts;
+    return this.transport.reconnectAttemptCount();
   }
 
   /**

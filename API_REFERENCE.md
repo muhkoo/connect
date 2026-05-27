@@ -1,6 +1,7 @@
 # @muhkoo/connect API Reference
 
-Complete API reference for the Muhkoo Connect client SDK.
+Public surface of `@muhkoo/connect`. Every export listed below is real today;
+deprecated / aspirational APIs have been removed.
 
 ## Installation
 
@@ -8,331 +9,382 @@ Complete API reference for the Muhkoo Connect client SDK.
 yarn add @muhkoo/connect
 ```
 
-## Package Structure
+## Entry points
 
-The library supports multiple import paths for tree-shaking and modular usage:
+`@muhkoo/connect` has three build targets, selected automatically by
+`package.json`'s `exports`:
+
+| Condition | File |
+| --- | --- |
+| `workerd` | `dist/workers/index.js` |
+| `browser` | `dist/browser/index.js` |
+| default (Node) | `dist/server/index.js` |
+
+The `types` condition resolves to a single bundled `dist/connect.d.ts` that
+re-exports everything (so a type referenced in one runtime is still
+declarable in another, even if the runtime impl is absent).
+
+`package.json` also exposes some source-level subpaths used in tests and
+in-tree consumers; they point at TS source, not the built dist:
+
+| Subpath | TS source |
+| --- | --- |
+| `@muhkoo/connect/crypto` | `src/crypto/index.ts` |
+| `@muhkoo/connect/types` | `src/types/index.ts` |
+| `@muhkoo/connect/api` | `src/api/index.ts` (does not exist; legacy holdover) |
+| `@muhkoo/connect/events` | `src/events/index.ts` |
+| `@muhkoo/connect/messaging` | `src/messaging/index.ts` |
+| `@muhkoo/connect/utilities` | `src/utilities/index.ts` |
+
+### What's in which build
+
+| Symbol | browser | server | workers |
+| --- | :---: | :---: | :---: |
+| `BroadcastChannel`, `EncryptedSession` | yes | yes | yes |
+| `WSTransport` | yes | yes | yes |
+| `KeyStore`, `DoubleRatchet` | yes | yes | yes |
+| `DoubleRatchetManager`, `Authenticator` | yes | yes | NO |
+| `Field`, `Poseidon`, `PreimagePoK`, `HashKnowledge`, `AuthPublicInput` | yes | yes | NO |
+| `verifyPreimagePoK`, `verifyHashKnowledge`, `quickVerify`, `compilePrograms`, `initializeCircuits` | yes | yes | NO |
+| `PersonalSpaceClient`, `wrapWithPassphrase`, `unwrapWithPassphrase` | yes | yes | NO |
+| `verifyGroth16`, `initBn128Wasm`, `PREIMAGE_POK_VERIFICATION_KEY` | yes | yes | yes |
+| `EventCore`, `EventCoreEvents` | yes | yes | yes |
+| `Message`, `Packet`, `SerializeMessage`, `decorators` | yes | yes | yes |
+
+The exclusions exist because `snarkjs`/`ffjavascript` use Node-only APIs
+(`os.cpus`, `URL.createObjectURL`) that workerd doesn't expose.
+
+## Sessions
+
+### BroadcastChannel
+
+`src/sessions/BroadcastChannel.ts`. Turnkey multi-peer encrypted "room"
+combining `WSTransport` + `EncryptedSession`.
 
 ```typescript
-// Main entry point (includes everything)
-import * as Connect from '@muhkoo/connect';
+import { BroadcastChannel, BroadcastChannelEvents } from "@muhkoo/connect";
 
-// Subpath imports (recommended for smaller bundles)
-import { DoubleRatchet, KeyStore } from '@muhkoo/connect/crypto';
-import { UserIdentity, Session } from '@muhkoo/connect/types';
-import { EventCore } from '@muhkoo/connect/events';
-import { Message, Packet } from '@muhkoo/connect/messaging';
-import { serialize, deserialize, Logger } from '@muhkoo/connect/utilities';
+const channel = new BroadcastChannel({
+  url: "wss://accelerator.example.dev/room/x",
+  myId: "alice@example.dev",
+  autoAnnounce: false, // default — call announce() yourself
+  // ...rest is forwarded to WSTransport
+});
 ```
 
-### Available Entry Points
+**Options** (`BroadcastChannelOptions extends WSTransportOptions`):
 
-- `@muhkoo/connect` - Main entry (browser or server based on environment)
-- `@muhkoo/connect/crypto` - Cryptographic utilities
-- `@muhkoo/connect/types` - TypeScript type definitions
-- `@muhkoo/connect/events` - Event handling
-- `@muhkoo/connect/messaging` - Message and packet classes
-- `@muhkoo/connect/utilities` - Helper functions and utilities
+- `url: string` — WebSocket URL
+- `myId: string` — local identity (username, DID, pubkey string, anything)
+- `autoAnnounce?: boolean` — if true, announce immediately on CONNECTED.
+  Defaults to false so chat-style apps can complete a `{name}` handshake first.
+- WSTransport options: `autoReconnect`, `reconnectDelay`, `maxReconnectAttempts`,
+  `maxQueueSize`
 
-## Environment Support
+**Methods**:
 
-The library provides separate builds for browser and Node.js environments:
+- `connect(): Promise<void>` — generate keys + open socket
+- `disconnect(): void` — stop reconnecting and close
+- `announce(): Promise<void>` — broadcast our keyExchange (idempotent)
+- `send(plaintext: string): Promise<number>` — fan-out: one cipherMessage frame
+  per peer ratchet. Returns the number of peers it sent to (0 if no peers
+  handshaken yet — render locally and try later).
+- `sendRaw(frame: unknown): void` — JSON-stringify and send any other app frame
+- `peers(): string[]`
+- `forgetPeer(peerId: string): void`
+- `isConnected(): boolean`
+- `on(event, handler)` / `off(event, handler)` — per-instance EventTarget
 
-- **Browser**: Uses Web Crypto API, IndexedDB
-- **Node.js**: Uses Node.js crypto module, file system
+**Events** (`BroadcastChannelEvents`):
 
-The correct version is automatically selected based on the `package.json` exports configuration.
+| Const | String |
+| --- | --- |
+| `CONNECTED` | `"connected"` |
+| `DISCONNECTED` | `"disconnected"` |
+| `RECONNECTING` | `"reconnecting"` |
+| `ERROR` | `"error"` |
+| `PEER_HANDSHAKE` | `"channel:peer_handshake"` |
+| `MESSAGE` | `"channel:message"` |
+| `RAW_FRAME` | `"channel:raw_frame"` |
 
----
+`channel:message` event detail is `{ from, text, cipherMessage }`.
+`channel:peer_handshake` detail is `{ peerId }`.
+Channel-managed frames are `{ keyExchange }` and `{ cipherMessage }`; any
+other inbound frame fires `RAW_FRAME`.
 
-## Core Modules
+The events live on a per-instance `EventTarget`, so two channels in the same
+app do not cross-contaminate each other's events.
 
-### 1. Crypto Module
+### EncryptedSession
 
-End-to-end encryption using Double Ratchet algorithm and key management.
-
-#### DoubleRatchet
-
-Implements the Double Ratchet algorithm for forward-secure messaging encryption.
+`src/sessions/EncryptedSession.ts`. Transport-agnostic per-peer ratchet
+manager. Use this if you want to ship frames over something other than
+`WSTransport`.
 
 ```typescript
-import { DoubleRatchet } from '@muhkoo/connect/crypto';
+import { EncryptedSession } from "@muhkoo/connect";
 
-// Create a new ratchet session
-const ratchet = new DoubleRatchet(
-  senderId: string,
-  recipientId: string,
-  sessionType: 'global' | 'specific',
-  isClient: boolean = true
-);
-
-// Initialize the session (must be called before encryption/decryption)
-await ratchet.initializeSession(isClient: boolean);
-
-// Encrypt a message
-const cipherMessage = await ratchet.encrypt(
-  plaintext: string,
-  newDhKey: boolean,
-  senderId: string,
-  recipientId: string,
-  sessionId: string,
-  sessionType: 'global' | 'specific'
-);
-
-// Decrypt a message
-const plaintext = await ratchet.decrypt(
-  cipherMessage: CipherMessage,
-  recipientId: string,
-  senderId: string,
-  sessionId: string
-);
+const session = new EncryptedSession({ myId: "alice" });
+await session.initialize();   // generates KeyStore entries if needed
+const kx = await session.getOwnKeyExchange();
+// transport.send(JSON.stringify(kx))
 ```
 
-**CipherMessage Type**:
+**Methods**:
+
+- `initialize(): Promise<void>`
+- `get ready: Promise<void>`
+- `get id: string`
+- `getOwnKeyExchange(): Promise<{ keyExchange: KeyExchangeFrame }>`
+- `encrypt(plaintext: string): Promise<CipherFrame[]>` — fan-out across all
+  ratcheted peers. Empty array means no peers yet.
+- `receive(frame: IncomingFrame): Promise<ReceiveResult>`
+- `peers(): string[]`
+- `hasRatchetFor(peerId: string): boolean`
+- `forgetPeer(peerId: string): void`
+
+`receive()` returns `{ kind: "plaintext" | "handshake" | "ignored", ... }`. When
+`kind === "handshake"` and `outbound` is non-null, the app MUST send `outbound`
+back to that peer (reciprocation). The session dedups internally — `outbound`
+is only set the first time per peer per session lifetime.
+
+Role assignment is deterministic: `isClient = (myId < peerId)` lexicographically.
+Per-pair sessionId is `[myId, peerId].sort().join(":")`.
+
+**Frame shapes**:
+
 ```typescript
-interface CipherMessage {
-  header: CipherMessageHeader;
-  ciphertext: string;
+interface KeyExchangeFrame {
+  type: "handshake" | "update";
+  userId: string;
+  ecdhPublicKey: string;   // base64(JSON.stringify(JWK))
+  ecdsaPublicKey: string;  // base64(JSON.stringify(JWK))
 }
 
-interface CipherMessageHeader {
-  senderId: string;
-  recipientId: string;
-  sessionId: string;
-  sessionType: 'global' | 'specific';
-  dhPub?: string;        // New DH public key (if ratchet step)
-  prevChainLength: number;
-  sendCount: number;
-  timestamp: number;
+interface CipherFrame {
+  cipherMessage: CipherMessage;
 }
 ```
 
-#### KeyStore
+## Transport
 
-Singleton for managing cryptographic key pairs.
+### WSTransport
+
+`src/transport/WSTransport.ts`. Pure WebSocket lifecycle. Auto-reconnect with
+linear backoff, capped outbound queue while disconnected.
 
 ```typescript
-import { KeyStore } from '@muhkoo/connect/crypto';
+import { WSTransport, EventCoreEvents } from "@muhkoo/connect";
 
-// Get the singleton instance
-const keyStore = KeyStore.getInstance();
+const transport = new WSTransport({
+  url: "wss://example.dev/ws",
+  autoReconnect: true,
+  reconnectDelay: 3000,
+  maxReconnectAttempts: 5,
+  maxQueueSize: 100,
+});
 
-// Generate a new key pair for an ID
-const keyPair = await keyStore.generateOwnKeyPair(id: string);
-// Returns: { privateKey: CryptoKey, publicKey: CryptoKey }
+transport.on(EventCoreEvents.CONNECTED, () => { /* ... */ });
+transport.on(EventCoreEvents.MESSAGE, (e) => { /* e.detail is the raw frame string */ });
 
-// Store remote public keys (for someone else)
-await keyStore.storeRemotePublicKeys(
-  id: string,
-  ecdhPublicKey: CryptoKey,
-  ecdsaPublicKey: CryptoKey
-);
-
-// Get a key pair by ID
-const keyPair = keyStore.getKeyPair(id: string);
-
-// Get auth keys (ECDSA) by ID
-const authKeyPair = keyStore.getAuthKeyPair(id: string);
-
-// Dehydrate keys for storage/transport
-const dehydrated = await keyStore.dehydrateKeyPair(id: string);
-// Returns: { ecdhPub, ecdhPriv, ecdsaPub, ecdsaPriv } as base58 strings
-
-// Rehydrate keys from storage
-await keyStore.hydrateKeyPair(id: string, dehydrated: DehydratedKeys);
-
-// Clear all keys (e.g., on logout)
-keyStore.clear();
+await transport.connect();
+transport.send("raw frame string");
+transport.disconnect();
 ```
 
-**KeyPair Interfaces**:
-```typescript
-interface KeyPair {
-  privateKey: CryptoKey | null;  // null for remote keys
-  publicKey: CryptoKey;
-}
+Emits `CONNECTED`, `DISCONNECTED`, `RECONNECTING` (`detail: { attempt }`),
+`ERROR`, `MESSAGE` (raw inbound). `send()` throws if the outbound queue is
+full while disconnected.
 
+## Crypto
+
+### KeyStore
+
+`src/crypto/KeyStore.ts`. Singleton holding ECDH + ECDSA P-384 keypairs keyed
+by identity.
+
+```typescript
+import { KeyStore } from "@muhkoo/connect";
+
+const ks = KeyStore.getInstance();
+await ks.generateOwnKeyPair("alice");
+const own = ks.getKeyPair("alice");    // { privateKey, publicKey } for ECDH
+const auth = ks.getAuthKeyPair("alice"); // for ECDSA
+
+await ks.storeRemotePublicKeys("bob", bobEcdhPub, bobEcdsaPub);
+
+const dehydrated = await ks.dehydrateKeyPair("alice");
+await ks.hydrateKeyPair("alice2", dehydrated);
+
+const packed = await ks.packDehydratedKeys("alice");  // base64(JSON)
+await ks.hydrateFromPacked("alice3", packed);
+
+const ecdsaPubBytes = await ks.getRawEcdsaPublicKey("alice"); // SEC1 uncompressed
+```
+
+**`DehydratedKeys`**:
+
+```typescript
 interface DehydratedKeys {
-  ecdhPub: string;    // Base58-encoded JWK
-  ecdhPriv: string;   // Base58-encoded JWK
-  ecdsaPub: string;   // Base58-encoded JWK
-  ecdsaPriv: string;  // Base58-encoded JWK
+  ecdhPub: string;   // serialize(JSON.stringify(JWK))
+  ecdhPriv: string;  // "" if remote-only
+  ecdsaPub: string;
+  ecdsaPriv: string; // "" if remote-only
 }
 ```
 
-#### DoubleRatchetManager
+`serialize()` is the project's gzip+base58 wrapper from `utilities`. Strings
+in `dehydrateKeyPair`'s output are JWK JSON run through that wrapper.
 
-Manages multiple Double Ratchet sessions.
+### DoubleRatchet / DoubleRatchetManager
 
-```typescript
-import { DoubleRatchetManager } from '@muhkoo/connect/crypto';
+`src/crypto/DoubleRatchet.ts`, `src/crypto/DoubleRatchetManager.ts`. The
+Signal-style ratchet primitives. `EncryptedSession` wraps them; you generally
+don't construct these directly. `DoubleRatchetManager` is NOT in the workers
+build (snarkjs dependency chain).
 
-// Get the singleton instance
-const manager = DoubleRatchetManager.getInstance();
+### Authenticator
 
-// Initialize a session
-await manager.initializeSession(
-  senderId: string,
-  recipientId: string,
-  sessionId: string,
-  sessionType: 'global' | 'specific',
-  isClient: boolean
-);
+`src/crypto/Authenticator.ts`. ECDSA auth-token signing and verification +
+ZK proof verification. Not in the workers build.
 
-// Encrypt a message
-const cipherMessage = await manager.encrypt(
-  plaintext: string,
-  sessionId: string,
-  senderId: string,
-  recipientId: string,
-  sessionType: 'global' | 'specific',
-  newDhKey?: boolean
-);
+### ZeroKnowledge
 
-// Decrypt a message
-const plaintext = await manager.decrypt(
-  cipherMessage: CipherMessage,
-  sessionId: string,
-  recipientId: string,
-  senderId: string
-);
+`src/crypto/ZeroKnowledge.ts`. circomlibjs + snarkjs-backed circuit utilities.
+Exports include `Field`, `Field as FieldElement`, `Poseidon`, `PreimagePoK`,
+`HashKnowledge`, `AuthPublicInput`, `verifyPreimagePoK`,
+`verifyHashKnowledge`, `verify`, `quickVerify`, `compilePrograms`,
+`initializeCircuits`, `encodeToHex`, `decodeFromHex`, plus types
+`SnarkProof` (alias for `Groth16Proof`), `VerificationKey`, `ZkCompiled`,
+`CircuitBufferConfig`. Not in the workers build.
 
-// Remove a session
-manager.removeSession(sessionId: string);
-```
+## Personal-space client
 
----
+### PersonalSpaceClient
 
-### 2. Messaging Module
-
-Message and packet handling with serialization and checksums.
-
-#### Message
-
-Represents a message with automatic serialization, checksums, and status tracking.
+`src/personal/PersonalSpaceClient.ts`. HTTP wrapper for the accelerator's
+`/api/personal/:commitment/*` ZK-gated KV API. NOT in the workers build.
 
 ```typescript
-import { Message } from '@muhkoo/connect/messaging';
-
-// Create a message from body
-const msg = new Message({ hello: 'world' });
-
-// Or with options
-const msg = new Message({
-  id: 'custom-id',           // Optional, auto-generated if omitted
-  body: { hello: 'world' },
-  status: 'pending',         // 'pending' | 'processed' | 'failed' | 'delivered'
-  checksum: 'abc123'         // Optional, auto-generated if omitted
-});
-
-// Access properties
-console.log(msg.id);         // Auto-generated or custom ID
-console.log(msg.timestamp);  // Timestamp in milliseconds
-console.log(msg.status);     // Message status
-console.log(msg.body);       // Automatically deserialized body
-console.log(msg.checksum);   // Message checksum
-
-// Verify checksum
-msg.verifyChecksum();  // Throws error if invalid
-
-// Serialize for transmission
-const serialized = msg.serialize();  // JSON string
-
-// Deserialize from string
-const msg = Message.deserialize(serialized);
-```
-
-**Message Properties**:
-- `id: string` - Unique message ID (auto-generated with MSG prefix)
-- `timestamp: number` - Creation timestamp
-- `status: "pending" | "processed" | "failed" | "delivered"`
-- `checksum: string` - Integrity checksum
-- `body: any` - Message payload (auto-serialized/deserialized)
-
-**Size Limit**: Messages are limited to 3MB by default.
-
-#### Packet
-
-Network packet for routing messages between peers.
-
-```typescript
-import { Packet, Message } from '@muhkoo/connect/messaging';
-
-// Create a packet
-const packet = new Packet({
-  subject: 'chat',              // Packet subject/topic
-  source: 'user:alice',         // Sender address
-  target: 'user:bob',           // Recipient address
-  message: new Message({ text: 'Hello' }),  // Optional message
-  headers: {                    // Optional metadata
-    priority: 'high',
-    encrypted: true
+const client = new PersonalSpaceClient({
+  baseUrl: "https://accelerator.example.dev",
+  commitment, secret, salt, ecdsaPub, ecdsaPubHash, // decimal BigInt strings
+  circuits: {
+    wasmUrl: "/circuits/build/preimagePoK_js/preimagePoK.wasm",
+    zkeyUrl: "/circuits/build/preimagePoK_0001.zkey",
   },
-  ttl: 60000,                   // Optional TTL in milliseconds
-  signature: 'abc123'           // Optional signature
 });
 
-// Access properties
-console.log(packet.id);        // Auto-generated packet ID
-console.log(packet.timestamp); // Creation timestamp
-console.log(packet.subject);   // Packet subject
-console.log(packet.source);    // Source address
-console.log(packet.target);    // Target address
-console.log(packet.message);   // Message object (if present)
-console.log(packet.headers);   // Custom headers
+await client.put("notes", { hello: "world" });
+const v = await client.get<{ hello: string }>("notes");
+const existed = await client.delete("notes"); // boolean
+const keys = await client.list();
+```
 
-// Check if packet is expired
-if (packet.isExpired()) {
-  console.log('Packet has expired');
+Each call:
+
+1. `POST /api/personal/:commitment/challenge` to get a one-shot
+   `{ challengeId, nonce, commitment }`.
+2. Reduce `nonce` (hex) to a BN254 field element (mod
+   21888242871839275222246405745257275088548364400416034343698204186575808495617).
+3. Generate a fresh Groth16 proof via `snarkjs.groth16.fullProve` over the
+   `preimagePoK` circuit. Public signals: `[commitment, nonce, ecdsaPubHash]`.
+   Private witnesses: `secret, salt, ecdsaPub`.
+4. POST the gated endpoint with `{ challengeId, proof, publicSignals, value? }`.
+
+`snarkjs` is a bare-specifier import — externalized by rollup. Browser
+consumers provide it via import map (the accelerator chat app uses esm.sh);
+Node consumers install it as a peer dep.
+
+### wrapWithPassphrase / unwrapWithPassphrase
+
+`src/personal/wrap.ts`. PBKDF2-SHA256 (200_000 iterations) → 256-bit
+AES-GCM key → encrypt with random 16-byte salt + 12-byte IV. NOT in the
+workers build.
+
+```typescript
+const wrapped = await wrapWithPassphrase("hunter2", new TextEncoder().encode("plaintext"));
+// wrapped: { salt, iv, ciphertext, alg: "PBKDF2-SHA256/AES-256-GCM", iter: 200000 }
+//   all bytes base64-encoded
+const plaintext = await unwrapWithPassphrase("hunter2", wrapped);
+// throws "decryption failed (wrong passphrase or tampered payload)"
+// on AES-GCM tag mismatch.
+```
+
+## Groth16 verification
+
+### initBn128Wasm + verifyGroth16
+
+`src/workers/groth16-verifier.ts`. Universal — works in Node, browsers, and
+CF Workers. bn128.wasm-driven, no snarkjs dependency.
+
+```typescript
+import {
+  initBn128Wasm,
+  verifyGroth16,
+  PREIMAGE_POK_VERIFICATION_KEY,
+} from "@muhkoo/connect";
+import type { Groth16Proof, VerificationKey } from "@muhkoo/connect";
+
+const { instance, memory, initialPFree } = await initBn128Wasm();
+// Or, in CF Workers, pre-compile the .wasm at deploy time:
+//   import wasmModule from "./bn128.wasm";
+//   await initBn128Wasm(wasmModule);
+
+const ok = await verifyGroth16(
+  instance, memory, initialPFree,
+  PREIMAGE_POK_VERIFICATION_KEY,
+  proof, publicSignals,
+);
+```
+
+`verifyGroth16` returns `false` for any structural problem (malformed proof,
+out-of-range field elements, off-curve points, failed pairing). Throws only
+for WASM/runtime faults.
+
+`PREIMAGE_POK_VERIFICATION_KEY` is pinned in `src/types/zk.ts`. If the
+circuit is recompiled, regenerate this constant together with the
+verification-key JSON shipped in the accelerator's
+`public/circuits/build/preimagePoK_verification_key.json`.
+
+## Types
+
+From `src/index.d.ts`:
+
+```typescript
+export interface Attribute {
+  dataType: string;
+  attribute: string;
+  value: string | number | boolean | Array<string | boolean | number> | object;
 }
 
-// Serialize for transmission
-const serialized = packet.serialize();  // JSON string
+export type Tag = string;
 
-// Deserialize from string
-const packet = Packet.deserialize(serialized);
+export interface FileOptions {
+  id?: string; name?: string; size?: number; hash?: string;
+  contentType?: string; path?: string; isArchived?: boolean;
+  version?: number; attributes?: Attribute[]; tags?: string[];
+}
+
+export interface FilesInterface {
+  id?: string; name: string; size: number; hash: string;
+  contentType: string; version: number; tags: Tag[]; attributes: Attribute[];
+}
 ```
 
-**Packet Properties**:
-- `id: string` - Unique packet ID (auto-generated with PKT prefix)
-- `subject: string` - Packet subject/topic
-- `source: string` - Source address
-- `target: string` - Target address
-- `message?: Message` - Optional message payload
-- `headers?: Record<string, string | number | boolean>` - Optional metadata
-- `timestamp: number` - Creation timestamp
-- `ttl?: number` - Time-to-live in milliseconds
-- `signature?: string` - Optional cryptographic signature
+Plus the shared types from `src/types/`: `Groth16Proof`, `VerificationKey`,
+`PREIMAGE_POK_VERIFICATION_KEY`, and the messaging / identity / permissions
+types (re-exported wholesale).
 
----
+## Events
 
-### 3. Events Module
-
-Event handling using browser EventTarget API.
-
-#### EventCore
-
-Static event emitter for application-wide events.
+`EventCore` (`src/events/EventCore.ts`) is a static event emitter built on
+`EventTarget` plus an enum of standard event names. `WSTransport` extends it;
+`BroadcastChannel` uses its own per-instance EventTarget but reuses
+the `EventCoreEvents` enum values for lifecycle event names.
 
 ```typescript
-import { EventCore, EventCoreEvents } from '@muhkoo/connect/events';
-
-// Listen to an event
-EventCore.on(EventCoreEvents.CONNECTED, (event: CustomEvent) => {
-  console.log('Connected:', event.detail);
-});
-
-// Emit an event
-EventCore.emit(EventCoreEvents.CONNECTED, { connectionId: '123' });
-
-// Stop listening
-const handler = (event: CustomEvent) => console.log(event.detail);
-EventCore.on(EventCoreEvents.MESSAGE, handler);
-EventCore.off(EventCoreEvents.MESSAGE, handler);
-```
-
-**Built-in Events**:
-```typescript
-enum EventCoreEvents {
+export enum EventCoreEvents {
   CONNECTED = "connected",
   DISCONNECTED = "disconnected",
   RECONNECTING = "reconnecting",
@@ -345,477 +397,24 @@ enum EventCoreEvents {
 }
 ```
 
-**Instance Usage**:
-
-EventCore can also be extended by classes:
-
-```typescript
-class MyClient extends EventCore {
-  emit = EventCore.emit;
-  on = EventCore.on;
-  off = EventCore.off;
-}
-
-const client = new MyClient();
-client.on(EventCoreEvents.CONNECTED, handler);
-client.emit(EventCoreEvents.CONNECTED, data);
-```
-
----
-
-### 4. Utilities Module
-
-Helper functions for serialization, encoding, logging, and more.
-
-#### Serialization
-
-```typescript
-import { serialize, deserialize } from '@muhkoo/connect/utilities';
-
-// Serialize any data to base58 string
-const data = { name: 'Alice', age: 30, items: [1, 2, 3] };
-const serialized = serialize(data);  // Base58 string
-
-// Deserialize back to original
-const restored = deserialize<typeof data>(serialized);
-```
-
-Supports:
-- Primitives (string, number, boolean, null)
-- Objects and arrays
-- Maps and Sets
-- Dates
-- Symbols (with Symbol.for)
-
-#### Base58 Encoding
-
-```typescript
-import { base58Encode, base58Decode } from '@muhkoo/connect/utilities';
-
-// Encode to base58
-const encoded = base58Encode('Hello World');
-const encoded2 = base58Encode(arrayBuffer);
-
-// Decode from base58
-const decoded = base58Decode(encoded);  // ArrayBuffer
-```
-
-#### Checksums
-
-```typescript
-import { generateChecksum, verifyChecksum } from '@muhkoo/connect/utilities';
-
-// Generate checksum
-const checksum = generateChecksum('my data string');
-
-// Verify checksum
-const isValid = verifyChecksum('my data string', checksum);  // true/false
-```
-
-#### ID Generation
-
-```typescript
-import {
-  generateId,
-  _messageId,
-  _packetId,
-  _userId,
-  _accountId,
-  _objectId,
-  _socketId
-} from '@muhkoo/connect/utilities';
-
-// Generate base58-encoded UUIDs
-const id = generateId();           // Base58 UUID
-const msgId = _messageId();        // MSG + base58 UUID
-const packetId = _packetId();      // PKT + base58 UUID
-const userId = _userId();          // USR + base58 UUID
-const accountId = _accountId();    // ACC + base58 UUID
-const objectId = _objectId();      // OBJ + base58 UUID
-const socketId = _socketId();      // SKT + base58 UUID
-```
-
-#### Type Assertions
-
-```typescript
-import { assertType } from '@muhkoo/connect/utilities';
-
-// Assert primitive types
-assertType<string>(value, 'string');
-assertType<number>(value, 'number');
-
-// Assert class instances
-assertType<Message>(value, Message);
-
-// Assert multiple possible types (OR)
-assertType<Message | Packet>(value, [Message, Packet]);
-```
-
-#### Decorators
-
-```typescript
-import { Retry, Ready } from '@muhkoo/connect/utilities';
-
-class MyService {
-  ready: Promise<boolean>;
-
-  // Retry a method 3 times with 1 second delay
-  @Retry(3, 1000)
-  async fetchData() {
-    // This will retry on failure
-  }
-
-  // Wait for ready promise before executing
-  @Ready('ready')
-  async performAction() {
-    // This waits for this.ready to resolve
-  }
-}
-```
-
-#### Logger
-
-```typescript
-import { Logger } from '@muhkoo/connect/utilities';
-
-// Create a logger
-const logger = new Logger('MyModule', 'DEBUG');
-
-// Log levels
-logger.debug('Debug message');
-logger.verbose('Verbose message');
-logger.log('Info message');
-logger.warn('Warning message');
-logger.error('Error message');
-
-// Change log level
-logger.setLevel('ERROR');  // 'DEBUG' | 'VERBOSE' | 'INFO' | 'WARN' | 'ERROR'
-```
-
-**Global Logger**:
-```typescript
-// Access the global app logger
-appLogger.debug('Debug message');
-```
-
-#### Utility Functions
-
-```typescript
-import {
-  _formatBytes,
-  getIPAddress,
-  isNumber,
-  getId
-} from '@muhkoo/connect/utilities';
-
-// Format bytes to human-readable size
-_formatBytes(1024);        // "1.00 KB"
-_formatBytes(1048576, 0);  // "1 MB"
-
-// Resolve hostname to IP using Cloudflare DNS
-const ips = await getIPAddress('example.com');
-// Returns: ["93.184.216.34"]
-
-// Check if value is a number
-isNumber(123);      // true
-isNumber("123");    // true
-isNumber("abc");    // false
-
-// Get ID from database row
-getId({ insertId: 5 });  // 5
-getId({ id: 10 });       // 10
-```
-
----
-
-### 5. Types Module
-
-Shared TypeScript type definitions between Connect and Accelerator.
-
-#### Crypto Types
-
-```typescript
-import {
-  ECDHCurve,
-  PublicKeyJWK,
-  Keypair,
-  DehydratedKeypair
-} from '@muhkoo/connect/types';
-
-type ECDHCurve = 'P-256' | 'P-384';
-
-interface PublicKeyJWK {
-  kty: 'EC';
-  crv: 'P-256' | 'P-384';
-  x: string;
-  y: string;
-  ext?: boolean;
-}
-
-interface Keypair {
-  publicKey: PublicKeyJWK;
-  privateKey: CryptoKey;
-}
-
-interface DehydratedKeypair {
-  publicKey: string;   // Dehydrated JWK (base64url)
-  privateKey: string;  // Dehydrated JWK (base64url)
-}
-```
-
-#### Identity Types
-
-```typescript
-import {
-  UserIdentity,
-  Session,
-  AuthType,
-  OAuthProvider
-} from '@muhkoo/connect/types';
-
-interface UserIdentity {
-  publicKey: string;  // Dehydrated public key (primary identity)
-  accountType: 'self-sovereign' | 'custodial';
-  did?: string;       // Optional DID for self-sovereign users
-  provider?: string;  // OAuth provider for custodial users
-  createdAt: number;
-}
-
-interface Session {
-  sessionId: string;
-  publicKey: string;      // User's identity
-  appPublicKey: string;
-  createdAt: number;
-  expiresAt: number;
-  sharedSecret?: string;
-}
-
-type AuthType = 'self-sovereign' | 'custodial';
-type OAuthProvider = 'google' | 'github' | 'discord' | 'twitter';
-```
-
-#### Messaging Types
-
-```typescript
-import {
-  MessageEvent,
-  Subscription,
-  WSMessageType,
-  WSMessage
-} from '@muhkoo/connect/types';
-
-interface MessageEvent {
-  type: string;
-  topic: string;
-  data: any;
-  senderPublicKey?: string;
-  timestamp: number;
-}
-
-interface Subscription {
-  connectionId: string;
-  publicKey: string;  // Subscriber's identity
-  topic: string;
-  filters?: any;
-}
-
-type WSMessageType =
-  | 'connect'
-  | 'connected'
-  | 'subscribe'
-  | 'subscribed'
-  | 'unsubscribe'
-  | 'publish'
-  | 'event'
-  | 'message'
-  | 'error';
-
-interface WSMessage {
-  type: WSMessageType;
-  topic?: string;
-  data?: any;
-  publicKey?: string;
-  connectionId?: string;
-  timestamp?: number;
-}
-```
-
----
-
-## Usage Examples
-
-### End-to-End Encrypted Messaging
-
-```typescript
-import { KeyStore, DoubleRatchetManager } from '@muhkoo/connect/crypto';
-import { Message, Packet } from '@muhkoo/connect/messaging';
-
-// Setup
-const keyStore = KeyStore.getInstance();
-const ratchetManager = DoubleRatchetManager.getInstance();
-
-// Generate key pairs for both parties
-await keyStore.generateOwnKeyPair('alice');
-await keyStore.generateOwnKeyPair('bob');
-
-// Exchange public keys (in real app, this happens over network)
-const aliceKeys = keyStore.getKeyPair('alice');
-const bobKeys = keyStore.getKeyPair('bob');
-await keyStore.storeRemotePublicKeys('alice', bobKeys.publicKey,
-  keyStore.getAuthKeyPair('bob').publicKey);
-await keyStore.storeRemotePublicKeys('bob', aliceKeys.publicKey,
-  keyStore.getAuthKeyPair('alice').publicKey);
-
-// Initialize encrypted session
-await ratchetManager.initializeSession(
-  'alice',
-  'bob',
-  'session-123',
-  'specific',
-  true  // alice is client
-);
-
-// Encrypt a message
-const plaintext = 'Hello Bob!';
-const cipherMessage = await ratchetManager.encrypt(
-  plaintext,
-  'session-123',
-  'alice',
-  'bob',
-  'specific'
-);
-
-// Create packet for transport
-const packet = new Packet({
-  subject: 'encrypted-message',
-  source: 'alice',
-  target: 'bob',
-  message: new Message(cipherMessage)
-});
-
-// --- On Bob's side ---
-// Decrypt the message
-const receivedCipher = packet.message.body;
-const decrypted = await ratchetManager.decrypt(
-  receivedCipher,
-  'session-123',
-  'bob',
-  'alice'
-);
-
-console.log(decrypted);  // "Hello Bob!"
-```
-
-### Event-Driven Architecture
-
-```typescript
-import { EventCore, EventCoreEvents } from '@muhkoo/connect/events';
-import { Message } from '@muhkoo/connect/messaging';
-
-// Setup event listeners
-EventCore.on(EventCoreEvents.MESSAGE, (event: CustomEvent) => {
-  const message = event.detail as Message;
-  console.log('Received message:', message.body);
-});
-
-EventCore.on(EventCoreEvents.ERROR, (event: CustomEvent) => {
-  console.error('Error:', event.detail);
-});
-
-// Emit events
-const msg = new Message({ text: 'Hello!' });
-EventCore.emit(EventCoreEvents.MESSAGE, msg);
-```
-
-### Serialization and Transport
-
-```typescript
-import { serialize, deserialize } from '@muhkoo/connect/utilities';
-import { Message, Packet } from '@muhkoo/connect/messaging';
-
-// Create complex data structure
-const data = {
-  user: { name: 'Alice', joined: new Date() },
-  tags: new Set(['developer', 'designer']),
-  metadata: new Map([['role', 'admin'], ['level', 5]])
-};
-
-// Serialize for storage/transport
-const serialized = serialize(data);  // Base58 string
-
-// Send over network, save to file, etc.
-// ...
-
-// Deserialize
-const restored = deserialize(serialized);
-console.log(restored.user.joined instanceof Date);  // true
-console.log(restored.tags instanceof Set);          // true
-console.log(restored.metadata instanceof Map);      // true
-```
-
----
-
-## Performance Considerations
-
-### Known Issues
-
-1. **Base58 encoding** is slow for large payloads (>100KB)
-   - Uses BigInt arithmetic which can be CPU-intensive
-   - Consider chunking large data or using alternative encoding for bulk transfers
-
-2. **Message body serialization** happens on every get/set
-   - Avoid repeatedly accessing `message.body` in tight loops
-   - Cache the deserialized value if accessed multiple times
-
-### Best Practices
-
-1. **Reuse KeyStore and RatchetManager instances** - they are singletons
-2. **Batch message encryption** when possible
-3. **Use specific sessions** for high-volume messaging (enables DH ratcheting)
-4. **Set appropriate TTLs** on packets to prevent stale messages
-5. **Verify checksums** on critical messages only (has performance cost)
-
----
-
-## Browser vs Node.js Differences
-
-| Feature | Browser | Node.js |
-|---------|---------|---------|
-| Crypto API | Web Crypto API | Node.js crypto module |
-| Storage | IndexedDB | File system / SQLite |
-| Import | `dist/browser/index.js` | `dist/server/index.js` |
-| Workers | Web Workers | Worker threads |
-
-Both environments use the same API surface - differences are handled internally.
-
----
-
-## TypeScript Support
-
-The library is written in TypeScript and provides full type definitions:
-
-```typescript
-import type {
-  Message,
-  MessageOptions,
-  Packet,
-  PacketOptions,
-  UserIdentity,
-  Session,
-  WSMessage
-} from '@muhkoo/connect';
-```
-
-All types are exported from their respective modules and from the main entry point.
-
----
+## Messaging
+
+`Message`, `Packet`, `SerializeMessage` decorator, `decorators` namespace.
+Used internally by the legacy `Network` / `Storage` classes that aren't part
+of the public build today. Useful if you're building your own protocol on top
+of `WSTransport`.
+
+## Things that DO NOT exist (despite older docs)
+
+- `MuhkooClient`, `client.auth`, `client.storage`, `client.message`,
+  `client.shared` — these were a planned facade. Not implemented.
+- `Network` class — still in `src/network/` but NOT exported from any build.
+- `SessionManager`, `ApiClient` — referenced by `examples/` and old
+  integration tests; do not exist in `src/`.
+- `src/api/`, `src/client/` — referenced by `package.json` `exports`; not in
+  the repo. The `@muhkoo/connect/api` subpath is a holdover.
+- API-token / app-token system — see `docs/api-token-*.md` (design only).
 
 ## License
 
-GPL-3.0 - See LICENSE file for details.
-
-## Version
-
-Current version: 0.1.0-alpha.1
-
-Requires Node.js >= 20.0.0
+GPL-3.0.

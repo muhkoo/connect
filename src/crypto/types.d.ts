@@ -49,14 +49,17 @@ interface RatchetState {
     clientDhPub: CryptoKey ;
     serverDhPriv: CryptoKey  | null;
     serverDhPub: CryptoKey ;
-    rootKey: Buffer | null;
-    sendChainKey: Buffer | null;
-    recvChainKey: Buffer | null;
+    // Symmetric key material (root key + chain keys + skipped message keys).
+    // Stored as Uint8Array rather than Node's Buffer so this type works in the
+    // browser/Workers builds.
+    rootKey: Uint8Array | null;
+    sendChainKey: Uint8Array | null;
+    recvChainKey: Uint8Array | null;
     sendCount: number;
     recvCount: number;
     prevChainLength: number;
-    currentSkippedKeys: Map<number, Buffer>;
-    oldSkippedMessageKeys: Map<string, { skips: Map<number, Buffer>; created: number }>;
+    currentSkippedKeys: Map<number, Uint8Array>;
+    oldSkippedMessageKeys: Map<string, { skips: Map<number, Uint8Array>; created: number }>;
 }
 
 interface KeyPair {

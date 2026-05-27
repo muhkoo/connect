@@ -1,30 +1,14 @@
 import { RatchetState, CipherMessage, CipherMessageHeader } from './types.d';
 import { KeyStore } from './KeyStore';
-import { deserialize } from '../utilities';
+import { deserialize, toHex, fromHex, concatBytes, utf8Encode } from '../utilities';
 
-// Cross-platform crypto implementation
-let cryptoImpl: Crypto;
-let nodeCrypto: any = null;
-
-if (typeof globalThis !== 'undefined' && globalThis.crypto) {
-    // Browser or Node.js 19+ with global crypto
-    cryptoImpl = globalThis.crypto;
-} else if (typeof window !== 'undefined' && window.crypto) {
-    // Browser fallback
-    cryptoImpl = window.crypto;
-} else {
-    // Node.js < 19 - require crypto module
-    try {
-        nodeCrypto = require('crypto');
-        cryptoImpl = nodeCrypto.webcrypto as Crypto;
-    } catch (e) {
-        throw new Error('No crypto implementation available');
-    }
-}
+// We rely on the WebCrypto global (`crypto`/`globalThis.crypto`) — present in
+// browsers, CF Workers, and Node 19+. No `require('crypto')` Node fallback;
+// supported runtimes all expose WebCrypto natively.
 
 async function getPubKeyHex(pubKey: CryptoKey): Promise<string> {
-    const exported = await cryptoImpl.subtle.exportKey('raw', pubKey);
-    return Buffer.from(exported).toString('hex');
+    const exported = await crypto.subtle.exportKey('raw', pubKey);
+    return toHex(new Uint8Array(exported));
 }
 
 async function keysEqual(key1: CryptoKey, key2: CryptoKey): Promise<boolean> {
@@ -33,24 +17,18 @@ async function keysEqual(key1: CryptoKey, key2: CryptoKey): Promise<boolean> {
     return hex1 === hex2;
 }
 
-// Cross-platform function to get random bytes
 function getRandomBytes(length: number): Uint8Array {
-    // Create with explicit ArrayBuffer to avoid SharedArrayBuffer issues
-    const arrayBuffer = new ArrayBuffer(length);
-    const buffer = new Uint8Array(arrayBuffer);
-    cryptoImpl.getRandomValues(buffer);
+    const buffer = new Uint8Array(length);
+    crypto.getRandomValues(buffer);
     return buffer;
 }
 
-// Helper function to convert Buffer to ArrayBuffer for crypto operations
-function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
-    // Ensure we're working with a proper ArrayBuffer, not SharedArrayBuffer
-    const arrayBuffer = new ArrayBuffer(buffer.length);
-    const view = new Uint8Array(arrayBuffer);
-    for (let i = 0; i < buffer.length; i++) {
-        view[i] = buffer[i];
-    }
-    return arrayBuffer;
+// Ensure a typed-array view backed by ArrayBuffer (not SharedArrayBuffer) for
+// WebCrypto APIs that require it.
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+    const ab = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(ab).set(bytes);
+    return ab;
 }
 
 
@@ -92,33 +70,27 @@ class DoubleRatchet {
         appLogger.debug(`Constructor: senderId=${senderId}, recipientId=${recipientId}, isClient=${isClient}`);
     }
 
-    private async hkdf(input: Buffer, info: string, length: number): Promise<Buffer> {
-        // Use Node.js built-in hkdfSync if available
-        if (nodeCrypto && nodeCrypto.hkdfSync) {
-            return nodeCrypto.hkdfSync('sha256', input, '', info, length) as Buffer;
-        }
-
-        // Fallback to WebCrypto HKDF for browsers
-        const key = await cryptoImpl.subtle.importKey(
+    private async hkdf(input: Uint8Array, info: string, length: number): Promise<Uint8Array> {
+        const key = await crypto.subtle.importKey(
             'raw',
-            bufferToArrayBuffer(input),
+            toArrayBuffer(input),
             { name: 'HKDF' },
             false,
             ['deriveBits']
         );
 
-        const derivedBits = await cryptoImpl.subtle.deriveBits(
+        const derivedBits = await crypto.subtle.deriveBits(
             {
                 name: 'HKDF',
                 hash: 'SHA-256',
                 salt: new Uint8Array(0),
-                info: new TextEncoder().encode(info)
+                info: utf8Encode(info)
             },
             key,
             length * 8 // bits
         );
 
-        return Buffer.from(derivedBits);
+        return new Uint8Array(derivedBits);
     }
 
     public async initializeSession(isClient: boolean = true): Promise<void> {
@@ -128,12 +100,12 @@ class DoubleRatchet {
             throw new Error('Missing own private key');
         }
         const remotePub = isClient ? this.state.serverDhPub : this.state.clientDhPub;
-        const sharedSecret = await cryptoImpl.subtle.deriveBits(
+        const sharedSecret = await crypto.subtle.deriveBits(
             { name: 'ECDH', public: remotePub },
             ownPriv,
             384
         );
-        const keys = await this.hkdf(Buffer.from(sharedSecret), 'DoubleRatchetInit', 32);
+        const keys = await this.hkdf(new Uint8Array(sharedSecret), 'DoubleRatchetInit', 32);
         this.state.rootKey = keys;
         this.state.sendChainKey = this.state.rootKey;
         this.state.recvChainKey = this.state.rootKey;
@@ -146,12 +118,12 @@ class DoubleRatchet {
         if (!ownPriv) {
             throw new Error('Missing own private key');
         }
-        const sharedSecret = await cryptoImpl.subtle.deriveBits(
+        const sharedSecret = await crypto.subtle.deriveBits(
             { name: 'ECDH', public: newPubKey },
             ownPriv,
             384
         );
-        const input = Buffer.concat([this.state.rootKey!, Buffer.from(sharedSecret)]);
+        const input = concatBytes(this.state.rootKey!, new Uint8Array(sharedSecret));
         const keys = await this.hkdf(input, 'DoubleRatchetDH', 64);
         this.state.rootKey = keys.subarray(0, 32);
         this.state.recvChainKey = keys.subarray(32);
@@ -162,7 +134,7 @@ class DoubleRatchet {
         appLogger.debug(`DH ratchet complete`);
     }
 
-    private async symmetricRatchet(chainKey: Buffer): Promise<[Buffer, Buffer]> {
+    private async symmetricRatchet(chainKey: Uint8Array): Promise<[Uint8Array, Uint8Array]> {
         const keys = await this.hkdf(chainKey, 'DoubleRatchetMsg', 64);
         const messageKey = keys.subarray(0, 32);
         const newChainKey = keys.subarray(32);
@@ -188,7 +160,7 @@ class DoubleRatchet {
         }
         if (newDhKey && this.sessionType === 'specific') {
             appLogger.debug(`Generating new DH key pair for ${senderId}`);
-            const ecdhKeyPair = await cryptoImpl.subtle.generateKey(
+            const ecdhKeyPair = await crypto.subtle.generateKey(
                 { name: 'ECDH', namedCurve: 'P-384' },
                 true,
                 ['deriveKey', 'deriveBits']
@@ -202,22 +174,21 @@ class DoubleRatchet {
         const [messageKey, newChainKey] = await this.symmetricRatchet(this.state.sendChainKey!);
         this.state.sendChainKey = newChainKey;
 
-        const messageCryptoKey = await cryptoImpl.subtle.importKey(
+        const messageCryptoKey = await crypto.subtle.importKey(
             'raw',
-            bufferToArrayBuffer(messageKey),
+            toArrayBuffer(messageKey),
             { name: 'AES-GCM' },
             false,
             ['encrypt']
         );
 
-        const encoder = new TextEncoder();
         const iv = getRandomBytes(12);
-        const encrypted = await cryptoImpl.subtle.encrypt(
+        const encrypted = await crypto.subtle.encrypt(
             { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
             messageCryptoKey,
-            encoder.encode(plaintext)
+            utf8Encode(plaintext)
         );
-        const cipherTextWithTag = Buffer.from(encrypted).toString('hex');
+        const cipherTextWithTag = toHex(new Uint8Array(encrypted));
         appLogger.debug(`Encrypt: plaintextLength=${plaintext.length}, ciphertextLength=${encrypted.byteLength}`);
 
         this.state.sendCount++;
@@ -235,10 +206,10 @@ class DoubleRatchet {
         };
         appLogger.debug(`Message header:`, header);
         appLogger.debug(`Message header:`, keyStore.getAuthKeyPair(senderId)!.privateKey!);
-        const sign = await cryptoImpl.subtle.sign(
+        const sign = await crypto.subtle.sign(
             { name: 'ECDSA', hash: 'SHA-256' },
             keyStore.getAuthKeyPair(senderId)!.privateKey!,
-            encoder.encode(JSON.stringify({
+            utf8Encode(JSON.stringify({
                 dhPub: header.dhPub,
                 prevChainLength: header.prevChainLength,
                 messageNumber: header.messageNumber,
@@ -249,13 +220,13 @@ class DoubleRatchet {
                 timestamp: header.timestamp
             }))
         );
-        header.signature = Buffer.from(sign).toString('hex');
+        header.signature = toHex(new Uint8Array(sign));
 
         appLogger.debug(`Encrypted: sessionId=${sessionId}, messageNumber=${this.state.sendCount}, sender=${senderId}, recipient=${recipientId}`);
         return {
             header,
             ciphertext: cipherTextWithTag,
-            nonce: Buffer.from(iv).toString('hex'),
+            nonce: toHex(iv),
         };
     }
 
@@ -282,11 +253,11 @@ class DoubleRatchet {
         }
 
         const keyStore = KeyStore.getInstance();
-        const verify = await cryptoImpl.subtle.verify(
+        const verify = await crypto.subtle.verify(
             { name: 'ECDSA', hash: 'SHA-256' },
             keyStore.getAuthKeyPair(header.senderId)!.publicKey,
-            Buffer.from(header.signature, 'hex'),
-            new TextEncoder().encode(JSON.stringify({
+            fromHex(header.signature),
+            utf8Encode(JSON.stringify({
                 dhPub: header.dhPub,
                 prevChainLength: header.prevChainLength,
                 messageNumber: header.messageNumber,
@@ -320,14 +291,14 @@ class DoubleRatchet {
             throw new Error(`Invalid nonce: not a valid hex string (length=${nonce.length})`);
         }
 
-        const ciphertextBuffer = Buffer.from(ciphertext, 'hex');
-        const nonceBuffer = Buffer.from(nonce, 'hex');
+        const ciphertextBuffer = fromHex(ciphertext);
+        const nonceBuffer = fromHex(nonce);
         if (nonceBuffer.length !== 12) {
             throw new Error(`Invalid nonce: must be 12 bytes (length=${nonceBuffer.length})`);
         }
 
         const senderPubJwk = JSON.parse(deserialize(header.dhPub));
-        const senderPubKey = await cryptoImpl.subtle.importKey(
+        const senderPubKey = await crypto.subtle.importKey(
             'jwk',
             senderPubJwk,
             { name: 'ECDH', namedCurve: 'P-384' },
@@ -340,7 +311,7 @@ class DoubleRatchet {
 
         this.cleanOldSkippedKeys();
 
-        let messageKey: Buffer;
+        let messageKey: Uint8Array;
         if (senderPubHex === currentSenderPubHex) {
             // Current chain
             if (header.messageNumber > this.state.recvCount) {
@@ -376,7 +347,7 @@ class DoubleRatchet {
                 if (numSkips > this.maxSkip) {
                     throw new Error('Too many skipped messages on old chain');
                 }
-                let oldSkips = this.state.oldSkippedMessageKeys.get(oldSenderPubHex)?.skips || new Map<number, Buffer>();
+                let oldSkips = this.state.oldSkippedMessageKeys.get(oldSenderPubHex)?.skips || new Map<number, Uint8Array>();
                 let tempRecvChainKey = this.state.recvChainKey!;
                 for (let i = 0; i < numSkips; i++) {
                     const [skippedKey, newChainKey] = await this.symmetricRatchet(tempRecvChainKey);
@@ -440,16 +411,16 @@ class DoubleRatchet {
             }
         }
 
-        const messageCryptoKey = await cryptoImpl.subtle.importKey(
+        const messageCryptoKey = await crypto.subtle.importKey(
             'raw',
-            bufferToArrayBuffer(messageKey),
+            toArrayBuffer(messageKey),
             { name: 'AES-GCM' },
             false,
             ['decrypt']
         );
 
         try {
-            const decrypted = await cryptoImpl.subtle.decrypt(
+            const decrypted = await crypto.subtle.decrypt(
                 { name: 'AES-GCM', iv: nonceBuffer },
                 messageCryptoKey,
                 ciphertextBuffer

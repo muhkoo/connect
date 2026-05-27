@@ -17,11 +17,10 @@ const input = isWorkers
     ? "src/browser/index.ts"
     : "src/server/index.ts";
 
-// For library builds (browser/server) externalize every bare specifier — npm
-// packages and Node builtins alike — so the consumer's bundler resolves them.
-// Rollup was already doing this implicitly (hence the "unresolved dependencies"
-// warnings); declaring it explicitly just silences the noise. The Workers build
-// must bundle everything, so externals stay disabled there.
+// Server and browser library builds externalize bare specifiers — the
+// consumer's bundler (or an import map for direct browser use) resolves them.
+// The Workers build bundles everything since CF Workers has no module
+// resolver at runtime.
 const externalFn = isWorkers
   ? undefined
   : (id) => !id.startsWith(".") && !path.isAbsolute(id);

@@ -1,4 +1,26 @@
-import chalk from 'chalk';
+// Tiny browser-safe replacement for the `chalk` Node module.
+// Emits ANSI escape codes when running attached to a TTY (Node terminal);
+// returns plain strings everywhere else (browsers, log files, CF Workers).
+// Avoids dragging chalk + its terminfo deps into the browser/Workers bundles.
+type ColorFn = (s: string) => string;
+const _isTty: boolean = (() => {
+  try {
+    const proc = (globalThis as { process?: { stdout?: { isTTY?: boolean } } }).process;
+    return !!proc?.stdout?.isTTY;
+  } catch { return false; }
+})();
+const _ansi = (code: string): ColorFn =>
+  _isTty ? (s) => `\x1b[${code}m${s}\x1b[0m` : (s) => s;
+const colors = {
+    gray:    _ansi('90'),
+    red:     _ansi('31'),
+    green:   _ansi('32'),
+    yellow:  _ansi('33'),
+    blue:    _ansi('34'),
+    magenta: _ansi('35'),
+    cyan:    _ansi('36'),
+    dim:     _ansi('2'),
+};
 
 enum LogLevel {
     VERBOSE = 0,
@@ -24,7 +46,7 @@ class Logger {
     level: string = 'INFO';
 
     constructor(prefix: string = 'CONNECT', LOGLEVEL: string = 'INFO', showCaller: boolean = false) {
-        this.prefix = chalk.gray(`[${prefix}]`);
+        this.prefix = colors.gray(`[${prefix}]`);
         this.showCaller = showCaller;
         let envLevel;
 
@@ -99,12 +121,12 @@ class Logger {
         const parts: string[] = [];
 
         if (info.function) {
-            parts.push(chalk.cyan(info.function));
+            parts.push(colors.cyan(info.function));
         }
 
         if (info.file) {
             const location = info.line ? `${info.file}:${info.line}` : info.file;
-            parts.push(chalk.dim(`(${location})`));
+            parts.push(colors.dim(`(${location})`));
         }
 
         return parts.length > 0 ? ' ' + parts.join(' ') : '';
@@ -124,7 +146,7 @@ class Logger {
     info(...args: any[]): void {
         if (this.shouldLog(LogLevel.INFO)) {
             const caller = this.formatCallerInfo(this.getCallerInfo());
-            this.console.info(this.prefix, chalk.blue('INFO') + caller, ...args);
+            this.console.info(this.prefix, colors.blue('INFO') + caller, ...args);
         }
     }
 
@@ -135,35 +157,35 @@ class Logger {
     verbose(...args: any[]): void {
         if (this.shouldLog(LogLevel.VERBOSE)) {
             const caller = this.formatCallerInfo(this.getCallerInfo());
-            this.console.log(this.prefix, chalk.cyan('VERBOSE') + caller, ...args);
+            this.console.log(this.prefix, colors.cyan('VERBOSE') + caller, ...args);
         }
     }
 
     success(...args: any[]): void {
         if (this.shouldLog(LogLevel.SUCCESS)) {
             const caller = this.formatCallerInfo(this.getCallerInfo());
-            this.console.debug(this.prefix, chalk.green('SUCCESS') + caller, ...args);
+            this.console.debug(this.prefix, colors.green('SUCCESS') + caller, ...args);
         }
     }
 
     warn(...args: any[]): void {
         if (this.shouldLog(LogLevel.WARN)) {
             const caller = this.formatCallerInfo(this.getCallerInfo());
-            this.console.warn(this.prefix, chalk.yellow('WARN') + caller, ...args);
+            this.console.warn(this.prefix, colors.yellow('WARN') + caller, ...args);
         }
     }
 
     error(...args: any[]): void {
         if (this.shouldLog(LogLevel.ERROR)) {
             const caller = this.formatCallerInfo(this.getCallerInfo());
-            this.console.error(this.prefix, chalk.red('ERROR') + caller, ...args);
+            this.console.error(this.prefix, colors.red('ERROR') + caller, ...args);
         }
     }
 
     debug(...args: any[]): void {
         if (this.shouldLog(LogLevel.DEBUG)) {
             const caller = this.formatCallerInfo(this.getCallerInfo());
-            this.console.debug(this.prefix, chalk.magenta('DEBUG') + caller, ...args);
+            this.console.debug(this.prefix, colors.magenta('DEBUG') + caller, ...args);
         }
     }
 

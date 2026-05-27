@@ -1,7 +1,16 @@
-# API Token Security Implementation Plan
+# API Token Security Implementation Plan (DESIGN — NOT IMPLEMENTED)
+
+> **Status:** design document. None of the code, file paths, or types
+> described below exist in `src/`. The companion design doc is
+> [`api-token-implementation.md`](./api-token-implementation.md). Treat both
+> as a record of an earlier brainstorm, not a description of the current
+> codebase.
 
 ## Overview
-This document outlines a comprehensive strategy for implementing a secure public API token system that allows public distribution while protecting against abuse. The approach integrates with the existing Double Ratchet encryption architecture.
+This document outlines a strategy for implementing a secure public API token
+system that allows public distribution while protecting against abuse. The
+approach was intended to integrate with the existing Double Ratchet encryption
+architecture.
 
 ## Core Strategy: "Public Identifier + Private Authentication"
 
@@ -403,4 +412,11 @@ For existing implementations:
 
 ## Conclusion
 
-This implementation provides enterprise-grade security for public API tokens while maintaining the superior encryption of the Double Ratchet protocol. The multi-layered approach ensures that even if tokens are exposed, the system remains secure through rate limiting, abuse detection, and end-to-end encryption.
+This *design* describes enterprise-grade security for public API tokens
+combined with the Double Ratchet primitives this SDK provides. Nothing in
+`src/` implements any of it today.
+
+If we revisit the idea, the natural place for token validation is the
+accelerator (`muhkoo/accelerator`), not the client SDK. The client side would
+just attach an `X-App-Token` header to its outbound fetches and let the worker
+do the multi-layered validation.

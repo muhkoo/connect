@@ -1,178 +1,116 @@
 # Connect SDK Documentation
 
-Welcome to the **Connect SDK** documentation. This SDK provides end-to-end encrypted communication with zero-knowledge authentication, built on the Signal Protocol's Double Ratchet algorithm.
+`@muhkoo/connect` is a TypeScript client SDK with three build targets
+(browser, server, workers) cut from a single source tree.
 
-## Table of Contents
+## Contents
 
-1. [**Crypto Architecture**](./crypto-architecture.md) - Overview of the encryption system
-2. [**API Reference**](./api-reference.md) - Detailed API documentation
-3. [**Usage Examples**](./examples.md) - Practical implementation examples
-4. [**WebSocket Integration**](./websocket-integration.md) - Real-time messaging setup
+- [**API Reference**](./api-reference.md) — every public class, method, and event
+- [**Crypto Architecture**](./crypto-architecture.md) — Double Ratchet, ECDH P-384, ZK auth
+- [**Examples**](./examples.md) — end-to-end usage of `BroadcastChannel`,
+  `EncryptedSession`, `PersonalSpaceClient`, and the Groth16 verifier
+- [**API Token Implementation Guide**](./api-token-implementation.md) —
+  **design only**, not implemented
+- [**API Token Security Plan**](./api-token-security-plan.md) —
+  **design only**, not implemented
 
-## Quick Start
+> The repo-root `README.md` and `API_REFERENCE.md` are the canonical
+> high-level summary. This `docs/` directory drills into specific subsystems.
 
-```typescript
-import { DoubleRatchetManager, KeyStore } from '@muhkoo/connect';
+## What the SDK provides today
 
-// Initialize key store and generate keypair
-const keyStore = KeyStore.getInstance();
-await keyStore.generateOwnKeyPair('client1');
+- `BroadcastChannel` — multi-peer E2EE room over a WebSocket
+- `EncryptedSession` — transport-agnostic per-peer Double Ratchet manager
+- `WSTransport` — pure WebSocket lifecycle (auto-reconnect + offline queue)
+- `KeyStore` — ECDH + ECDSA P-384 keypair singleton with dehydrate/hydrate
+- `DoubleRatchet`, `DoubleRatchetManager` — ratchet primitives
+- `PersonalSpaceClient` — ZK-gated HTTP KV client (snarkjs-driven)
+- `wrapWithPassphrase` / `unwrapWithPassphrase` — PBKDF2 + AES-GCM
+- `verifyGroth16` + `initBn128Wasm` — universal Groth16 verifier
+  (bn128.wasm, no snarkjs)
+- Re-exported ZK helpers: `Field`, `Poseidon`, `PreimagePoK`,
+  `HashKnowledge`, `AuthPublicInput`, `verifyPreimagePoK`,
+  `verifyHashKnowledge`, `quickVerify`, `compilePrograms`,
+  `initializeCircuits`, `encodeToHex`, `decodeFromHex`
+- `Message`, `Packet`, `EventCore`, `EventCoreEvents`
 
-// Create session manager
-const manager = new DoubleRatchetManager('client1');
+The `workers` build excludes snarkjs-dependent symbols
+(`PersonalSpaceClient`, wrap helpers, `Authenticator`, `ZeroKnowledge`,
+`DoubleRatchetManager`). The bn128.wasm-driven `verifyGroth16` is in all three
+builds and is the only Groth16 path that works under workerd.
 
-// Initialize encrypted session
-const sessionId = await manager.initializeSession(
-  'client1',
-  'server1',
-  true,
-  'specific'
-);
-
-// Send encrypted message
-const message = await manager.encrypt(
-  'client1',
-  'server1',
-  sessionId,
-  'Hello, secure world!',
-  false,
-  'specific'
-);
-
-// Decrypt message
-const plaintext = await manager.decrypt(message, true);
-console.log(plaintext); // "Hello, secure world!"
-```
-
-## Key Features
-
-- ✅ **Double Ratchet Protocol** - Signal-style forward secrecy
-- ✅ **Zero-Knowledge Authentication** - Privacy-preserving ZK proofs using o1js
-- ✅ **Session Management** - Persistent, resumable encrypted sessions
-- ✅ **Multi-tenant Support** - Isolated key spaces per tenant
-- ✅ **Broadcast & P2P** - Support for both 1:1 and fan-out messaging
-- ✅ **File Encryption** - Reuse session keys for file/data encryption
-- ✅ **Out-of-Order Delivery** - Handle network reordering gracefully
-- ✅ **Message Authentication** - ECDSA signatures on every message
-- ✅ **Replay Protection** - Timestamp validation prevents replay attacks
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────┐
-│          Zero-Knowledge Authentication                  │
-│  (o1js circuits for privacy-preserving handshake)       │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│          Double Ratchet Session Management              │
-│  (ECDH key agreement + symmetric key ratcheting)        │
-│                                                          │
-│  ┌────────────────┐         ┌─────────────────┐        │
-│  │ KeyStore       │────────▶│ RatchetManager  │        │
-│  │ (P-384 keys)   │         │ (Sessions)      │        │
-│  └────────────────┘         └────────┬────────┘        │
-│                                      │                  │
-│         ┌────────────────────────────┴────────┐        │
-│         ▼                                     ▼        │
-│  ┌─────────────┐                    ┌──────────────┐  │
-│  │ Real-time   │                    │ File/Data    │  │
-│  │ Messages    │                    │ Encryption   │  │
-│  │ (WebSocket) │                    │ (AES-GCM)    │  │
-│  └─────────────┘                    └──────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
-
-## Security Properties
-
-### Forward Secrecy
-New message keys are derived for every message. Compromising current keys doesn't reveal past messages.
-
-### Future Secrecy (Break-in Recovery)
-DH ratchet rotates every 100 messages (configurable). Compromised session recovers after next DH ratchet.
-
-### Message Authentication
-Every message includes an ECDSA signature. Recipients verify sender identity.
-
-### Replay Protection
-Timestamps with 5-minute validity window prevent replay attacks.
-
-### Zero-Knowledge Registration
-Server never sees client secrets during registration. ZK proofs verify knowledge without revelation.
-
-## Cryptographic Primitives
-
-- **ECDH**: P-384 curve for key exchange
-- **ECDSA**: P-384 curve for message signing
-- **HKDF**: SHA-256 for key derivation
-- **AES-GCM**: 256-bit for symmetric encryption
-- **Poseidon**: Hash function for ZK circuits
-- **Base58**: Compact encoding for key transport
-- **Gzip**: Compression for key serialization
-
-## Session Types
-
-### Specific (1:1)
-Private session between two parties. Keys rotate every 100 messages.
+## Quick start
 
 ```typescript
-const sessionId = await manager.initializeSession(
-  senderId,
-  recipientId,
-  isClient,
-  'specific'
-);
+import { BroadcastChannel, BroadcastChannelEvents } from "@muhkoo/connect";
+
+const channel = new BroadcastChannel({
+  url: "wss://accelerator.example.dev/room/foo",
+  myId: "alice@example.dev",
+});
+
+channel.on(BroadcastChannelEvents.MESSAGE, (e) => {
+  const { from, text } = e.detail;
+  console.log(`${from}: ${text}`);
+});
+
+await channel.connect();
+await channel.announce();
+await channel.send("hello room");
 ```
 
-### Global (Broadcast)
-Shared session where server broadcasts to multiple clients. All clients decrypt with same keys.
+See [examples.md](./examples.md) for the full multi-peer flow, the
+`EncryptedSession` BYO-transport pattern, the `PersonalSpaceClient` ZK-gated
+storage flow, and Groth16 verification.
 
-```typescript
-const sessionId = await manager.initializeSession(
-  serverId,
-  'global-client',
-  false,
-  'global'
-);
-```
+## Crypto at a glance
 
-## Multi-Tenant Isolation
+- ECDH P-384 for key agreement, ECDSA P-384 for signing — same curve as
+  the deployed chat protocol uses.
+- HKDF-SHA-256 for ratchet key derivation, AES-256-GCM for message bodies.
+- ZK identity uses Poseidon commitments and Groth16 proofs over the
+  `preimagePoK` circuit. The verification key is pinned in
+  `src/types/zk.ts` as `PREIMAGE_POK_VERIFICATION_KEY`.
+- Personal-space storage is gated by a fresh per-request proof. The
+  accelerator's `verifyZkAuthProof` is what runs on the server side.
 
-Tenants are isolated by using different keypairs. No additional abstraction needed:
+See [crypto-architecture.md](./crypto-architecture.md) for the full design
+discussion.
 
-```typescript
-// Tenant A
-const keyStoreA = KeyStore.getInstance();
-await keyStoreA.generateOwnKeyPair('tenant-a-server');
+## What's intentionally NOT here
 
-// Tenant B
-const keyStoreB = KeyStore.getInstance();
-await keyStoreB.generateOwnKeyPair('tenant-b-server');
+- There is no single `MuhkooClient` facade. Apps wire up `BroadcastChannel`,
+  `PersonalSpaceClient`, etc. directly.
+- There is no offline-first sync engine, IndexedDB cache, optimistic-update
+  manager, OAuth flow, or "shared namespace" abstraction in this package.
+  Those concerns live in the consumer (the chat app, etc.).
+- The API-token system documented under `docs/api-token-*.md` is a written
+  design only — there is no implementation in `src/`.
 
-// Clients can only decrypt if they have the correct tenant's public key
-```
+## Platform support
 
-## Platform Support
+| Runtime | Status |
+| --- | --- |
+| Node ≥ 20 (server bundle) | supported |
+| Modern browsers (browser bundle) | supported |
+| Cloudflare Workers / workerd (workers bundle) | supported (subset; see above) |
 
-- **Node.js**: Full support (uses Node crypto module)
-- **Browser**: Planned (requires WebCrypto API adaptation)
-- **React Native**: Planned (requires native crypto bridge)
+All three rely on globalThis-level WebCrypto (`crypto.subtle`,
+`crypto.getRandomValues`), so the same crypto code runs everywhere.
 
 ## Testing
 
 ```bash
-# Run all crypto tests
-yarn test tests/crypto/
-
-# Run specific test suite
-yarn test tests/crypto/ratchet.test.ts
+yarn test               # vitest (watch mode)
+yarn test:unit          # vitest --run
+yarn test:integration   # TEST_TYPE=integration vitest --run tests/integration
 ```
+
+Note: some files under `tests/integration/` are stale (they import from
+`src/api/`, `src/client/`, etc. which don't exist). They should be regarded as
+historical until they're either deleted or updated. See
+`tests/integration/README.md` for the present state.
 
 ## License
 
-[Your License Here]
-
-## Contributing
-
-[Contributing Guidelines]
+GPL-3.0 — see `LICENSE`.

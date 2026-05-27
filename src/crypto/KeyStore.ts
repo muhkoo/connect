@@ -1,5 +1,4 @@
-import { webcrypto } from 'crypto';
-import { serialize, deserialize } from '../utilities';
+import { serialize, deserialize, toBase64, fromBase64, fromBase64Url, concatBytes, utf8Decode } from '../utilities';
 interface KeyPair {
     privateKey: CryptoKey | null;
     publicKey: CryptoKey;
@@ -160,20 +159,20 @@ class KeyStore {
             return null;
         }
         const jwk = await crypto.subtle.exportKey('jwk', authKeyPair.publicKey);
-        const x = Buffer.from(jwk.x!, 'base64url');
-        const y = Buffer.from(jwk.y!, 'base64url');
-        const rawKey = Buffer.concat([Buffer.from([0x04]), x, y]);
-        return new Uint8Array(rawKey);
+        const x = fromBase64Url(jwk.x!);
+        const y = fromBase64Url(jwk.y!);
+        // SEC1 uncompressed point: 0x04 || x || y
+        return concatBytes(new Uint8Array([0x04]), x, y);
     }
 
     public async packDehydratedKeys(id: string): Promise<string> {
         const dehydrated = await this.dehydrateKeyPair(id);
         const combined = JSON.stringify(dehydrated);
-        return Buffer.from(combined).toString('base64');
+        return toBase64(new TextEncoder().encode(combined));
     }
 
     public async hydrateFromPacked(id: string, masterKey: string): Promise<void> {
-        const decoded = Buffer.from(masterKey, 'base64').toString('utf-8');
+        const decoded = utf8Decode(fromBase64(masterKey));
         const dehydrated: DehydratedKeys = JSON.parse(decoded);
         await this.hydrateKeyPair(id, dehydrated);
     }

@@ -1,8 +1,17 @@
-# API Token Implementation Guide
+# API Token Implementation Guide (DESIGN — NOT IMPLEMENTED)
+
+> **Status:** design document. None of the code described below exists in
+> `src/`. `grep -r "appToken\|X-App-Token\|AppTokenValidator" src/` returns
+> nothing. The companion design doc is
+> [`api-token-security-plan.md`](./api-token-security-plan.md).
+>
+> Keep this file for future reference, but do not write code assuming any of
+> it is in place.
 
 ## Overview
 
-This guide explains how to implement a secure public API token system that allows you to:
+This guide describes a proposed secure public API token system that would
+allow you to:
 1. Embed a single `appToken` in your client code (web/mobile)
 2. Bill all usage to you (the app owner)
 3. Ensure only YOUR authorized clients can use the token
@@ -915,13 +924,17 @@ A: Add `http://localhost:3000` to your `allowedOrigins` list for development tok
 
 ## Next Steps
 
-1. Review the implementation plan
-2. Set up database schemas
-3. Implement core token management
-4. Add validation middleware
-5. Integrate with Network class
-6. Test thoroughly (unit + integration + security tests)
-7. Deploy to production
-8. Monitor usage and billing
+This is a design document. Before any of it can ship:
 
-For questions or assistance, refer to the main project documentation or open an issue on GitHub.
+1. Decide whether this belongs in `connect` at all, or in `accelerator`
+   (the API-token enforcement layer would live with the request handlers,
+   not the client SDK)
+2. Reconcile with the existing `EncryptedSession` / `BroadcastChannel`
+   primitives — there is no `Network` class with `appToken` support today
+3. Decide whether the chat app's username/password → Poseidon commitment
+   identity flow obviates the need for app tokens entirely
+4. Pick a single design (this doc vs. `api-token-security-plan.md`) and
+   delete the other
+
+For now, nothing in `src/` references `appToken`, `X-App-Token`, or any of
+the structures in this document.

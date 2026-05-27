@@ -12,6 +12,8 @@ export * from "../types";
 export * from "../crypto/KeyStore";
 export * from "../crypto/DoubleRatchet";
 export * from "../events";
+export * from "../sessions";
+export * from "../transport";
 
 // Workers-compatible Groth16 verification. Drives bn128.wasm directly; does
 // not pull in @zk-kit/groth16, snarkjs, or ffjavascript (all incompatible with

@@ -1,4 +1,5 @@
 import { PreimagePoK, AuthPublicInput, Field, Poseidon, verify, VerificationKey } from './ZeroKnowledge';
+import { toHex, fromHex, fromBase64Url } from '../utilities';
 
 interface AuthToken {
     peerId: string;
@@ -37,7 +38,7 @@ class Authenticator {
             privateKey,
             data
         );
-        return { peerId, timestamp, signature: Buffer.from(signature).toString('hex') };
+        return { peerId, timestamp, signature: toHex(new Uint8Array(signature)) };
     }
 
     public async verifyAuthToken(token: AuthToken, clientPublicKey: CryptoKey): Promise<boolean> {
@@ -49,7 +50,7 @@ class Authenticator {
         return await crypto.subtle.verify(
             { name: 'ECDSA', hash: 'SHA-256' },
             clientPublicKey,
-            Buffer.from(token.signature, 'hex'),
+            fromHex(token.signature),
             new TextEncoder().encode(`${token.peerId}:${token.timestamp}`)
         );
     }
@@ -85,7 +86,7 @@ class Authenticator {
 
         // Verify ECDSA public key hash
         const ecdsaJwk = await crypto.subtle.exportKey('jwk', ecdsaPub);
-        const ecdsaHex = Buffer.from(ecdsaJwk.x!, 'base64url').toString('hex').slice(0, 64);
+        const ecdsaHex = toHex(fromBase64Url(ecdsaJwk.x!)).slice(0, 64);
         const ecdsaPubField = new Field(BigInt('0x' + ecdsaHex));
         const expectedEcdsaPubHash = await Poseidon.hash([ecdsaPubField]);
         const proofEcdsaPubHash = new Field(publicSignals[2]);
