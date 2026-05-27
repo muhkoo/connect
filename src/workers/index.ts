@@ -7,10 +7,13 @@ export * from "../messaging";
 export * from "../messaging/Packet";
 export * from "../types";
 // Export only crypto modules that don't depend on snarkjs/ZeroKnowledge
-// (snarkjs/ffjavascript use URL.createObjectURL which is incompatible with Workers)
-// Excluded: ZeroKnowledge, Authenticator, DoubleRatchetManager (all depend on snarkjs)
+// (snarkjs/ffjavascript use URL.createObjectURL which is incompatible with Workers).
+// Excluded: ZeroKnowledge, Authenticator, DoubleRatchetManager (all depend on snarkjs).
+export * from "../crypto/primitives";
 export * from "../crypto/KeyStore";
 export * from "../crypto/DoubleRatchet";
+export * from "../crypto/ChunkCipher";
+export * from "../crypto/PassphraseWrap";
 export * from "../events";
 export * from "../sessions";
 export * from "../transport";

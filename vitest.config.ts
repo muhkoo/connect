@@ -21,6 +21,8 @@ export default defineConfig({
       // "**/ecdh.test.ts",
       "**/tests/crypto/ratchet.test.ts",
       "**/tests/crypto/zk-real.test.ts",
+      // Storage pipeline (cipher + RS codec + FileStorage end-to-end)
+      "**/tests/storage/FileStorage.test.ts",
       // "**/session-manager.test.ts",
       // "**/api-client.test.ts",
       // Salvaged tests

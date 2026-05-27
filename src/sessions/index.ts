@@ -2,20 +2,14 @@
  * End-to-end-encrypted communication sessions, built on the
  * Double Ratchet primitives in `src/crypto/`.
  *
- * The `EncryptedSession` class is a transport-agnostic wrapper for one
- * local identity that manages handshake state with arbitrary peers and
- * exposes `encrypt(text) -> frames[]` and `receive(frame) -> result` so
- * app code just shuffles JSON over its WebSocket (or HTTP, or whatever).
+ * `EncryptedSession` — transport-agnostic per-peer ratchet bookkeeping.
+ * `BroadcastChannel` — turnkey multi-peer "room" channel composing
+ * `EncryptedSession` over `WSTransport`.
+ *
+ * Re-exported via `export *` rather than explicit named exports so the
+ * rollup-plugin-dts build (which silently drops named re-exports across
+ * module boundaries) keeps everything in the public d.ts.
  */
 
-export { EncryptedSession } from "./EncryptedSession";
-export type {
-  SessionOptions,
-  KeyExchangeFrame,
-  CipherFrame,
-  IncomingFrame,
-  ReceiveResult,
-} from "./EncryptedSession";
-
-export { BroadcastChannel, BroadcastChannelEvents } from "./BroadcastChannel";
-export type { BroadcastChannelOptions } from "./BroadcastChannel";
+export * from "./EncryptedSession";
+export * from "./BroadcastChannel";

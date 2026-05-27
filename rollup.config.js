@@ -34,17 +34,22 @@ const jsConfig = {
       file: "dist/server/index.js",
       format: "es",
       sourcemap: true,
+      // The storage layer dynamically imports `./bundled-loader` so the
+      // `.wasm` static import is only encountered when production code runs.
+      // Single-file output requires us to inline that dynamic chunk.
+      inlineDynamicImports: true,
     },
     isBrowser && {
       file: "dist/browser/index.js",
       format: "es",
       sourcemap: true,
+      inlineDynamicImports: true, // same reason as the server build
     },
     isWorkers && {
       file: "dist/workers/index.js",
       format: "es",
       sourcemap: true,
-      inlineDynamicImports: true, // Required for Workers single-file output
+      inlineDynamicImports: true, // required for Workers single-file output
     },
   ].filter(Boolean),
   plugins: [
@@ -70,9 +75,15 @@ const jsConfig = {
   ].filter(Boolean),
 };
 
-// Complete DTS build config
+// Complete DTS build config.
+// Build types from the browser entry point (not `src/index.ts`) so the
+// declared shape matches what consumers actually see at runtime — the
+// browser bundle uses flat `export *` re-exports, while `src/index.ts`
+// uses namespaced `export * as foo` which doesn't survive
+// rollup-plugin-dts cleanly. Server-build consumers also see this same
+// shape (their `dist/server/index.js` is built from a near-identical entry).
 const dtsComplete = {
-  input: "src/index.ts",
+  input: "src/browser/index.ts",
   output: {
     file: "dist/connect.d.ts",
     format: "es",

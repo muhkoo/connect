@@ -1,6 +1,13 @@
 import { RatchetState, CipherMessage, CipherMessageHeader } from './types.d';
 import { KeyStore } from './KeyStore';
 import { deserialize, toHex, fromHex, concatBytes, utf8Encode } from '../utilities';
+import {
+    encryptAesGcm,
+    decryptAesGcm,
+    deriveBitsHkdf,
+    randomBytes,
+    AES_GCM_IV_BYTES,
+} from './primitives';
 
 // We rely on the WebCrypto global (`crypto`/`globalThis.crypto`) — present in
 // browsers, CF Workers, and Node 19+. No `require('crypto')` Node fallback;
@@ -15,20 +22,6 @@ async function keysEqual(key1: CryptoKey, key2: CryptoKey): Promise<boolean> {
     const hex1 = await getPubKeyHex(key1);
     const hex2 = await getPubKeyHex(key2);
     return hex1 === hex2;
-}
-
-function getRandomBytes(length: number): Uint8Array {
-    const buffer = new Uint8Array(length);
-    crypto.getRandomValues(buffer);
-    return buffer;
-}
-
-// Ensure a typed-array view backed by ArrayBuffer (not SharedArrayBuffer) for
-// WebCrypto APIs that require it.
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-    const ab = new ArrayBuffer(bytes.byteLength);
-    new Uint8Array(ab).set(bytes);
-    return ab;
 }
 
 
@@ -70,27 +63,8 @@ class DoubleRatchet {
         appLogger.debug(`Constructor: senderId=${senderId}, recipientId=${recipientId}, isClient=${isClient}`);
     }
 
-    private async hkdf(input: Uint8Array, info: string, length: number): Promise<Uint8Array> {
-        const key = await crypto.subtle.importKey(
-            'raw',
-            toArrayBuffer(input),
-            { name: 'HKDF' },
-            false,
-            ['deriveBits']
-        );
-
-        const derivedBits = await crypto.subtle.deriveBits(
-            {
-                name: 'HKDF',
-                hash: 'SHA-256',
-                salt: new Uint8Array(0),
-                info: utf8Encode(info)
-            },
-            key,
-            length * 8 // bits
-        );
-
-        return new Uint8Array(derivedBits);
+    private hkdf(input: Uint8Array, info: string, length: number): Promise<Uint8Array> {
+        return deriveBitsHkdf(input, info, length);
     }
 
     public async initializeSession(isClient: boolean = true): Promise<void> {
@@ -174,21 +148,9 @@ class DoubleRatchet {
         const [messageKey, newChainKey] = await this.symmetricRatchet(this.state.sendChainKey!);
         this.state.sendChainKey = newChainKey;
 
-        const messageCryptoKey = await crypto.subtle.importKey(
-            'raw',
-            toArrayBuffer(messageKey),
-            { name: 'AES-GCM' },
-            false,
-            ['encrypt']
-        );
-
-        const iv = getRandomBytes(12);
-        const encrypted = await crypto.subtle.encrypt(
-            { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
-            messageCryptoKey,
-            utf8Encode(plaintext)
-        );
-        const cipherTextWithTag = toHex(new Uint8Array(encrypted));
+        const iv = randomBytes(AES_GCM_IV_BYTES);
+        const encrypted = await encryptAesGcm(messageKey, iv, utf8Encode(plaintext));
+        const cipherTextWithTag = toHex(encrypted);
         appLogger.debug(`Encrypt: plaintextLength=${plaintext.length}, ciphertextLength=${encrypted.byteLength}`);
 
         this.state.sendCount++;
@@ -411,20 +373,8 @@ class DoubleRatchet {
             }
         }
 
-        const messageCryptoKey = await crypto.subtle.importKey(
-            'raw',
-            toArrayBuffer(messageKey),
-            { name: 'AES-GCM' },
-            false,
-            ['decrypt']
-        );
-
         try {
-            const decrypted = await crypto.subtle.decrypt(
-                { name: 'AES-GCM', iv: nonceBuffer },
-                messageCryptoKey,
-                ciphertextBuffer
-            );
+            const decrypted = await decryptAesGcm(messageKey, nonceBuffer, ciphertextBuffer);
             appLogger.debug(`Decrypted successfully: sessionId=${header.sessionId}, messageNumber=${header.messageNumber}`);
             return new TextDecoder().decode(decrypted);
         } catch (error) {

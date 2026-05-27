@@ -1,11 +1,14 @@
 import { assertType, Retry, Ready } from "../utilities";
 import { Network, NetworkOptions } from "../network";
-import { FileStat, Storage } from "../storage";
 import EventCore, { EventCoreEvents } from "../events/EventCore";
 import { Message, MessageOptions } from "../messaging";
 import { PacketOptions } from "../messaging/Packet";
 import semver from 'semver';
 import events from "events"
+// Storage was removed from this orchestrator when the new chunked/encrypted
+// FileStorage landed (`src/storage/FileStorage.ts`). Consumers should use
+// `FileStorage` directly with a `SharedSpaceClient` + `ShardClient`. See
+// `src/storage/index.ts`.
 
 
 /**
@@ -35,7 +38,6 @@ const instances = new Map();
 
 
 class Client extends EventCore {
-    protected _storage: Storage;
     protected _network: Network;
     protected _configs: ClientOptions;
     protected _readyPromise: Promise<boolean>;
@@ -95,9 +97,6 @@ class Client extends EventCore {
 
         appLogger.debug(`Client version: ${this.version}`);
         this._network = new Network(options.network);
-        this._storage = new Storage({
-            network: this._network
-        });
         this._configs = options
         this._readyPromise = new Promise((resolve) => {
             this._readyResolver = resolve;
@@ -115,12 +114,6 @@ class Client extends EventCore {
      * @public
      */
     get id(): string { return this._id; }
-
-    /**
-     * The storage interface for reading and writing files.
-     * @public
-     */
-    get storage(): Storage { return this._storage; }
 
     /**
      * The configuration options used to initialize the client.
@@ -243,55 +236,6 @@ class Client extends EventCore {
     }
 
     /**
-     * Writes a file or stream to the storage system.
-     *
-     * @param file - The file or readable stream to write.
-     * @param fileMeta - Optional metadata for the file (required if `file` is a stream).
-     * @returns A readable stream representing the stored data.
-     * @throws Error If the file type is invalid, metadata is missing, or the write operation fails.
-     * @public
-     */
-    @Ready() // await this.ready
-    @Retry(3)
-    public write(file: File): Promise<FileStat> {
-        try {
-            assertType(file, [File, ReadableStream]);
-            let meta: Omit<FileStat, 'id' | 'hash'>;
-            
-                meta = {
-                    name: file.name,
-                    type: file.type,
-                    size: file.size,
-                    lastModified: file.lastModified
-                };
-            
-            return this._storage.write(file, meta);
-        } catch (e) {
-            appLogger.error(e);
-            throw new Error(`Failed to write file`);
-        }
-    }
-
-    /**
-     * Reads a file from storage by its ID.
-     *
-     * @param fileId - The unique identifier of the file to read.
-     * @returns A promise that resolves to the file data as Uint8Array.
-     * @throws Error If the file cannot be read or does not exist.
-     * @public
-     */
-    @Ready()
-    @Retry(3)
-    public read(fileId: string): Promise<Uint8Array> {
-        try {
-            return this._storage.read(fileId);
-        } catch (e) {
-            appLogger.error(e);
-            throw new Error(`Failed to read file`);
-        }
-    }
-
-    /**
      * Sends a message over the Muhkoo network.
      *
      * @param message - The message content (string, object, or number).
@@ -341,7 +285,6 @@ export {
     PacketOptions,
     MessageOptions,
     Network,
-    Storage,
     EventCore,
     assertType,
     Retry,

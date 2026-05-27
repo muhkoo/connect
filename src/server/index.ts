@@ -12,3 +12,8 @@ export * from '../workers/groth16-verifier';
 // PersonalSpaceClient + passphrase wrap helpers. Pulls in snarkjs as an
 // external — Node consumers need snarkjs installed as a peer dep.
 export * from '../personal';
+// FileStorage + ShardClient + SharedSpaceClient. Excluded from the workers
+// build (SharedSpaceClient depends on snarkjs).
+export * from '../storage';
+// AuthClient — `/api/auth/*` HTTP wrapper.
+export * from '../auth';
