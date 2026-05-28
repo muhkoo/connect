@@ -85,7 +85,13 @@ const channel = new BroadcastChannel({
 
 - `connect(): Promise<void>` — generate keys + open socket
 - `disconnect(): void` — stop reconnecting and close
-- `announce(): Promise<void>` — broadcast our keyExchange (idempotent)
+- `announce(): Promise<void>` — broadcast our keyExchange. Idempotent
+  per-connection, but the `announced` flag **resets on every `CONNECTED`
+  event** so a fresh announce fires on reconnect (CF Workers WSs hit a
+  ~100s idle timeout; without re-announcing, peers who joined after our
+  last reconnect would never see our pubkey). If you're driving announce
+  manually (`autoAnnounce: false`), wire it to your "server ready"
+  signal — the SDK will let it through on every reconnect.
 - `send(plaintext: string): Promise<number>` — fan-out: one cipherMessage frame
   per peer ratchet. Returns the number of peers it sent to (0 if no peers
   handshaken yet — render locally and try later).
@@ -147,6 +153,13 @@ const kx = await session.getOwnKeyExchange();
 `kind === "handshake"` and `outbound` is non-null, the app MUST send `outbound`
 back to that peer (reciprocation). The session dedups internally — `outbound`
 is only set the first time per peer per session lifetime.
+
+`kind: "ignored"` is also returned for **stale cipherMessages** — the underlying
+DoubleRatchet rejects payloads older than 5 minutes as a wallclock-based replay
+defense, and `EncryptedSession.receive` catches that rejection and converts it
+to `ignored` instead of throwing. The real replay defense is the consumed
+message key; the wallclock check is just defense-in-depth, so legacy backlog
+replays and CF WS-idle-reconnect cycles don't spam the channel ERROR stream.
 
 Role assignment is deterministic: `isClient = (myId < peerId)` lexicographically.
 Per-pair sessionId is `[myId, peerId].sort().join(":")`.

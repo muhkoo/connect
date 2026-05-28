@@ -99,7 +99,7 @@ channel.on(BroadcastChannelEvents.PEER_HANDSHAKE, (e) => {
 });
 
 await channel.connect();   // generates keys + opens WS
-await channel.announce();  // broadcast our keyExchange
+await channel.announce();  // broadcast our keyExchange (re-fires on reconnect)
 await channel.send("hello room"); // fan-out one cipherMessage per peer
 ```
 

@@ -36,14 +36,27 @@ const FIELD_SIZE = 2188824287183927522224640574525727508854836440041603434369820
  * Reduce any hex/decimal/byte input to a decimal-string field element in
  * `[0, FIELD_SIZE)`. snarkjs and the `preimagePoK` circuit both want decimal
  * strings; everything else gets normalized here.
+ *
+ * **Behavior is intentionally byte-for-byte compatible with the legacy
+ * `accelerator/public/js/zk-snarkjs-client.js#toField`.** Diverging produces
+ * different commitments than accounts registered via the legacy flow,
+ * which locks those users out forever — the worker stores whatever
+ * commitment the client sent at register time and compares it as a string
+ * at login time.
+ *
+ * In particular: a 32+ char string of hex chars is always treated as hex,
+ * even if every character happens to be 0-9 with no a-f letters. An
+ * earlier version of this function gated the hex branch on "has at least
+ * one letter" — that broke the digit-only-hex edge case (rare in practice,
+ * but real). DO NOT add that letter check back.
  */
 export function toField(value: string | bigint | number): string {
     let v: bigint;
     if (typeof value === "bigint") v = value;
     else if (typeof value === "number") v = BigInt(value);
     else if (value.startsWith("0x")) v = BigInt(value);
-    else if (/^[0-9a-fA-F]+$/.test(value) && value.length >= 32 && /[a-fA-F]/.test(value)) {
-        // Looks like raw hex without prefix — most common case for our inputs.
+    else if (/^[0-9a-fA-F]+$/.test(value) && value.length >= 32) {
+        // Raw hex without prefix — secret, salt, ecdsaPub, nonce all hit this.
         v = BigInt("0x" + value);
     } else if (/^[0-9]+$/.test(value)) v = BigInt(value);
     else {

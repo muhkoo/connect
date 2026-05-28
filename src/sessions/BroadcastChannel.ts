@@ -101,6 +101,11 @@ export class BroadcastChannel {
     // static so it routes back through the shared singleton; we bridge it
     // into our instance-scoped event target.
     this.transport.on(EventCoreEvents.CONNECTED, () => {
+      // Reset the announce flag on every (re)connect. CF Workers WebSockets
+      // hit an idle timeout and force reconnects; without resetting, the
+      // SDK would short-circuit announce() and any peer who joined the
+      // room after our last announce would never see our pubkey.
+      this.announced = false;
       this.emit(BroadcastChannelEvents.CONNECTED);
       if (this.autoAnnounce) {
         void this.announce();

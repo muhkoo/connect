@@ -257,7 +257,24 @@ export class EncryptedSession {
       }
 
       const isClient = this.myId < header.senderId;
-      const text = await ratchet.decrypt(cipherMessage, isClient);
+      let text: string;
+      try {
+        text = await ratchet.decrypt(cipherMessage, isClient);
+      } catch (err) {
+        // DoubleRatchet's wallclock-based replay-protection check throws
+        // "CipherMessage too old, possible replay attack" for any frame
+        // older than 5 minutes. Real replays still fail downstream because
+        // the message key has been consumed; the wallclock check is a
+        // defense-in-depth heuristic, not a security boundary. Treating it
+        // as `ignored` lets the channel survive legacy backlog replays and
+        // CF WS-idle-timeout reconnect cycles without spamming the
+        // channel's ERROR stream.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("too old") || msg.includes("replay attack")) {
+          return { kind: "ignored", reason: `stale cipherMessage rejected: ${msg}` };
+        }
+        throw err;
+      }
       return { kind: "plaintext", from: header.senderId, text, cipherMessage };
     }
 
