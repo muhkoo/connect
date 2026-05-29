@@ -15,10 +15,30 @@
 // snarkjs has no TypeScript types in the npm package — the shared shim in
 // `types/snarkjs.d.ts` (already present for ZeroKnowledge.ts) covers the
 // `groth16.fullProve` call we need here too.
-import * as snarkjs from "snarkjs";
-
+//
+// Imported lazily (dynamic `import`) rather than at module top-level: snarkjs
+// is an externalized peer dependency that only the ZK login proof path needs.
+// Loading it eagerly would force every consumer of the SDK — and the test
+// runner — to have snarkjs resolvable just to construct a `Client`. The lazy
+// loader defers that cost until `generateAuthProof` actually runs.
 import type { Groth16Proof } from "../types/zk";
 import { poseidonHash } from "./poseidon";
+
+type Snarkjs = {
+    groth16: {
+        fullProve: (
+            input: unknown,
+            wasm: string,
+            zkey: string,
+        ) => Promise<{ proof: unknown; publicSignals: string[] }>;
+    };
+};
+let _snarkjs: Snarkjs | null = null;
+async function loadSnarkjs(): Promise<Snarkjs> {
+    if (_snarkjs) return _snarkjs;
+    _snarkjs = (await import("snarkjs")) as unknown as Snarkjs;
+    return _snarkjs;
+}
 
 export type { Groth16Proof };
 
@@ -129,6 +149,7 @@ export async function generateAuthProof(args: {
         ecdsaPub: ecdsaPubField,
     };
 
+    const snarkjs = await loadSnarkjs();
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(
         circuitInput,
         args.circuits.wasmUrl,

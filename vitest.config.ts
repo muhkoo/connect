@@ -16,8 +16,10 @@ export default defineConfig({
       reporter: ["text", "json", "html"], // Add coverage reporting (optional)
     },
     include: [
-      // Crypto and API tests
+      // Unified Client facade + namespaces
       "**/client.test.ts",
+      "**/tests/client/storage.test.ts",
+      "**/tests/client/message.test.ts",
       // "**/ecdh.test.ts",
       "**/tests/crypto/ratchet.test.ts",
       "**/tests/crypto/zk-real.test.ts",

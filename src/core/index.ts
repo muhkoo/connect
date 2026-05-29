@@ -11,5 +11,20 @@ globalThis.appLogger = appLogger;
 export {
     appLogger,
     Logger,
-    Client
+    Client,
 };
+
+// Unified client surface.
+export type { ClientOptions } from "./Client";
+export { HttpClient, HttpError } from "./HttpClient";
+export type { HttpClientOptions } from "./HttpClient";
+export { SessionState, MemorySessionStore } from "./Session";
+export type { SessionStore, StoredSession } from "./Session";
+export { Room } from "./Room";
+export type { RoomDeps, RoomFileMetadata } from "./Room";
+export { AuthNamespace, ZkAuth } from "./namespaces/AuthNamespace";
+export type { AuthUser, RegisterParams, LoginOptions } from "./namespaces/AuthNamespace";
+export { StorageNamespace } from "./namespaces/StorageNamespace";
+export type { SetOptions, StorageChangeEvent } from "./namespaces/StorageNamespace";
+export { MessageNamespace } from "./namespaces/MessageNamespace";
+export type { MessageSubscription } from "./namespaces/MessageNamespace";

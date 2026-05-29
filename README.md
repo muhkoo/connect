@@ -1,14 +1,23 @@
 # @muhkoo/connect
 
-Client SDK for the Muhkoo Accelerator. Provides end-to-end-encrypted messaging
-primitives (Double Ratchet + ECDH P-384), a turnkey multi-peer `BroadcastChannel`,
-a ZK-gated personal-storage client, and a Cloudflare-Workers-compatible Groth16
-verifier — all bundled from a single TypeScript source tree.
+Client SDK for the Muhkoo Accelerator. The headline surface is a single
+**`Client`** that hangs everything off three namespaces —
+`client.auth` / `client.storage` / `client.message` — backed by
+end-to-end-encrypted messaging primitives (Double Ratchet + ECDH P-384), a
+turnkey multi-peer `BroadcastChannel`, ZK identity + personal/shared spaces,
+and a Cloudflare-Workers-compatible Groth16 verifier — all bundled from a
+single TypeScript source tree.
 
-> Status: alpha. The library is consumed in tree by `../accelerator` (see the
-> chat app under `accelerator/public/chat/`).
+> Status: alpha. The library is consumed in tree by `../accelerator` and the
+> `../web` SPA.
 
 ## What's in the box
+
+- **`Client`** — the unified entry point. `new Client({ apiKey, baseUrl })`
+  exposes `auth` (ZK register/login), `storage` (per-user encrypted KV +
+  files), and `message` (pub/sub + E2E direct messages) over one shared
+  session. This is the supported surface; everything below is a building block
+  it composes.
 
 - **`BroadcastChannel`** — multi-peer end-to-end-encrypted "room". Wires
   `WSTransport` (socket lifecycle, reconnect, offline queue) together with
@@ -78,6 +87,80 @@ chat app provides `snarkjs` via an esm.sh import map; Node consumers add
 `snarkjs` as a peer dependency.
 
 ## Quick start
+
+### The unified client (recommended)
+
+`Client` is the supported entry point. One object, one app key, three
+namespaces — `auth`, `storage`, `message` — all sharing a single session.
+
+```typescript
+import { Client } from "@muhkoo/connect";
+
+const client = new Client({
+  apiKey: "mk_test_pk_…",                 // app / publishable key
+  baseUrl: "https://accelerator.example.dev",
+  // circuits default to `${baseUrl}/circuits/build/preimagePoK{.wasm,_0001.zkey}`
+});
+```
+
+> **`apiKey`** is transitionally optional (auth + storage work without it
+> today) but is becoming **required** as part of productizing the Accelerator:
+> it's how each app authenticates and gets metered/billed, and it authorizes
+> messaging websockets. Always pass one for new integrations.
+
+```typescript
+// (continued)
+
+// Auth — deterministic ZK identity derived from (username, password).
+const user = await client.auth.zk.login("alice", "correct horse battery staple");
+//    └ { username, commitment }
+
+// Storage — per-user persistent KV (collection + id), encrypted at rest.
+await client.storage.set("todos", "t1", { title: "Buy groceries", completed: false });
+const todo = await client.storage.get("todos", "t1");
+const ids  = await client.storage.list("todos");
+await client.storage.delete("todos", "t1");
+
+// Message — realtime pub/sub + end-to-end-encrypted direct messages.
+const sub = client.message.subscribe("todos", (e) => console.log("update:", e.data));
+await client.message.publish("todos", { id: "t1", done: true });
+await client.message.send("user:abc", { text: "Hello!" });
+```
+
+`subscribe(subject)` / `publish(subject, data)` are plaintext fan-out to
+everyone on that subject. `send("user:<id>", …)` is an **end-to-end-encrypted**
+direct message (Double Ratchet); the recipient receives it by subscribing to
+their *own* id — `client.message.subscribe("user:<me>", …)`. Both modes ride a
+shared-space room websocket under the hood (opened with a short-lived signed
+ticket); E2E delivery needs both parties online, like any ratchet.
+
+For full **group rooms** (multi-peer E2E chat + room-scoped file sharing), use
+`client.message.room(name)` — a shared-space handle exposing the group channel
+(`connect`/`on`/`send`/`announce`/`peers`/`sendRaw`) plus
+`putFile`/`getFile`. `subscribe`/`publish`/`send` are conveniences layered over
+this same room primitive.
+
+Auth lifecycle:
+
+```typescript
+await client.auth.zk.register({ username, password, email });  // signs in by default
+await client.auth.zk.restore();            // re-validate a persisted token on boot
+await client.auth.zk.unlock(password);     // re-derive identity for a restored session
+await client.auth.zk.logout();
+client.user;                               // { username, commitment } | null
+```
+
+Two credentials ride on every request: the app key (`X-Muhkoo-Key`) and, once
+signed in, the user session token (`X-Muhkoo-Session`). The accelerator
+validates the token and authorizes per-user spaces without a fresh proof per
+call. Persist the token across reloads with a custom `sessionStore` (e.g. a
+`localStorage`-backed one); identity material is never persisted — `unlock()`
+re-derives it from the password when you need to decrypt or message.
+
+> The sections below document the lower-level building blocks the client is
+> composed from (`BroadcastChannel`, `EncryptedSession`, `PersonalSpaceClient`,
+> the Groth16 verifier, …). Reach for them directly only when you need control
+> the client doesn't expose.
 
 ### Multi-peer encrypted room (chat-style)
 

@@ -4,31 +4,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Muhkoo Connect is a client SDK for building distributed edge-based applications. It's currently undergoing a major architectural transformation from a monolithic system to a lightweight client library that communicates with the Muhkoo Accelerator infrastructure (Cloudflare Durable Objects).
+Muhkoo Connect is a client SDK for building **end-to-end-encrypted apps** on the
+Muhkoo Accelerator (a Cloudflare Workers + Durable Objects backend). The
+headline surface is a single **`Client`** (`src/core/Client.ts`) that exposes
+three namespaces over one shared session:
 
-## Key Architecture Components
+- `client.auth` — zero-knowledge identity (`client.auth.zk.{register,login,restore,unlock,logout}`)
+- `client.storage` — per-user key/value, AES-256-GCM **encrypted at rest**
+- `client.message` — pub/sub + end-to-end-encrypted DMs and group rooms
 
-### Current State
-- **Monolithic system** with database, KV stores, file storage, and server components
-- Contains comprehensive distributed application middleware framework
-- Includes P2P networking, messaging system, and encryption capabilities
+The lower-level building blocks (`AuthClient`, `PersonalSpaceClient`,
+`FileStorage`, `BroadcastChannel`, `EncryptedSession`, the Groth16 verifier)
+remain exported, but the `Client` is the supported surface.
 
-### Target Architecture
-- **Lightweight client SDK** that interfaces with Accelerator backend via REST/WebSocket
-- **Offline-first** with local state management and automatic sync
-- **Hybrid identity** supporting both self-sovereign (bring your own keys) and custodial (OAuth) authentication
-- **Application namespaces** derived from public keys for data isolation
+> **History:** the SDK previously carried a monolithic/aspirational design
+> (OAuth, offline-first sync, namespace derivation). That was replaced in the
+> 2026-05 "unified Client" overhaul — trust `src/core/` and the docs site over
+> any older prose.
 
-### Core Concepts
+### Core concepts
 
-1. **Three Main APIs**:
-   - `client.auth` - Identity and authentication (OAuth or self-sovereign)
-   - `client.message` - Real-time messaging and pub/sub
-   - `client.storage` - Offline-first data persistence with sync
+1. **One client, three namespaces** — `client.auth` / `client.storage` /
+   `client.message`, all driven off one session (`src/core/Session.ts`,
+   `src/core/HttpClient.ts`).
+2. **Zero-knowledge identity** — derived from `(username, password)` on the
+   device; the server stores only a Poseidon commitment. Login proves knowledge
+   with a Groth16 proof (`src/auth/`).
+3. **Encryption by default** — storage values sealed with AES-256-GCM under an
+   identity-derived key (`src/crypto/StorageCipher.ts`); DMs use the Double
+   Ratchet (`src/crypto/`, `src/sessions/`).
+4. **Spaces** — the backend primitive both storage (personal space) and
+   messaging/rooms (shared space) ride on. A `Room` (`src/core/Room.ts`) wraps
+   a shared space's group channel + file storage.
+5. **Two credentials** — an app key (`mk_…`, `X-Muhkoo-Key`) identifies the app
+   for billing; a session token (`X-Muhkoo-Session`) identifies the user. The
+   `HttpClient` attaches both.
 
-2. **ECDH Key Exchange**: Secure communication using ephemeral keys without exposing app private keys
+## Documentation
 
-3. **Namespace System**: Cryptographic derivation of namespaces from public keys for data isolation
+- **Canonical docs site**: the `../docs` repo (Astro Starlight) → `docs.muhkoo.dev`.
+  This is the source of truth for the `Client` API, guides, and examples. Keep
+  it updated when the SDK surface changes.
+- `README.md` — quick reference, leads with the unified `Client`.
+- `API_REFERENCE.md` — lower-level export inventory (building blocks).
 
 ## Common Development Commands
 
@@ -85,15 +103,25 @@ yarn watch:docs
 ## Project Structure
 
 ### Source Code Organization
-- `/src/core/` - Core client implementation (Client.ts is main entry)
-- `/src/crypto/` - Cryptographic utilities (ECDH, Double Ratchet, ZeroKnowledge with snarkjs-based proof generation, Key Store)
-- `/src/messaging/` - Message and packet handling with serialization
-- `/src/network/` - Network layer implementation
-- `/src/storage/` - Storage abstraction and encoding (Reed-Solomon)
+- `/src/core/` - The unified `Client`. `Client.ts` (facade), `HttpClient.ts`
+  (header-injecting transport), `Session.ts` (session + identity state),
+  `Room.ts` (shared-space group channel + files), and
+  `namespaces/{Auth,Storage,Message}Namespace.ts`
+- `/src/auth/` - ZK auth: identity derivation, Groth16 proof, Poseidon, key
+  helpers, and `AuthClient` (the `/api/auth/*` HTTP client)
+- `/src/crypto/` - Crypto primitives + Double Ratchet, KeyStore, ZeroKnowledge
+  (snarkjs proof gen), `StorageCipher.ts` (at-rest AES-GCM for `client.storage`)
+- `/src/sessions/` - `EncryptedSession` + `BroadcastChannel` (E2E room transport)
+- `/src/storage/` - Chunked/encrypted/erasure-coded file storage (FileStorage,
+  ShardClient, SharedSpaceClient, Reed-Solomon)
+- `/src/personal/` - `PersonalSpaceClient` (proof-gated per-user KV; the
+  lower-level building block under `client.storage`)
+- `/src/messaging/`, `/src/network/`, `/src/transport/` - Message/Packet,
+  Network, and WSTransport primitives
 - `/src/events/` - Event emitter and handling
-- `/src/utilities/` - Helper functions, decorators, and logging
-- `/src/types/` - TypeScript type definitions (includes `zk.ts` with shared Groth16 types and `PREIMAGE_POK_VERIFICATION_KEY`)
-- `/src/browser/` - Browser-specific entry
+- `/src/utilities/` - Helper functions, decorators, logging, byte helpers
+- `/src/types/` - TypeScript type definitions (incl. `zk.ts` + `PREIMAGE_POK_VERIFICATION_KEY`)
+- `/src/browser/` - Browser entry (exports the `Client` + building blocks)
 - `/src/server/` - Node.js-specific entry
 - `/src/workers/` - Cloudflare-Workers-compatible entry. Contains `groth16-verifier.ts` (drives `bn128.wasm` directly, no snarkjs/ffjavascript dependency) and `wasm/bn128.wasm` (~86KB BN128 curve module). The verifier is re-exported from the browser and server entries too, so it's a universal Groth16 verification primitive
 
@@ -108,24 +136,34 @@ yarn watch:docs
 ### Crypto Implementation
 - **Zero-knowledge proofs**: snarkjs (via `@zk-kit/groth16`) for proof generation in the browser/server builds (see `src/crypto/ZeroKnowledge.ts` — `HashKnowledge`, `PreimagePoK`). Proof generation is NOT possible in the CF Workers build because snarkjs/ffjavascript depend on `URL.createObjectURL` and worker_threads, which CF Workers don't expose
 - **Edge ZK verification**: `src/workers/groth16-verifier.ts` drives `bn128.wasm` directly to verify Groth16 proofs. Workers-safe (no snarkjs/ffjavascript). Available from all three builds; under `workerd` consumers get the same code path as Node/browser
-- Implements Double Ratchet algorithm for end-to-end encryption
-- ECDH key exchange for secure session establishment
-- ED25519 keypairs for identity
+- Implements the Double Ratchet algorithm for end-to-end encryption (DMs/rooms)
+- ECDH (P-256) key exchange for session establishment; P-256 ECDSA for signing
+- Identity keypairs are **deterministically derived** from `(username, password)`
+  (`src/auth/identity.ts`), not random — that's what makes federated login work
+- `StorageCipher` (`src/crypto/StorageCipher.ts`) derives the at-rest AES key
+  from the identity via HKDF
 
 ### Storage System
-- Abstract storage layer with Reed-Solomon encoding for redundancy
-- Supports offline-first operations with pending operation queue
-- Conflict resolution strategies: Last-Write-Wins, Client-Wins, Server-Wins, Custom
+- `client.storage` = per-user KV over the personal space, AES-256-GCM encrypted
+  at rest by default; the server only sees ciphertext
+- No server-side query (encrypted at rest) — `list()` returns ids; filter
+  client-side. `storage.on('change')` is a realtime cross-device feed over the
+  personal space's websocket
+- File storage (`src/storage/`) is chunked + AES-GCM + Reed-Solomon erasure
+  coded into content-addressed shards; room files ride `Room.putFile/getFile`
 
 ### Known Issues
 1. **Base58 encoding performance**: Currently slow for large payloads (>100KB). Message class tests disabled due to this bottleneck.
 2. **Integration tests**: Require Accelerator infrastructure to be running, not included in default test suite.
+3. **dts roll-up gaps**: `rollup-plugin-dts` drops some subtrees from
+   `dist/connect.d.ts` (storage/sessions/personal/core). Consumers that hit
+   missing types use a local shim (see `muhkoo/web/src/lib/connect.ts`).
+   Worth fixing properly.
 
-### Migration in Progress
-The codebase is transitioning from a monolithic architecture to a client SDK. Components being:
-- **Moved to Accelerator**: Database operations, KV stores, file storage backends, GraphQL execution
-- **Kept in Connect**: Client models, identity management, namespace utilities, offline sync, local storage
-- **Deprecated**: Task management system, server-side clustering (handled by Cloudflare)
+### Test config note
+`vitest.config.ts` uses a curated `include` allowlist (many tests are commented
+out for perf/flakiness). When adding a test, add its path to that list or it
+won't run.
 
 ## Development Guidelines
 
@@ -142,10 +180,14 @@ The codebase is transitioning from a monolithic architecture to a client SDK. Co
 - Performance benchmarks needed for encryption operations
 
 ### Security Considerations
-- App private keys NEVER leave the server
-- All client-server communication uses ECDH-derived shared secrets
-- Support both self-sovereign (user controls keys) and custodial (OAuth) identity
-- Implement proper signature verification for all authenticated operations
+- **Zero-knowledge identity**: the server stores only a Poseidon commitment;
+  passwords/secrets never leave the device. A forgotten password is
+  unrecoverable by design.
+- **Encryption by default**: storage values + DMs are encrypted client-side;
+  the accelerator relays/stores ciphertext.
+- **App key trajectory**: the `mk_*` app key is transitionally optional but is
+  becoming required (auth/attribution/billing). Never ship a secret (`sk`) key
+  in a browser bundle — only publishable (`pk`).
 
 ## Environment Requirements
 - Node.js >= 20.0.0

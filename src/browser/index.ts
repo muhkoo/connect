@@ -22,3 +22,16 @@ export * from "../storage";
 // AuthClient — `/api/auth/*` HTTP wrapper. Browser + server only; the
 // workers build is the auth backend itself, no point importing the client.
 export * from "../auth";
+// Unified Client facade — the supported entry point. These use the `export *`
+// form (not named `export { … } from`) because rollup-plugin-dts silently
+// drops named cross-module re-exports in this codebase's layout, which would
+// strip `Client` et al. from the rolled-up `connect.d.ts`. The class modules
+// don't re-run core's appLogger setup (that lives in `../core/index`, which we
+// deliberately don't import here).
+export * from "../core/Client";
+export * from "../core/HttpClient";
+export * from "../core/Session";
+export * from "../core/Room";
+export * from "../core/namespaces/AuthNamespace";
+export * from "../core/namespaces/StorageNamespace";
+export * from "../core/namespaces/MessageNamespace";

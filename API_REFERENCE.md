@@ -1,5 +1,11 @@
 # @muhkoo/connect API Reference
 
+> **The canonical docs are the [`muhkoo/docs`](../docs) site (`docs.muhkoo.dev`).**
+> Start there for the unified `Client` (`client.auth` / `client.storage` /
+> `client.message`), guides, and worked examples. This file is the low-level
+> **export inventory** — the building blocks the `Client` composes — kept for
+> contributors working in-tree.
+
 Public surface of `@muhkoo/connect`. Every export listed below is real today;
 deprecated / aspirational APIs have been removed.
 
