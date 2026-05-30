@@ -137,3 +137,4 @@ package-lock.json
 .claude/
 # Stray IPFS/Kubo daemon config — never belongs in this repo
 config.json
+CLAUDE.md
