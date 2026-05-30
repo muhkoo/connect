@@ -135,3 +135,5 @@ yarn.lock
 package-lock.json
 .DS_Store
 .claude/
+# Stray IPFS/Kubo daemon config — never belongs in this repo
+config.json
