@@ -416,15 +416,12 @@ of `WSTransport`.
 
 ## Things that DO NOT exist (despite older docs)
 
-- `MuhkooClient`, `client.auth`, `client.storage`, `client.message`,
-  `client.shared` — these were a planned facade. Not implemented.
+- `MuhkooClient` — the unified client class is `Client` (with `client.auth`,
+  `client.storage`, `client.message`). There is no `client.shared`.
 - `Network` class — still in `src/network/` but NOT exported from any build.
-- `SessionManager`, `ApiClient` — referenced by `examples/` and old
-  integration tests; do not exist in `src/`.
-- `src/api/`, `src/client/` — referenced by `package.json` `exports`; not in
-  the repo. The `@muhkoo/connect/api` subpath is a holdover.
-- API-token / app-token system — see `docs/api-token-*.md` (design only).
+- `SessionManager`, `ApiClient` — referenced by old examples and integration
+  tests; do not exist in `src/`.
 
 ## License
 
-GPL-3.0.
+MIT — see [LICENSE](./LICENSE).
