@@ -1,6 +1,6 @@
 {
   "name": "@muhkoo/connect",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Simple client SDK for building distributed edge based applications",
   "main": "dist/server/index.js",
   "module": "dist/server/index.js",
@@ -83,6 +83,12 @@
     "snarkjs": {
       "optional": true
     }
+  },
+  "overrides": {
+    "underscore": "^1.13.8"
+  },
+  "resolutions": {
+    "underscore": "^1.13.8"
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
