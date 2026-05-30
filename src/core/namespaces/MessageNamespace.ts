@@ -126,6 +126,21 @@ export class MessageNamespace {
     }
 
     /**
+     * Mint a new private shared-space id, server-side. The id MUST come from
+     * the accelerator: it's a 64-hex string that embeds the spaces DO class
+     * hash, which the worker validates on every subsequent request — client-
+     * generated ids would be rejected. Pass the returned id to {@link room}
+     * (or share it) to open the space.
+     */
+    async createRoom(): Promise<string> {
+        const body = await this.deps.http.post<{ spaceId?: string }>("/api/spaces");
+        if (!body?.spaceId || !/^[0-9a-f]{64}$/.test(body.spaceId)) {
+            throw new Error("createRoom: malformed server response (expected a 64-hex spaceId)");
+        }
+        return body.spaceId;
+    }
+
+    /**
      * Open a handle to a shared-space room — group E2E messaging plus
      * room-scoped file storage. The websocket isn't opened until
      * `room.connect()`; `room.putFile`/`getFile` work without it. This is the

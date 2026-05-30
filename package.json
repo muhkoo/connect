@@ -7,39 +7,37 @@
   "browser": "dist/browser/index.js",
   "typings": "dist/connect.d.ts",
   "repository": "https://github.com/muhkoo/connect.git",
+  "homepage": "https://github.com/muhkoo/connect#readme",
+  "bugs": "https://github.com/muhkoo/connect/issues",
   "author": "muhkoo",
-  "license": "GPL-3.0",
+  "license": "MIT",
   "type": "module",
+  "sideEffects": false,
+  "keywords": [
+    "sdk",
+    "e2e-encryption",
+    "zero-knowledge",
+    "double-ratchet",
+    "cloudflare-workers",
+    "edge",
+    "decentralized"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/**/index.js",
+    "dist/**/index.js.map",
+    "dist/connect.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": {
       "types": "./dist/connect.d.ts",
       "workerd": "./dist/workers/index.js",
       "browser": "./dist/browser/index.js",
       "default": "./dist/server/index.js"
-    },
-    "./crypto": {
-      "types": "./src/crypto/index.ts",
-      "import": "./src/crypto/index.ts"
-    },
-    "./types": {
-      "types": "./src/types/index.ts",
-      "import": "./src/types/index.ts"
-    },
-    "./api": {
-      "types": "./src/api/index.ts",
-      "import": "./src/api/index.ts"
-    },
-    "./events": {
-      "types": "./src/events/index.ts",
-      "import": "./src/events/index.ts"
-    },
-    "./messaging": {
-      "types": "./src/messaging/index.ts",
-      "import": "./src/messaging/index.ts"
-    },
-    "./utilities": {
-      "types": "./src/utilities/index.ts",
-      "import": "./src/utilities/index.ts"
     }
   },
   "scripts": {
@@ -77,6 +75,14 @@
   },
   "optionalDependencies": {
     "circomlibjs": "^0.1.7"
+  },
+  "peerDependencies": {
+    "snarkjs": "^0.7.0"
+  },
+  "peerDependenciesMeta": {
+    "snarkjs": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",

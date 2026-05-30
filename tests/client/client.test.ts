@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Client } from '../../src/core/Client';
+import { Client, DEFAULT_BASE_URL } from '../../src/core/Client';
 import { MemorySessionStore } from '../../src/core/Session';
 
 const BASE_URL = 'http://localhost:8787';
@@ -38,11 +38,14 @@ function makeFetch(routes: Record<string, (body: any) => { status?: number; json
 }
 
 describe('Client — construction', () => {
-    it('requires baseUrl; apiKey is optional', () => {
-        // @ts-expect-error intentionally missing baseUrl
-        expect(() => new Client({ apiKey: API_KEY })).toThrow(/baseUrl/);
-        // No apiKey is fine — auth + storage work without one.
-        expect(() => new Client({ baseUrl: BASE_URL })).not.toThrow();
+    it('defaults baseUrl and apiKey when omitted', () => {
+        // Both optional: baseUrl falls back to the hosted Accelerator, and
+        // auth + storage work without an app key during the migration.
+        const client = new Client();
+        expect(client.baseUrl).toBe(DEFAULT_BASE_URL);
+
+        // An explicit baseUrl overrides the default.
+        expect(new Client({ baseUrl: BASE_URL }).baseUrl).toBe(BASE_URL);
     });
 
     it('exposes auth / storage / message namespaces', () => {

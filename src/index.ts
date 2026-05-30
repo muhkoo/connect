@@ -15,6 +15,3 @@ export * as storage from './storage';
 
 // Logging
 export * as Logger from './utilities/Logger';
-
-// Legacy type exports
-export type * as Types from './index.d.ts';

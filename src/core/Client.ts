@@ -23,12 +23,15 @@
  */
 
 import { AuthClient } from "../auth";
-import type { CircuitUrls } from "../auth/proof";
+import { defaultCircuitUrls, type CircuitUrls } from "../auth/proof";
 import { HttpClient } from "./HttpClient";
-import { SessionState, type SessionStore } from "./Session";
+import { SessionState, defaultSessionStore, type SessionStore } from "./Session";
 import { AuthNamespace } from "./namespaces/AuthNamespace";
 import { StorageNamespace } from "./namespaces/StorageNamespace";
 import { MessageNamespace } from "./namespaces/MessageNamespace";
+
+/** The hosted Muhkoo Accelerator — the default {@link ClientOptions.baseUrl}. */
+export const DEFAULT_BASE_URL = "https://api.muhkoo.dev";
 
 export interface ClientOptions {
     /**
@@ -41,12 +44,17 @@ export interface ClientOptions {
      * New integrations should always pass one.
      */
     apiKey?: string;
-    /** Absolute URL of the accelerator worker (trailing slash optional). */
-    baseUrl: string;
+    /**
+     * Absolute URL of the accelerator (trailing slash optional). Defaults to
+     * the hosted Muhkoo Accelerator ({@link DEFAULT_BASE_URL}); override to
+     * point at staging, a local `wrangler dev`, or a self-hosted deployment.
+     */
+    baseUrl?: string;
     /**
      * URLs of the `preimagePoK` circuit assets used for ZK login proofs.
-     * Defaults to `${baseUrl}/circuits/build/preimagePoK{.wasm,_0001.zkey}`,
-     * which is where the accelerator serves them.
+     * Defaults to {@link defaultCircuitUrls} anchored at `baseUrl` — i.e.
+     * `${baseUrl}/circuits/build/preimagePoK_js/preimagePoK.wasm` and
+     * `…/preimagePoK_0001.zkey`, where the accelerator serves them.
      */
     circuits?: CircuitUrls;
     /** Pluggable session-token persistence. Defaults to in-memory. */
@@ -65,14 +73,6 @@ function toWsBase(baseUrl: string): string {
     return baseUrl.replace(/\/+$/, "").replace(/^http/, "ws");
 }
 
-function defaultCircuits(baseUrl: string): CircuitUrls {
-    const base = baseUrl.replace(/\/+$/, "");
-    return {
-        wasmUrl: `${base}/circuits/build/preimagePoK.wasm`,
-        zkeyUrl: `${base}/circuits/build/preimagePoK_0001.zkey`,
-    };
-}
-
 export class Client {
     readonly baseUrl: string;
 
@@ -86,14 +86,13 @@ export class Client {
     private readonly session: SessionState;
     private readonly http: HttpClient;
 
-    constructor(options: ClientOptions) {
-        if (!options?.baseUrl) throw new Error("Client: `baseUrl` is required");
+    constructor(options: ClientOptions = {}) {
         if (options.logLevel && typeof globalThis.appLogger?.setLevel === "function") {
             globalThis.appLogger.setLevel(options.logLevel);
         }
 
-        this.baseUrl = options.baseUrl.replace(/\/+$/, "");
-        this.session = new SessionState(options.sessionStore);
+        this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+        this.session = new SessionState(options.sessionStore ?? defaultSessionStore());
 
         this.http = new HttpClient({
             baseUrl: this.baseUrl,
@@ -102,7 +101,7 @@ export class Client {
             fetch: options.fetch,
         });
 
-        const circuits = options.circuits ?? defaultCircuits(this.baseUrl);
+        const circuits = options.circuits ?? defaultCircuitUrls(this.baseUrl);
         const authClient = new AuthClient({ baseUrl: this.baseUrl, fetch: this.http.fetch });
 
         const wsBaseUrl = toWsBase(this.baseUrl);

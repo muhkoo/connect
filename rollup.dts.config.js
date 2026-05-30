@@ -6,7 +6,15 @@ import dts from 'rollup-plugin-dts';
  */
 
 const config = {
-  input: './src/index.ts',
+  // Build the declaration bundle from the SAME entry the runtime browser build
+  // uses (`src/browser/index.ts`), not `src/index.ts`. The latter re-exports via
+  // namespaces (`export * as core`, `export * as storage`, …), and
+  // rollup-plugin-dts silently drops those cross-module namespace re-exports —
+  // which stripped the top-level `Client`, `BroadcastChannel`, `FileStorage`,
+  // `AuthClient`, etc. from `connect.d.ts` even though the runtime exports them.
+  // The browser entry's flat `export *` form survives the roll-up intact, so the
+  // published types now match the runtime surface.
+  input: './src/browser/index.ts',
   output: [
     {
       file: 'dist/connect.d.ts',

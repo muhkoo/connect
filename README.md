@@ -73,9 +73,9 @@ The `workers` build keeps `KeyStore`, `DoubleRatchet`, `EncryptedSession`,
 `BroadcastChannel`, `WSTransport`, and the bn128.wasm-driven
 `groth16-verifier` — that last one is the only viable Groth16 path on the edge.
 
-Types in `dist/connect.d.ts` (re-exported from `src/index.d.ts`) include
-everything from all three runtimes so consumers can reference types even when
-the runtime impl is absent for their target. Calling
+Types in `dist/connect.d.ts` (bundled from the flat `src/browser/index.ts`
+entry) include everything from all three runtimes so consumers can reference
+types even when the runtime impl is absent for their target. Calling
 `verifyGroth16` / `initBn128Wasm` works under workerd; importing
 `PersonalSpaceClient` and calling it in a worker will fail at runtime.
 
@@ -85,6 +85,21 @@ Browser and server builds externalize bare specifiers — the consumer's bundler
 (or an import map for direct browser use) resolves them. The accelerator's
 chat app provides `snarkjs` via an esm.sh import map; Node consumers add
 `snarkjs` as a peer dependency.
+
+## Installation
+
+```bash
+npm install @muhkoo/connect
+# or: yarn add @muhkoo/connect / pnpm add @muhkoo/connect
+```
+
+ESM-only, with bundled type declarations. `snarkjs` is an **optional peer
+dependency** — install it only if you use the ZK-proof features
+(`PersonalSpaceClient`, shared-space writes, client-side proof generation):
+
+```bash
+npm install snarkjs
+```
 
 ## Quick start
 

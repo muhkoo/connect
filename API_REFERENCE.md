@@ -30,17 +30,8 @@ The `types` condition resolves to a single bundled `dist/connect.d.ts` that
 re-exports everything (so a type referenced in one runtime is still
 declarable in another, even if the runtime impl is absent).
 
-`package.json` also exposes some source-level subpaths used in tests and
-in-tree consumers; they point at TS source, not the built dist:
-
-| Subpath | TS source |
-| --- | --- |
-| `@muhkoo/connect/crypto` | `src/crypto/index.ts` |
-| `@muhkoo/connect/types` | `src/types/index.ts` |
-| `@muhkoo/connect/api` | `src/api/index.ts` (does not exist; legacy holdover) |
-| `@muhkoo/connect/events` | `src/events/index.ts` |
-| `@muhkoo/connect/messaging` | `src/messaging/index.ts` |
-| `@muhkoo/connect/utilities` | `src/utilities/index.ts` |
+There is a single public entry point — `@muhkoo/connect`. Everything documented
+below is exported from it; there are no subpath imports.
 
 ### What's in which build
 

@@ -96,6 +96,34 @@ describe('client.message — pub/sub', () => {
     });
 });
 
+describe('client.message — createRoom', () => {
+    function makeWithSpacesFetch(json: unknown, status = 200) {
+        const session = new SessionState();
+        void session.setSession({ token: 't'.repeat(64), username: 'alice', commitment: '1' });
+        const calls: Array<{ url: string; method: string }> = [];
+        const fetchFn = (async (input: any, init: any) => {
+            const url = typeof input === 'string' ? input : input.url;
+            calls.push({ url, method: init?.method ?? 'GET' });
+            return new Response(JSON.stringify(json), { status, headers: { 'Content-Type': 'application/json' } });
+        }) as unknown as typeof fetch;
+        const http = new HttpClient({ baseUrl: 'http://x', getSessionToken: () => session.token, fetch: fetchFn });
+        const message = new MessageNamespace({ http, session, wsBaseUrl: 'ws://x' });
+        return { message, calls };
+    }
+
+    it('POSTs /api/spaces and returns the minted spaceId', async () => {
+        const spaceId = 'a'.repeat(64);
+        const { message, calls } = makeWithSpacesFetch({ spaceId });
+        await expect(message.createRoom()).resolves.toBe(spaceId);
+        expect(calls).toContainEqual({ url: 'http://x/api/spaces', method: 'POST' });
+    });
+
+    it('rejects a malformed (non 64-hex) spaceId', async () => {
+        const { message } = makeWithSpacesFetch({ spaceId: 'nope' });
+        await expect(message.createRoom()).rejects.toThrow(/64-hex/);
+    });
+});
+
 describe('client.message — direct messages', () => {
     it('send E2E-encrypts to the recipient inbox room', async () => {
         const { message, channelFor } = makeMessage('alice');

@@ -12,18 +12,34 @@
  *      `{commitment, nonce, ecdsaPubHash}` as public signals.
  *   4. POSTs the proof + publicSignals + (optional) value to the gated endpoint.
  *
- * snarkjs is imported as a bare specifier; the rollup builds externalize it.
- * Consumers (browser apps using the ESM build, or Node apps with snarkjs
- * installed) provide the actual implementation — see the README for the
- * import-map entry the chat app uses.
+ * snarkjs is loaded lazily (dynamic `import`) the first time a proof is
+ * generated — it's an optional peer dependency that only the ZK-proof path
+ * needs, so importing this module (or constructing a `Client`) never requires
+ * it. Consumers using the proof path install `snarkjs`, or provide it via an
+ * import map in the browser (see the README).
  *
  * Encryption of the stored values is the caller's responsibility — the DO
  * sees only opaque JSON. The companion `wrap.ts` helpers in this folder are
  * a convenient way to passphrase-encrypt a payload before putting it.
  */
 
-import * as snarkjs from "snarkjs";
 import type { Groth16Proof } from "../types/zk";
+
+type Snarkjs = {
+    groth16: {
+        fullProve: (
+            input: unknown,
+            wasm: string,
+            zkey: string,
+        ) => Promise<{ proof: unknown; publicSignals: string[] }>;
+    };
+};
+let _snarkjs: Snarkjs | null = null;
+async function loadSnarkjs(): Promise<Snarkjs> {
+    if (_snarkjs) return _snarkjs;
+    _snarkjs = (await import("snarkjs")) as unknown as Snarkjs;
+    return _snarkjs;
+}
 
 /**
  * BN254 scalar field modulus. The DO's challenge endpoint returns a 32-byte
@@ -207,6 +223,7 @@ export class PersonalSpaceClient {
             ecdsaPub: this.ecdsaPub,
         };
 
+        const snarkjs = await loadSnarkjs();
         const { proof, publicSignals } = await snarkjs.groth16.fullProve(
             input,
             this.wasmUrl,

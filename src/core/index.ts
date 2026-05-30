@@ -15,10 +15,11 @@ export {
 };
 
 // Unified client surface.
+export { DEFAULT_BASE_URL } from "./Client";
 export type { ClientOptions } from "./Client";
 export { HttpClient, HttpError } from "./HttpClient";
 export type { HttpClientOptions } from "./HttpClient";
-export { SessionState, MemorySessionStore } from "./Session";
+export { SessionState, MemorySessionStore, LocalStorageSessionStore, defaultSessionStore } from "./Session";
 export type { SessionStore, StoredSession } from "./Session";
 export { Room } from "./Room";
 export type { RoomDeps, RoomFileMetadata } from "./Room";

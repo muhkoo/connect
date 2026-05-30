@@ -59,6 +59,77 @@ export class MemorySessionStore implements SessionStore {
     }
 }
 
+/**
+ * A {@link SessionStore} backed by the browser's `localStorage`, so a session
+ * survives page reloads. This is the store most browser apps want — pass it to
+ * `new Client({ sessionStore: new LocalStorageSessionStore() })`.
+ *
+ * Browser-only: construction throws if `localStorage` is unavailable (Node,
+ * Workers, or SSR before hydration) — use {@link MemorySessionStore} or a
+ * custom store there. Keys are namespaced under `keyPrefix` so multiple apps
+ * on the same origin don't collide.
+ */
+export class LocalStorageSessionStore implements SessionStore {
+    private readonly tokenKey: string;
+    private readonly usernameKey: string;
+    private readonly commitmentKey: string;
+
+    constructor(keyPrefix = "muhkoo.session.") {
+        if (typeof localStorage === "undefined") {
+            throw new Error(
+                "LocalStorageSessionStore requires a browser environment with localStorage; " +
+                    "use MemorySessionStore (or a custom SessionStore) on the server.",
+            );
+        }
+        this.tokenKey = `${keyPrefix}token`;
+        this.usernameKey = `${keyPrefix}username`;
+        this.commitmentKey = `${keyPrefix}commitment`;
+    }
+
+    load(): StoredSession | null {
+        const token = localStorage.getItem(this.tokenKey);
+        const username = localStorage.getItem(this.usernameKey);
+        const commitment = localStorage.getItem(this.commitmentKey);
+        if (!token || !username || !commitment) return null;
+        return { token, username, commitment };
+    }
+
+    save(session: StoredSession): void {
+        localStorage.setItem(this.tokenKey, session.token);
+        localStorage.setItem(this.usernameKey, session.username);
+        localStorage.setItem(this.commitmentKey, session.commitment);
+    }
+
+    clear(): void {
+        localStorage.removeItem(this.tokenKey);
+        localStorage.removeItem(this.usernameKey);
+        localStorage.removeItem(this.commitmentKey);
+    }
+}
+
+/**
+ * The {@link SessionStore} a {@link Client} uses when none is supplied: a
+ * {@link LocalStorageSessionStore} in the browser (so sessions survive
+ * reloads), falling back to {@link MemorySessionStore} anywhere `localStorage`
+ * is unavailable or unusable (Node, Workers, SSR, or private-mode browsers
+ * that throw on access). Pass an explicit store to override.
+ */
+export function defaultSessionStore(keyPrefix?: string): SessionStore {
+    try {
+        // Touch the API, not just `typeof`: some environments expose
+        // `localStorage` but throw on access (Safari private mode, sandboxed
+        // iframes). LocalStorageSessionStore's constructor only checks for
+        // existence, so probe a real read here and fall back on any throw.
+        if (typeof localStorage !== "undefined") {
+            localStorage.getItem("muhkoo.__probe__");
+            return new LocalStorageSessionStore(keyPrefix);
+        }
+    } catch {
+        // fall through to in-memory
+    }
+    return new MemorySessionStore();
+}
+
 export class SessionState {
     private session: StoredSession | null = null;
     private _identity: ZkIdentity | null = null;

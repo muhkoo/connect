@@ -49,6 +49,22 @@ export interface CircuitUrls {
     zkeyUrl: string;
 }
 
+/**
+ * Canonical {@link CircuitUrls} for the `preimagePoK` login circuit, anchored
+ * at a base URL where the accelerator serves the circuit assets out of
+ * `circuits/build/`. The filenames here are fixed by the circom build output
+ * (the witness generator lands inside a `preimagePoK_js/` directory); callers
+ * shouldn't hard-code them. `Client` uses this to default its `circuits`
+ * option, and `PersonalSpaceClient` consumers can pass `defaultCircuitUrls(baseUrl)`.
+ */
+export function defaultCircuitUrls(baseUrl: string): CircuitUrls {
+    const base = baseUrl.replace(/\/+$/, "");
+    return {
+        wasmUrl: `${base}/circuits/build/preimagePoK_js/preimagePoK.wasm`,
+        zkeyUrl: `${base}/circuits/build/preimagePoK_0001.zkey`,
+    };
+}
+
 /** BN254 scalar field modulus — the prime the circuit's signals live in. */
 const FIELD_SIZE = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 
