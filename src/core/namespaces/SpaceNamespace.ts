@@ -21,7 +21,7 @@ import { KeyStore } from "../../crypto/KeyStore";
 import { Space } from "../../spaces/Space";
 import { SpaceKeyring, KEEPER_MEMBER_ID, type SpaceKeyCache } from "../../spaces/SpaceKeyring";
 import { KeyringClient } from "../../spaces/KeyringClient";
-import { generateSpaceIdentity, exportEcdhPublicKey } from "../../spaces/SpaceCipher";
+import { generateSpaceIdentity, exportEcdhPublicKey, exportEcdsaPublicKey } from "../../spaces/SpaceCipher";
 import type { HistoryPolicy } from "../../spaces/types";
 
 /** Thrown by `joinChannel` when no channel with that name is registered. */
@@ -56,13 +56,15 @@ export class SpaceNamespace {
      * Create a new space: generate its keypair (public key = id), register
      * metadata, mint the initial group key, and connect. Returns the open Space.
      */
-    async createSpace(opts: { historyPolicy?: HistoryPolicy } = {}): Promise<Space> {
+    async createSpace(opts: { historyPolicy?: HistoryPolicy; private?: boolean } = {}): Promise<Space> {
         const historyPolicy = opts.historyPolicy ?? "static";
         const identity = await generateSpaceIdentity();
         // Register the space (server records pubkey + policy; the DO is lazy).
+        // For a private space the server also records the creator (this user) as
+        // its first member — so the metadata POST must carry the user session.
         await this.deps.http.post(
             `/api/spaces/${encodeURIComponent(identity.id)}/metadata`,
-            { spacePubKey: identity.id, historyPolicy },
+            { spacePubKey: identity.id, historyPolicy, visibility: opts.private ? "private" : "public" },
         );
         const space = await this.build(identity.id, historyPolicy);
         await space.create();
@@ -115,11 +117,11 @@ export class SpaceNamespace {
      * key-holder) and register `name → spaceId` in the app directory. Throws
      * {@link ChannelExistsError} if the name is already taken.
      */
-    async createChannel(name: string, opts: { historyPolicy?: HistoryPolicy } = {}): Promise<Space> {
+    async createChannel(name: string, opts: { historyPolicy?: HistoryPolicy; private?: boolean } = {}): Promise<Space> {
         const space = await this.createSpace(opts);
         // Register name → id first so a name clash doesn't leave an admitted keeper.
         try {
-            await this.deps.http.post("/api/app/channels", { name, spaceId: space.id });
+            await this.deps.http.post("/api/app/channels", { name, spaceId: space.id, visibility: opts.private ? "private" : "public" });
         } catch (err) {
             if (err instanceof HttpError && err.status === 409) {
                 throw new ChannelExistsError(name);
@@ -153,7 +155,7 @@ export class SpaceNamespace {
 
     private async build(spaceId: string, historyPolicy: HistoryPolicy): Promise<Space> {
         const memberId = this.myId();
-        const identityEcdhPub = await this.ensureIdentity(memberId);
+        const { ecdhPub, ecdsaPub } = await this.ensureIdentity(memberId);
         const transport = new KeyringClient({
             spaceId,
             httpBaseUrl: this.deps.http.baseUrl,
@@ -162,7 +164,8 @@ export class SpaceNamespace {
         const keyring = new SpaceKeyring({
             spaceId,
             memberId,
-            identityEcdhPub,
+            identityEcdhPub: ecdhPub,
+            identityEcdsaPub: ecdsaPub,
             ownPrivateKey: () => KeyStore.getInstance().getKeyPair(memberId)?.privateKey ?? null,
             transport,
             cache: this.deps.cache,
@@ -180,14 +183,15 @@ export class SpaceNamespace {
         });
     }
 
-    /** Ensure the member has an identity ECDH keypair; return its public key. */
-    private async ensureIdentity(memberId: string): Promise<string> {
+    /** Ensure the member has an identity keypair; return its public ECDH + ECDSA keys. */
+    private async ensureIdentity(memberId: string): Promise<{ ecdhPub: string; ecdsaPub: string }> {
         const store = KeyStore.getInstance();
         if (!store.getKeyPair(memberId)) {
             await store.generateOwnKeyPair(memberId);
         }
-        const pub = store.getKeyPair(memberId)!.publicKey;
-        return exportEcdhPublicKey(pub);
+        const ecdhPub = await exportEcdhPublicKey(store.getKeyPair(memberId)!.publicKey);
+        const ecdsaPub = await exportEcdsaPublicKey(store.getAuthKeyPair(memberId)!.publicKey);
+        return { ecdhPub, ecdsaPub };
     }
 
     private async fetchPolicy(spaceId: string): Promise<HistoryPolicy> {

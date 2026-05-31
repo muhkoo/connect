@@ -69,6 +69,59 @@ export async function importEcdhPublicKey(encoded: string): Promise<CryptoKey> {
 export const encodeSpaceId = exportEcdhPublicKey;
 
 // ---------------------------------------------------------------------------
+// Sender authentication (ECDSA P-384, matching the Double Ratchet path).
+// A fan-out message is signed by its sender's identity ECDSA key so receivers
+// can verify authorship end-to-end — independent of the relay, which only
+// stamps `source` server-side. SHA-256 hash to match `DoubleRatchet`.
+// ---------------------------------------------------------------------------
+
+const ECDSA_PARAMS: EcKeyImportParams = { name: "ECDSA", namedCurve: "P-384" };
+const ECDSA_SIGN: EcdsaParams = { name: "ECDSA", hash: "SHA-256" };
+
+/** Encode an ECDSA public `CryptoKey` as a base64url JWK string. */
+export async function exportEcdsaPublicKey(key: CryptoKey): Promise<string> {
+    const jwk = await getSubtle().exportKey("jwk", key);
+    return toBase64Url(utf8Encode(JSON.stringify(jwk)));
+}
+
+/** Decode a base64url JWK string back into an ECDSA verify-only public key. */
+export async function importEcdsaPublicKey(encoded: string): Promise<CryptoKey> {
+    const jwk = JSON.parse(utf8Decode(fromBase64Url(encoded)));
+    return getSubtle().importKey("jwk", jwk, ECDSA_PARAMS, true, ["verify"]);
+}
+
+/**
+ * Canonical bytes a sender signs (and a receiver re-derives). Binds the claimed
+ * sender + routing + the sealed ciphertext, so a relay can't relabel `source`
+ * and a member can't reuse another's ciphertext under a new envelope.
+ */
+export function canonicalMessage(fields: {
+    source: string;
+    target: string;
+    subject: string;
+    epoch: number;
+    iv: string;
+    ciphertext: string;
+}): string {
+    return [fields.source, fields.target, fields.subject, fields.epoch, fields.iv, fields.ciphertext].join("\n");
+}
+
+/** Sign the canonical bytes with the sender's ECDSA identity private key. */
+export async function signSpaceMessage(canonical: string, ecdsaPriv: CryptoKey): Promise<string> {
+    const sig = await getSubtle().sign(ECDSA_SIGN, ecdsaPriv, utf8Encode(canonical));
+    return toBase64(new Uint8Array(sig));
+}
+
+/** Verify a signature over the canonical bytes against the sender's ECDSA key. */
+export async function verifySpaceMessage(canonical: string, sigB64: string, ecdsaPub: CryptoKey): Promise<boolean> {
+    try {
+        return await getSubtle().verify(ECDSA_SIGN, ecdsaPub, fromBase64(sigB64), utf8Encode(canonical));
+    } catch {
+        return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Space identity
 // ---------------------------------------------------------------------------
 

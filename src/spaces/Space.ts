@@ -28,6 +28,8 @@ import { Message } from "../messaging/Message";
 import { Packet } from "../messaging/Packet";
 import { SpacePacketCipher } from "./SpacePacketCipher";
 import type { SpaceKeyring } from "./SpaceKeyring";
+import { canonicalMessage, signSpaceMessage, verifySpaceMessage } from "./SpaceCipher";
+import { KeyStore } from "../crypto/KeyStore";
 import type { JoinRequest, HistoryPolicy } from "./types";
 
 type Listener = (e: CustomEvent) => void;
@@ -205,12 +207,19 @@ export class Space {
         const cipher = this.requireCipher(opts.contentType);
         const message = new Message(payload);
         const headers = await cipher.seal(message.serialize());
-        const packet = new Packet({
-            subject: opts.channel ?? "default",
-            source: this.deps.myId(),
-            target: this.name,
-            headers,
-        });
+        const source = this.deps.myId();
+        const subject = opts.channel ?? "default";
+        // Sign the message with our identity ECDSA key so receivers can verify
+        // authorship end-to-end (independent of the relay's `source` stamp).
+        const authPriv = KeyStore.getInstance().getAuthKeyPair(source)?.privateKey;
+        if (authPriv) {
+            const canonical = canonicalMessage({
+                source, target: this.name, subject,
+                epoch: Number(headers.epoch), iv: String(headers.iv), ciphertext: String(headers.ciphertext),
+            });
+            headers.sig = await signSpaceMessage(canonical, authPriv);
+        }
+        const packet = new Packet({ subject, source, target: this.name, headers });
         this.sendRaw({ spaceMessage: packet.serialize() });
     }
 
@@ -245,6 +254,9 @@ export class Space {
         const res = await this.deps.fetch(url);
         if (!res.ok) throw new Error(`Space.history: ${res.status} ${res.statusText}`);
         const body = (await res.json()) as { messages: string[]; nextCursor: string | null };
+        // Warm the member directory once so historical senders' signatures verify.
+        // (refreshDirectory swallows its own transport errors.)
+        await this.deps.keyring?.refreshDirectory();
         const messages: SpaceMessageEvent[] = [];
         for (const raw of body.messages ?? []) {
             const decoded = await this.decodeFrame(raw, cipher);
@@ -278,6 +290,9 @@ export class Space {
         const keyring = this.requireKeyring();
         await keyring.bootstrapNew();
         await this.connect();
+        // Publish our identity in the member directory so peers can verify our
+        // message signatures (the creator never "joins", so register here).
+        await keyring.requestKey().catch(() => {});
         // Admit anyone who requested a key before we were listening.
         if (this.deps.autoAdmit !== false) {
             await keyring.admitPending().catch(() => {});
@@ -287,6 +302,11 @@ export class Space {
     /** Wrap the group key for a newcomer and post it (key-holder action). */
     async admit(memberId: string, identityEcdhPub: string): Promise<void> {
         await this.requireKeyring().admit(memberId, identityEcdhPub);
+    }
+
+    /** Invite a user to this (private) channel's membership allowlist. */
+    async invite(username: string): Promise<void> {
+        await this.requireKeyring().invite(username);
     }
 
     /** Rotate to a fresh epoch and re-wrap to the roster (rotate spaces). */
@@ -338,7 +358,9 @@ export class Space {
         if (f.joinRequest && typeof f.joinRequest === "object") {
             const req = f.joinRequest as JoinRequest;
             this.emitEvent("join-request", req);
-            // Auto-admit: if we hold the group key, wrap it for the newcomer.
+            // A new member appeared — refresh the directory so their future
+            // messages verify, and (if we hold the key) auto-admit them.
+            void this.deps.keyring?.refreshDirectory();
             if (this.deps.autoAdmit !== false && this.deps.keyring?.hasAnyKey() && req.memberId !== this.deps.myId()) {
                 void this.deps.keyring.admit(req.memberId, req.identityEcdhPub).catch(() => {});
             }
@@ -369,6 +391,14 @@ export class Space {
             }
             const packet = Packet.deserialize(packetJson);
             if (!cipher.handles(packet.headers)) return null;
+
+            // Verify sender authenticity end-to-end: the message must be signed
+            // by `source`'s identity ECDSA key (looked up in the member
+            // directory). Drop anything unsigned, signed by an unknown member,
+            // or whose signature doesn't match — this defeats both member
+            // impersonation and a relay rewriting `source`.
+            if (!(await this.verifySender(packet))) return null;
+
             const serialized = await cipher.open(packet.headers);
             if (serialized === null) return null; // epoch key we don't hold
             const message = Message.deserialize(serialized);
@@ -383,6 +413,33 @@ export class Space {
             this.emitEvent("error", err);
             return null;
         }
+    }
+
+    /**
+     * True if `packet` carries a valid signature by `source`'s identity key.
+     * On a directory cache miss, refresh once (a new member may have just
+     * joined) before giving up. Without a keyring (legacy handle) there's
+     * nothing to verify against → reject.
+     */
+    private async verifySender(packet: Packet): Promise<boolean> {
+        const keyring = this.deps.keyring;
+        const sig = packet.headers?.sig;
+        if (!keyring || typeof sig !== "string") return false;
+        let key = keyring.ecdsaKeyFor(packet.source);
+        if (!key) {
+            await keyring.refreshDirectory();
+            key = keyring.ecdsaKeyFor(packet.source);
+            if (!key) return false;
+        }
+        const canonical = canonicalMessage({
+            source: packet.source,
+            target: packet.target,
+            subject: packet.subject,
+            epoch: Number(packet.headers?.epoch ?? 0),
+            iv: String(packet.headers?.iv ?? ""),
+            ciphertext: String(packet.headers?.ciphertext ?? ""),
+        });
+        return verifySpaceMessage(canonical, sig, key);
     }
 
     private emitEvent(type: string, detail: unknown): void {

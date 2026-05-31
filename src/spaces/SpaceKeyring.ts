@@ -17,12 +17,13 @@
  * {@link SpacePacketCipher} directly.
  */
 
-import type { WrappedKey, JoinRequest, HistoryPolicy, SpaceMetadata } from "./types";
+import type { WrappedKey, JoinRequest, HistoryPolicy, SpaceMetadata, RosterMember } from "./types";
 import {
     generateSpaceKey,
     wrapSpaceKey,
     unwrapSpaceKey,
     importEcdhPublicKey,
+    importEcdsaPublicKey,
 } from "./SpaceCipher";
 import type { EpochKeyProvider } from "./SpacePacketCipher";
 import { toBase64, fromBase64 } from "../utilities";
@@ -45,10 +46,12 @@ export interface KeyringTransport {
     postWrappedKey(targetMemberId: string, wrapped: WrappedKey, fromMemberId: string): Promise<void>;
     /** Outstanding join requests (for an online key-holder to fulfill). */
     fetchPending(): Promise<JoinRequest[]>;
-    /** Current roster: member ids + their identity ECDH public keys. */
-    fetchRoster(): Promise<Array<{ memberId: string; identityEcdhPub: string }>>;
+    /** Current roster: member ids + their identity ECDH/ECDSA public keys. */
+    fetchRoster(): Promise<RosterMember[]>;
     /** Advisory epoch bump; returns the agreed new epoch. */
     rotate(nextEpoch: number): Promise<{ epoch: number }>;
+    /** Add `username` to a private channel's membership allowlist. */
+    invite(username: string): Promise<void>;
     fetchMetadata(): Promise<SpaceMetadata | null>;
 }
 
@@ -63,6 +66,9 @@ export interface SpaceKeyringDeps {
     memberId: string;
     /** This member's identity ECDH public key, base64url JWK (for join requests). */
     identityEcdhPub: string;
+    /** This member's identity ECDSA public key, base64url JWK (published for
+     * sender-signature verification). */
+    identityEcdsaPub?: string;
     /** Resolves this member's identity ECDH private key (for unwrapping). */
     ownPrivateKey: () => CryptoKey | null;
     transport: KeyringTransport;
@@ -74,9 +80,36 @@ export class SpaceKeyring implements EpochKeyProvider {
     private readonly keys = new Map<number, Uint8Array>();
     private epoch = 0;
     private readonly policy: HistoryPolicy;
+    /** Cached member directory: memberId → imported ECDSA verify key. */
+    private readonly memberEcdsa = new Map<string, CryptoKey>();
 
     constructor(private readonly deps: SpaceKeyringDeps) {
         this.policy = deps.historyPolicy ?? "static";
+    }
+
+    // -- member directory (for verifying sender signatures) -------------------
+
+    /** The cached ECDSA verify key for a member, if known. */
+    ecdsaKeyFor(memberId: string): CryptoKey | undefined {
+        return this.memberEcdsa.get(memberId);
+    }
+
+    /** Refresh the member directory (memberId → ECDSA key) from the roster. */
+    async refreshDirectory(): Promise<void> {
+        let roster: RosterMember[];
+        try {
+            roster = await this.deps.transport.fetchRoster();
+        } catch {
+            return;
+        }
+        for (const m of roster) {
+            if (!m.identityEcdsaPub || this.memberEcdsa.has(m.memberId)) continue;
+            try {
+                this.memberEcdsa.set(m.memberId, await importEcdsaPublicKey(m.identityEcdsaPub));
+            } catch {
+                /* skip malformed entries */
+            }
+        }
     }
 
     // -- EpochKeyProvider ------------------------------------------------------
@@ -135,11 +168,16 @@ export class SpaceKeyring implements EpochKeyProvider {
 
     // -- newcomer: request + pull ---------------------------------------------
 
-    /** Post a join request so an online key-holder can wrap a key for us. */
+    /**
+     * Post a join request so an online key-holder can wrap a key for us. Also
+     * publishes our identity keys in the member directory (so others can verify
+     * our message signatures, and the keeper can wrap to us).
+     */
     async requestKey(desiredEpoch?: number): Promise<void> {
         await this.deps.transport.postJoinRequest({
             memberId: this.deps.memberId,
             identityEcdhPub: this.deps.identityEcdhPub,
+            identityEcdsaPub: this.deps.identityEcdsaPub,
             desiredEpoch,
         });
     }
@@ -223,5 +261,10 @@ export class SpaceKeyring implements EpochKeyProvider {
         }
         await this.persist();
         return nextEpoch;
+    }
+
+    /** Add `username` to a private channel's membership allowlist (member-only). */
+    async invite(username: string): Promise<void> {
+        await this.deps.transport.invite(username);
     }
 }

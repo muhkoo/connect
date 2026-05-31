@@ -76,5 +76,17 @@ export interface SealedPacketHeaders {
     ciphertext: string;
     /** App MIME hint, surfaced to receivers. */
     contentType?: string;
+    /** Base64 ECDSA signature by the sender's identity key over the canonical
+     * `{source,target,subject,epoch,iv,ciphertext}` — proves authorship. */
+    sig?: string;
     [k: string]: string | number | boolean | undefined;
+}
+
+/** A space member's published identity keys (the keyring directory). */
+export interface RosterMember {
+    memberId: string;
+    /** Base64url-encoded JWK of the member's identity ECDH public key. */
+    identityEcdhPub: string;
+    /** Base64url-encoded JWK of the member's identity ECDSA public key. */
+    identityEcdsaPub?: string;
 }
