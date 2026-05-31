@@ -31,11 +31,16 @@ remain exported, but the `Client` is the supported surface.
    device; the server stores only a Poseidon commitment. Login proves knowledge
    with a Groth16 proof (`src/auth/`).
 3. **Encryption by default** — storage values sealed with AES-256-GCM under an
-   identity-derived key (`src/crypto/StorageCipher.ts`); DMs use the Double
-   Ratchet (`src/crypto/`, `src/sessions/`).
+   identity-derived key (`src/crypto/StorageCipher.ts`); direct messages use the
+   Double Ratchet (`src/crypto/`, `src/sessions/`); group channels use a fan-out
+   group key (`src/spaces/`).
 4. **Spaces** — the backend primitive both storage (personal space) and
-   messaging/rooms (shared space) ride on. A `Room` (`src/core/Room.ts`) wraps
-   a shared space's group channel + file storage.
+   messaging (shared space) ride on. A `Space` (`src/spaces/Space.ts`, formerly
+   `Room` — still aliased via `src/core/Room.ts`) wraps a shared space's group
+   channel + file storage. `src/spaces/` adds the fan-out group-encryption layer
+   (`SpaceCipher`, `SpaceKeyring`, `KeyringClient`) and `client.space`
+   (`SpaceNamespace`): `createChannel`/`joinChannel`/`listChannels` over an
+   app-scoped channel registry, with a server-side **keeper** admitting members.
 5. **Two credentials** — an app key (`mk_…`, `X-Muhkoo-Key`) identifies the app
    for billing; a session token (`X-Muhkoo-Session`) identifies the user. The
    `HttpClient` attaches both.
@@ -105,13 +110,16 @@ yarn watch:docs
 ### Source Code Organization
 - `/src/core/` - The unified `Client`. `Client.ts` (facade), `HttpClient.ts`
   (header-injecting transport), `Session.ts` (session + identity state),
-  `Room.ts` (shared-space group channel + files), and
-  `namespaces/{Auth,Storage,Message}Namespace.ts`
+  `Room.ts` (back-compat alias re-exporting `Space`), and
+  `namespaces/{Auth,Storage,Message,Space}Namespace.ts`
+- `/src/spaces/` - Fan-out group-encryption layer: `Space.ts` (the shared-space
+  handle, formerly `Room`), `SpaceCipher` (ECIES group-key wrap + message seal),
+  `SpaceKeyring` + `KeyringClient` (group-key distribution), `SpacePacketCipher`
 - `/src/auth/` - ZK auth: identity derivation, Groth16 proof, Poseidon, key
   helpers, and `AuthClient` (the `/api/auth/*` HTTP client)
 - `/src/crypto/` - Crypto primitives + Double Ratchet, KeyStore, ZeroKnowledge
   (snarkjs proof gen), `StorageCipher.ts` (at-rest AES-GCM for `client.storage`)
-- `/src/sessions/` - `EncryptedSession` + `BroadcastChannel` (E2E room transport)
+- `/src/sessions/` - `EncryptedSession` + `BroadcastChannel` (E2E space transport)
 - `/src/storage/` - Chunked/encrypted/erasure-coded file storage (FileStorage,
   ShardClient, SharedSpaceClient, Reed-Solomon)
 - `/src/personal/` - `PersonalSpaceClient` (proof-gated per-user KV; the
@@ -150,7 +158,17 @@ yarn watch:docs
   client-side. `storage.on('change')` is a realtime cross-device feed over the
   personal space's websocket
 - File storage (`src/storage/`) is chunked + AES-GCM + Reed-Solomon erasure
-  coded into content-addressed shards; room files ride `Room.putFile/getFile`
+  coded into content-addressed shards; space files ride `Space.putFile/getFile`
+
+### Group messaging (`client.space`)
+- Fan-out group key: a `spaceMessage` is sealed once with the channel's group
+  key (not per-peer like the Double Ratchet), so the server persists + replays
+  it as **history**. Loops back to the sender — don't local-echo; dedupe by id
+- Channels = named pointers (`name → space id`) in an app-public registry
+  (`/api/app/channels`). `createChannel` vs `joinChannel` is explicit
+- **Keeper**: the accelerator's per-app DO holds the group key and admits new
+  members, so channels are joinable with nobody online. The relay stays blind
+  (opaque ECIES-wrapped blobs only)
 
 ### Known Issues
 1. **Base58 encoding performance**: Currently slow for large payloads (>100KB). Message class tests disabled due to this bottleneck.

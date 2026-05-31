@@ -1,12 +1,12 @@
 # @muhkoo/connect
 
 Client SDK for the Muhkoo Accelerator. The headline surface is a single
-**`Client`** that hangs everything off three namespaces —
-`client.auth` / `client.storage` / `client.message` — backed by
-end-to-end-encrypted messaging primitives (Double Ratchet + ECDH P-384), a
-turnkey multi-peer `BroadcastChannel`, ZK identity + personal/shared spaces,
-and a Cloudflare-Workers-compatible Groth16 verifier — all bundled from a
-single TypeScript source tree.
+**`Client`** that hangs everything off four namespaces —
+`client.auth` / `client.storage` / `client.message` / `client.space` — backed by
+end-to-end-encrypted messaging (fan-out group channels with history, plus
+Double Ratchet + ECDH P-384 for direct messages), ZK identity + personal/shared
+spaces, and a Cloudflare-Workers-compatible Groth16 verifier — all bundled from
+a single TypeScript source tree.
 
 > Status: alpha. The library is consumed in tree by `../accelerator` and the
 > `../web` SPA.
@@ -140,20 +140,28 @@ await client.storage.delete("todos", "t1");
 const sub = client.message.subscribe("todos", (e) => console.log("update:", e.data));
 await client.message.publish("todos", { id: "t1", done: true });
 await client.message.send("user:abc", { text: "Hello!" });
+
+// Space — fan-out group channels with persisted history (group chat).
+const space = await client.space.joinChannel("project-x"); // or createChannel(...)
+space.onMessage((e) => console.log(e.from, e.message.body));
+await space.sendMessage("Hi everyone");
+const { messages } = await space.history({ limit: 100 });
 ```
 
-`subscribe(subject)` / `publish(subject, data)` are plaintext fan-out to
-everyone on that subject. `send("user:<id>", …)` is an **end-to-end-encrypted**
-direct message (Double Ratchet); the recipient receives it by subscribing to
-their *own* id — `client.message.subscribe("user:<me>", …)`. Both modes ride a
-shared-space room websocket under the hood (opened with a short-lived signed
-ticket); E2E delivery needs both parties online, like any ratchet.
+`client.message` is lightweight realtime: `subscribe`/`publish` are plaintext
+fan-out; `send("user:<id>", …)` is an **end-to-end-encrypted** direct message
+(Double Ratchet — forward-secret, ephemeral, no history; both parties must be
+online).
 
-For full **group rooms** (multi-peer E2E chat + room-scoped file sharing), use
-`client.message.room(name)` — a shared-space handle exposing the group channel
-(`connect`/`on`/`send`/`announce`/`peers`/`sendRaw`) plus
-`putFile`/`getFile`. `subscribe`/`publish`/`send` are conveniences layered over
-this same room primitive.
+`client.space` is **fan-out group messaging with history**. A channel seals each
+message once with a shared group key so the server can persist + replay it.
+`createChannel(name)` mints + registers a channel (you become its first
+key-holder); `joinChannel(name)` resolves an existing one and is admitted by the
+app's **keeper** — a trusted, always-available member that re-issues the group
+key — so a channel is joinable even when no one else is online. The relay stays
+blind (it only ever sees opaque, ECIES-wrapped key blobs). The space handle was
+once `Room`; that name is still exported as an alias, and `client.message.room()`
+returns the same handle.
 
 Auth lifecycle:
 
