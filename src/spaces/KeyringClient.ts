@@ -13,7 +13,7 @@
  */
 
 import type { KeyringTransport } from "./SpaceKeyring";
-import type { WrappedKey, JoinRequest, SpaceMetadata } from "./types";
+import type { WrappedKey, JoinRequest, SpaceMetadata, RosterMember } from "./types";
 
 export interface KeyringClientDeps {
     spaceId: string;
@@ -65,15 +65,17 @@ export class KeyringClient implements KeyringTransport {
         return body.pending ?? [];
     }
 
-    async fetchRoster(): Promise<Array<{ memberId: string; identityEcdhPub: string }>> {
-        const body = await this.get<{ roster?: Array<{ memberId: string; identityEcdhPub: string }> }>(
-            "/keyring/roster",
-        );
+    async fetchRoster(): Promise<RosterMember[]> {
+        const body = await this.get<{ roster?: RosterMember[] }>("/keyring/roster");
         return body.roster ?? [];
     }
 
     async rotate(nextEpoch: number): Promise<{ epoch: number }> {
         return this.post<{ epoch: number }>("/keyring/rotate", { nextEpoch });
+    }
+
+    async invite(username: string): Promise<void> {
+        await this.post("/keyring/invite", { username });
     }
 
     async fetchMetadata(): Promise<SpaceMetadata | null> {

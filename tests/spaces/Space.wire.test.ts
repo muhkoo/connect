@@ -12,7 +12,11 @@
 import { describe, it, expect } from "vitest";
 import { Space, type SpaceChannelLike } from "../../src/spaces/Space";
 import { SpaceKeyring, type KeyringTransport } from "../../src/spaces/SpaceKeyring";
-import { exportEcdhPublicKey } from "../../src/spaces/SpaceCipher";
+import { exportEcdhPublicKey, exportEcdsaPublicKey, canonicalMessage, signSpaceMessage } from "../../src/spaces/SpaceCipher";
+import { SpacePacketCipher } from "../../src/spaces/SpacePacketCipher";
+import { KeyStore } from "../../src/crypto/KeyStore";
+import { Message } from "../../src/messaging/Message";
+import { Packet } from "../../src/messaging/Packet";
 import type { WrappedKey, JoinRequest } from "../../src/spaces/types";
 
 /**
@@ -24,7 +28,7 @@ class FakeSpaceServer implements KeyringTransport {
     private channels = new Map<string, FakeChannel>();
     private persisted: string[] = []; // serialized {spaceMessage,...} frames
     private blobs = new Map<string, WrappedKey[]>();
-    private members = new Map<string, string>();
+    private members = new Map<string, { ecdh: string; ecdsa?: string }>();
     private pending: JoinRequest[] = [];
     private ts = 0;
 
@@ -75,7 +79,7 @@ class FakeSpaceServer implements KeyringTransport {
     async postJoinRequest(req: JoinRequest): Promise<void> {
         this.pending = this.pending.filter((p) => p.memberId !== req.memberId);
         this.pending.push(req);
-        this.members.set(req.memberId, req.identityEcdhPub);
+        this.members.set(req.memberId, { ecdh: req.identityEcdhPub, ecdsa: req.identityEcdsaPub });
         for (const [id, ch] of this.channels) if (id !== req.memberId) ch.deliver({ joinRequest: req });
     }
     async fetchBlobs(memberId: string): Promise<WrappedKey[]> {
@@ -91,12 +95,15 @@ class FakeSpaceServer implements KeyringTransport {
     async fetchPending(): Promise<JoinRequest[]> {
         return [...this.pending];
     }
-    async fetchRoster(): Promise<Array<{ memberId: string; identityEcdhPub: string }>> {
-        return Array.from(this.members.entries()).map(([memberId, identityEcdhPub]) => ({ memberId, identityEcdhPub }));
+    async fetchRoster() {
+        return Array.from(this.members.entries()).map(([memberId, k]) => ({
+            memberId, identityEcdhPub: k.ecdh, identityEcdsaPub: k.ecdsa,
+        }));
     }
     async rotate(nextEpoch: number): Promise<{ epoch: number }> {
         return { epoch: nextEpoch };
     }
+    async invite(): Promise<void> {}
     async fetchMetadata() {
         return null;
     }
@@ -138,26 +145,23 @@ class FakeChannel implements SpaceChannelLike {
     }
 }
 
-async function makeIdentity(): Promise<{ pub: string; priv: CryptoKey }> {
-    const kp = (await crypto.subtle.generateKey(
-        { name: "ECDH", namedCurve: "P-384" },
-        true,
-        ["deriveBits"],
-    )) as CryptoKeyPair;
-    return { pub: await exportEcdhPublicKey(kp.publicKey), priv: kp.privateKey };
-}
-
-function makeSpace(
+async function makeSpace(
     memberId: string,
     spaceId: string,
     server: FakeSpaceServer,
-    identity: { pub: string; priv: CryptoKey },
-): Space {
+): Promise<Space> {
+    // Real KeyStore identity so sendMessage can sign (ECDSA) and peers can
+    // verify via the published ECDSA key.
+    const ks = KeyStore.getInstance();
+    if (!ks.getKeyPair(memberId)) await ks.generateOwnKeyPair(memberId);
+    const identityEcdhPub = await exportEcdhPublicKey(ks.getKeyPair(memberId)!.publicKey);
+    const identityEcdsaPub = await exportEcdsaPublicKey(ks.getAuthKeyPair(memberId)!.publicKey);
     const keyring = new SpaceKeyring({
         spaceId,
         memberId,
-        identityEcdhPub: identity.pub,
-        ownPrivateKey: () => identity.priv,
+        identityEcdhPub,
+        identityEcdsaPub,
+        ownPrivateKey: () => ks.getKeyPair(memberId)?.privateKey ?? null,
         transport: server,
         historyPolicy: "static",
     });
@@ -184,11 +188,9 @@ describe("Space — fan-out wire end to end", () => {
     it("seals, broadcasts, decodes live, and replays history", async () => {
         const server = new FakeSpaceServer();
         const spaceId = "space-pubkey-xyz".padEnd(40, "z"); // >32 → pubkey-shaped
-        const aliceId = await makeIdentity();
-        const bobId = await makeIdentity();
 
-        const alice = makeSpace("alice", spaceId, server, aliceId);
-        const bob = makeSpace("bob", spaceId, server, bobId);
+        const alice = await makeSpace("alice", spaceId, server);
+        const bob = await makeSpace("bob", spaceId, server);
 
         // Alice creates (mints epoch-0 key) and connects.
         await alice.create();
@@ -211,8 +213,7 @@ describe("Space — fan-out wire end to end", () => {
         expect(received[0].message.body).toEqual({ text: "hello space" });
 
         // History replay: a late joiner with the key reads the persisted message.
-        const carolId = await makeIdentity();
-        const carol = makeSpace("carol", spaceId, server, carolId);
+        const carol = await makeSpace("carol", spaceId, server);
         await carol.connect();
         await carol.keyring!.requestKey();
         await until(() => carol.keyring!.hasAnyKey());
@@ -221,5 +222,43 @@ describe("Space — fan-out wire end to end", () => {
         const { messages } = await carol.history();
         expect(messages).toHaveLength(1);
         expect(messages[0].message.body).toEqual({ text: "hello space" });
+    });
+
+    it("drops a message whose sender is forged by another member", async () => {
+        const server = new FakeSpaceServer();
+        const spaceId = "forge".padEnd(40, "z");
+        const alice = await makeSpace("alice", spaceId, server);
+        const mallory = await makeSpace("mallory", spaceId, server);
+        const carol = await makeSpace("carol", spaceId, server);
+
+        await alice.create();                                  // alice registers (ecdsa in dir)
+        for (const m of [mallory, carol]) {
+            await m.connect();
+            await m.keyring!.requestKey();
+            await until(() => m.keyring!.hasAnyKey());
+        }
+
+        // Mallory holds the group key, so she can seal valid ciphertext — but
+        // she signs with HER key while claiming source = "alice".
+        const cipher = new SpacePacketCipher(mallory.keyring!);
+        const headers = await cipher.seal(new Message({ text: "i am alice" }).serialize());
+        const malloryPriv = KeyStore.getInstance().getAuthKeyPair("mallory")!.privateKey!;
+        headers.sig = await signSpaceMessage(
+            canonicalMessage({
+                source: "alice", target: spaceId, subject: "chat",
+                epoch: Number(headers.epoch), iv: String(headers.iv), ciphertext: String(headers.ciphertext),
+            }),
+            malloryPriv,
+        );
+        const forged = new Packet({ subject: "chat", source: "alice", target: spaceId, headers });
+
+        const received: unknown[] = [];
+        carol.onMessage((e) => received.push(e));
+        mallory.sendRaw({ spaceMessage: forged.serialize() });
+        await flush();
+        await flush();
+
+        // Carol drops it: the signature doesn't verify under alice's key.
+        expect(received).toHaveLength(0);
     });
 });
