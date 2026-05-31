@@ -29,6 +29,8 @@ import { SessionState, defaultSessionStore, type SessionStore } from "./Session"
 import { AuthNamespace } from "./namespaces/AuthNamespace";
 import { StorageNamespace } from "./namespaces/StorageNamespace";
 import { MessageNamespace } from "./namespaces/MessageNamespace";
+import { SpaceNamespace } from "./namespaces/SpaceNamespace";
+import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 
 /** The hosted Muhkoo Accelerator — the default {@link ClientOptions.baseUrl}. */
 export const DEFAULT_BASE_URL = "https://api.muhkoo.dev";
@@ -82,6 +84,8 @@ export class Client {
     readonly storage: StorageNamespace;
     /** Realtime messaging — `client.message.subscribe(...)`, etc. */
     readonly message: MessageNamespace;
+    /** Fan-out group spaces — `client.space.createSpace(...)`, etc. */
+    readonly space: SpaceNamespace;
 
     private readonly session: SessionState;
     private readonly http: HttpClient;
@@ -108,6 +112,20 @@ export class Client {
         this.auth = new AuthNamespace({ auth: authClient, circuits, session: this.session });
         this.storage = new StorageNamespace({ http: this.http, session: this.session, wsBaseUrl });
         this.message = new MessageNamespace({ http: this.http, session: this.session, wsBaseUrl });
+
+        // Group keys are cached in the user's PersonalSpace (encrypted at rest
+        // by StorageNamespace), so a returning member hydrates without a fresh
+        // keyring round-trip. The server only ever sees the ciphertext.
+        const spaceKeyCache: SpaceKeyCache = {
+            loadKeys: (spaceId) => this.storage.get<Record<string, string>>("space-keys", spaceId),
+            saveKeys: (spaceId, keys) => this.storage.set("space-keys", spaceId, keys),
+        };
+        this.space = new SpaceNamespace({
+            http: this.http,
+            session: this.session,
+            wsBaseUrl,
+            cache: spaceKeyCache,
+        });
     }
 
     /** The currently signed-in user, or `null`. */

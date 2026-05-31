@@ -26,6 +26,7 @@ import { _socketId } from '../utilities';
 import { appLogger } from '../core';
 import { EventCore, EventCoreEvents } from '../events';
 import { WSTransport } from '../transport';
+import { PacketCipher, DoubleRatchetCipher } from './PacketCipher';
 
 export interface NetworkOptions {
   /** WebSocket URL (e.g., ws://localhost:8787 or wss://api.example.com) */
@@ -53,6 +54,20 @@ export interface NetworkOptions {
   };
   /** Default HTTP headers */
   defaultHeaders?: Record<string, string>;
+  /**
+   * Payload cipher strategy. Defaults to a {@link DoubleRatchetCipher} bound
+   * to this Network's ratchet manager (the historical behavior). Supply a
+   * group-key cipher (e.g. from the Space layer) to seal fan-out messages.
+   */
+  cipher?: PacketCipher;
+  /**
+   * Optional top-level frame discriminator. When set, outbound packets are
+   * wrapped as `{ [frameTag]: <packet.serialize()> }` and inbound frames are
+   * unwrapped from `frame[frameTag]` before decryption. Frames lacking the tag
+   * are surfaced verbatim via the `data_received` event (control frames).
+   * Needed for the SharedSpace transport, which discriminates on top-level keys.
+   */
+  frameTag?: string;
 }
 
 /**
@@ -118,6 +133,13 @@ export class Network extends EventCore {
   // events so existing consumers (Client.ts) keep working unchanged.
   private transport: WSTransport;
 
+  // Pluggable payload cipher (default: Double Ratchet).
+  private cipher: PacketCipher;
+  // Optional top-level frame discriminator for transports that route on it.
+  private frameTag?: string;
+  // False when a custom cipher manages its own keys (skip DR session setup).
+  private usesDefaultCipher: boolean = true;
+
   // HTTP configuration
   private httpTimeout: number;
   private httpRetry: { maxRetries: number; retryDelay: number };
@@ -149,6 +171,21 @@ export class Network extends EventCore {
       void this.handleIncomingMessage(e.detail as string);
     });
 
+    // Payload cipher: caller-supplied (e.g. group-key) or the default Double
+    // Ratchet bound to this Network's ratchet manager + session.
+    this.cipher = options.cipher ?? new DoubleRatchetCipher({
+      ratchetManager: this.ratchetManager,
+      clientId: this.clientId,
+      serverId: this.serverId,
+      sessionType: this.sessionType,
+      getSessionId: () => this.sessionId,
+      isClient: true,
+    });
+    this.frameTag = options.frameTag;
+    // A caller-supplied cipher (e.g. group-key) manages its own keys; skip the
+    // Double Ratchet session bootstrap entirely in that case.
+    this.usesDefaultCipher = !options.cipher;
+
     // HTTP configuration
     this.httpTimeout = options.httpTimeout || 30000;
     this.httpRetry = options.httpRetry || { maxRetries: 3, retryDelay: 1000 };
@@ -174,6 +211,11 @@ export class Network extends EventCore {
    * Initialize the ratchet session
    */
   async initializeSession(): Promise<void> {
+    // Custom ciphers (e.g. group-key) own their key material — no DR session.
+    if (!this.usesDefaultCipher) {
+      await this.generateKeys();
+      return;
+    }
     if (!this.sessionId) {
       // Ensure keys are generated
       await this.generateKeys();
@@ -215,8 +257,8 @@ export class Network extends EventCore {
    */
   async send(options: Omit<PacketOptions, 'source'>): Promise<boolean> {
     try {
-      // Ensure session is initialized
-      if (!this.sessionId) {
+      // Ensure key material / session is ready.
+      if (this.usesDefaultCipher && !this.sessionId) {
         await this.initializeSession();
       }
 
@@ -226,28 +268,11 @@ export class Network extends EventCore {
         source: this.clientId,
       });
 
-      // If message exists, encrypt it
+      // If a payload exists, seal it via the active cipher. The ciphertext
+      // rides in headers; the cleartext message field is cleared on the wire.
       if (packet.message) {
-        const serializedMessage = packet.message.serialize();
-
-        // Encrypt using DoubleRatchetManager
-        const cipherMessage = await this.ratchetManager.encrypt(
-          this.clientId,
-          this.serverId,
-          this.sessionId!,
-          serializedMessage,
-          false, // newDhKey - let ratchet manage key rotation
-          this.sessionType
-        );
-
-        // Store encrypted message in packet headers
-        packet.headers = {
-          ...packet.headers,
-          encrypted: true,
-          cipherMessage: JSON.stringify(cipherMessage),
-        };
-
-        // Clear the message field (we'll send encrypted version in headers)
+        const sealed = await this.cipher.seal(packet.message.serialize(), packet);
+        packet.headers = { ...packet.headers, ...sealed };
         packet.message = undefined;
       }
 
@@ -262,10 +287,16 @@ export class Network extends EventCore {
 
   /**
    * Send a packet over the WebSocket. WSTransport handles the connected /
-   * disconnected branch and queues frames when offline.
+   * disconnected branch and queues frames when offline. When a `frameTag` is
+   * configured the serialized packet is wrapped under that key so transports
+   * that discriminate on a top-level field (e.g. SharedSpace) can route it.
    */
   private async sendPacket(packet: Packet): Promise<void> {
-    this.transport.send(packet.serialize());
+    const serialized = packet.serialize();
+    const frame = this.frameTag
+      ? JSON.stringify({ [this.frameTag]: serialized })
+      : serialized;
+    this.transport.send(frame);
   }
 
   // ============================================================================
@@ -277,8 +308,28 @@ export class Network extends EventCore {
    */
   private async handleIncomingMessage(data: string): Promise<void> {
     try {
+      // When a frameTag is configured, the wire carries a top-level envelope.
+      // Pull the packet out of `frame[frameTag]`; anything without the tag is a
+      // control frame the higher layer (e.g. Space) handles — surface it raw.
+      let packetJson = data;
+      if (this.frameTag) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          this.emit(EventCoreEvents.DATA_RECEIVED, data);
+          return;
+        }
+        const tagged = (parsed as Record<string, unknown>)?.[this.frameTag];
+        if (typeof tagged !== 'string') {
+          this.emit(EventCoreEvents.DATA_RECEIVED, parsed);
+          return;
+        }
+        packetJson = tagged;
+      }
+
       // Deserialize packet
-      const packet = Packet.deserialize(data);
+      const packet = Packet.deserialize(packetJson);
 
       // Check if packet is expired
       if (packet.isExpired()) {
@@ -286,22 +337,14 @@ export class Network extends EventCore {
         return;
       }
 
-      // Decrypt message if encrypted
-      if (packet.headers?.encrypted && packet.headers?.cipherMessage) {
-        const cipherMessage = JSON.parse(packet.headers.cipherMessage as string) as CipherMessage;
-
-        // Decrypt using DoubleRatchetManager
-        const decryptedMessage = await this.ratchetManager.decrypt(
-          cipherMessage,
-          true // isClient
-        );
-
-        // Reconstruct message
-        packet.message = Message.deserialize(decryptedMessage);
-
-        // Verify checksum
-        if (packet.message.checksum) {
-          packet.message.verifyChecksum();
+      // Open the sealed payload via the active cipher (null = not for us).
+      if (this.cipher.handles(packet.headers)) {
+        const decrypted = await this.cipher.open(packet.headers);
+        if (decrypted !== null) {
+          packet.message = Message.deserialize(decrypted);
+          if (packet.message.checksum) {
+            packet.message.verifyChecksum();
+          }
         }
       }
 

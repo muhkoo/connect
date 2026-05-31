@@ -35,3 +35,11 @@ export * from "../core/Room";
 export * from "../core/namespaces/AuthNamespace";
 export * from "../core/namespaces/StorageNamespace";
 export * from "../core/namespaces/MessageNamespace";
+export * from "../core/namespaces/SpaceNamespace";
+// Fan-out group-encryption layer (Space, keyring, cipher). Flat `export *`
+// for the same dts-plugin reason as the Client exports above.
+export * from "../spaces/Space";
+export * from "../spaces/SpaceKeyring";
+export * from "../spaces/SpacePacketCipher";
+export * from "../spaces/KeyringClient";
+export * from "../network/PacketCipher";

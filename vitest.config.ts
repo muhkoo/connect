@@ -25,6 +25,8 @@ export default defineConfig({
       "**/tests/crypto/zk-real.test.ts",
       // Storage pipeline (cipher + RS codec + FileStorage end-to-end)
       "**/tests/storage/FileStorage.test.ts",
+      // Space fan-out group-encryption layer
+      "**/tests/spaces/**/*.test.ts",
       // "**/session-manager.test.ts",
       // "**/api-client.test.ts",
       // Salvaged tests

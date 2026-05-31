@@ -23,9 +23,13 @@ export { SessionState, MemorySessionStore, LocalStorageSessionStore, defaultSess
 export type { SessionStore, StoredSession } from "./Session";
 export { Room } from "./Room";
 export type { RoomDeps, RoomFileMetadata } from "./Room";
+export { Space } from "../spaces/Space";
+export type { SpaceDeps, SpaceFileMetadata, SpaceMessageEvent } from "../spaces/Space";
 export { AuthNamespace, ZkAuth } from "./namespaces/AuthNamespace";
 export type { AuthUser, RegisterParams, LoginOptions } from "./namespaces/AuthNamespace";
 export { StorageNamespace } from "./namespaces/StorageNamespace";
 export type { SetOptions, StorageChangeEvent } from "./namespaces/StorageNamespace";
 export { MessageNamespace } from "./namespaces/MessageNamespace";
 export type { MessageSubscription } from "./namespaces/MessageNamespace";
+export { SpaceNamespace, ChannelNotFoundError, ChannelExistsError } from "./namespaces/SpaceNamespace";
+export type { SpaceNamespaceDeps } from "./namespaces/SpaceNamespace";

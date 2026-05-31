@@ -11,6 +11,7 @@ export * as core from './core';
 export * as events from './events';
 export * as messaging from './messaging';
 export * as network from './network';
+export * as spaces from './spaces';
 export * as storage from './storage';
 
 // Logging
