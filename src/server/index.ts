@@ -17,3 +17,9 @@ export * from '../personal';
 export * from '../storage';
 // AuthClient — `/api/auth/*` HTTP wrapper.
 export * from '../auth';
+// Fan-out group-encryption layer. `Space` + `SpaceNamespace` already come via
+// `../core`; export the standalone keyring/cipher building blocks here too.
+export * from '../spaces/SpaceKeyring';
+export * from '../spaces/SpacePacketCipher';
+export * from '../spaces/KeyringClient';
+export * from '../network/PacketCipher';
