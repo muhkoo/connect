@@ -14,8 +14,9 @@
  *
  * Values are encrypted at rest by default ({@link StorageCipher}, an AES-GCM
  * key derived from the ZK identity); pass `{ encrypt: false }` to store
- * plaintext. The realtime feed rides the personal space's own websocket, so no
- * separate transport is involved.
+ * plaintext. The realtime feed rides the personal space's websocket over a
+ * {@link WSTransport} (heartbeat keep-alive + auto-reconnect, event-namespaced
+ * so it doesn't cross wires with chat/space transports).
  *
  * `query()` is intentionally deferred — see the SDK overhaul plan.
  */
@@ -24,6 +25,8 @@ import type { HttpClient } from "../HttpClient";
 import type { SessionState } from "../Session";
 import type { ZkIdentity } from "../../auth/identity";
 import { StorageCipher } from "../../crypto/StorageCipher";
+import { WSTransport } from "../../transport/WSTransport";
+import { EventCoreEvents } from "../../events";
 
 export interface StorageNamespaceDeps {
     http: HttpClient;
@@ -108,22 +111,31 @@ export class StorageNamespace {
     on<T = unknown>(event: "change", handler: (e: StorageChangeEvent<T>) => void): () => void {
         if (event !== "change") throw new Error(`client.storage: unknown event "${event}"`);
 
-        const WS = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
-        if (typeof WS !== "function") {
+        if (typeof (globalThis as { WebSocket?: typeof WebSocket }).WebSocket !== "function") {
             throw new Error("client.storage.on: no `WebSocket` global available in this runtime.");
         }
         const token = this.deps.session.token;
         if (!token) throw new Error("client.storage.on: not signed in.");
 
-        const url = `${this.deps.wsBaseUrl}/api/personal/${encodeURIComponent(this.commitment())}/websocket?session=${encodeURIComponent(token)}`;
-        const socket = new WS(url);
+        const commitment = this.commitment();
+        const url = `${this.deps.wsBaseUrl}/api/personal/${encodeURIComponent(commitment)}/websocket?session=${encodeURIComponent(token)}`;
 
-        socket.addEventListener("message", (ev: MessageEvent) => {
-            void this.dispatchChange<T>(ev.data, handler);
-        });
+        // Ride a WSTransport rather than a bare socket: it keeps the (otherwise
+        // idle) personal-space feed warm with heartbeat pings, auto-reconnects
+        // if it drops, and namespaces its events by `id` so this feed never
+        // crosses wires with chat/space transports on the shared EventCore bus.
+        const transport = new WSTransport({ url, id: `personal:${commitment}` });
+        const onMessage = (e: CustomEvent) => {
+            void this.dispatchChange<T>(e.detail, handler);
+        };
+        transport.on(EventCoreEvents.MESSAGE, onMessage);
+        // Fire-and-forget: the realtime feed is best-effort, and the transport
+        // queues nothing it needs before CONNECTED (server→client only).
+        void transport.connect();
 
         return () => {
-            try { socket.close(); } catch { /* already closed */ }
+            transport.off(EventCoreEvents.MESSAGE, onMessage);
+            transport.disconnect();
         };
     }
 

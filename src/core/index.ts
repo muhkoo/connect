@@ -24,7 +24,7 @@ export type { SessionStore, StoredSession } from "./Session";
 export { Room } from "./Room";
 export type { RoomDeps, RoomFileMetadata } from "./Room";
 export { Space } from "../spaces/Space";
-export type { SpaceDeps, SpaceFileMetadata, SpaceMessageEvent } from "../spaces/Space";
+export type { SpaceDeps, SpaceFileMetadata, SpaceMessageEvent, EphemeralEvent, MessageDeletedEvent } from "../spaces/Space";
 export { AuthNamespace, ZkAuth } from "./namespaces/AuthNamespace";
 export type { AuthUser, RegisterParams, LoginOptions } from "./namespaces/AuthNamespace";
 export { StorageNamespace } from "./namespaces/StorageNamespace";
