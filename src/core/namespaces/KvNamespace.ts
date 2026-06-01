@@ -1,12 +1,12 @@
 /**
- * `client.storage` — per-user persistent storage backed by the accelerator's
- * personal space.
+ * `client.kv` — per-user key/value storage backed by the accelerator's personal
+ * space.
  *
- *   await client.storage.set('todos', id, { title, completed })
- *   const todo = await client.storage.get('todos', id)
- *   const ids  = await client.storage.list('todos')
- *   await client.storage.delete('todos', id)
- *   const off  = client.storage.on('change', e => …)   // realtime, cross-device
+ *   await client.kv.set('todos', id, { title, completed })
+ *   const todo = await client.kv.get('todos', id)
+ *   const ids  = await client.kv.list('todos')
+ *   await client.kv.delete('todos', id)
+ *   const off  = client.kv.on('change', e => …)   // realtime, cross-device
  *
  * A *collection* is a key namespace within the user's space; the stored key is
  * `${collection}/${id}`. Operations are authorized by the user's session token
@@ -18,7 +18,8 @@
  * {@link WSTransport} (heartbeat keep-alive + auto-reconnect, event-namespaced
  * so it doesn't cross wires with chat/space transports).
  *
- * `query()` is intentionally deferred — see the SDK overhaul plan.
+ * For **files** (blobs), use `client.storage` instead — `client.kv` is for
+ * small structured values. `query()` is intentionally deferred.
  */
 
 import type { HttpClient } from "../HttpClient";
@@ -28,7 +29,7 @@ import { StorageCipher } from "../../crypto/StorageCipher";
 import { WSTransport } from "../../transport/WSTransport";
 import { EventCoreEvents } from "../../events";
 
-export interface StorageNamespaceDeps {
+export interface KvNamespaceDeps {
     http: HttpClient;
     session: SessionState;
     /** WebSocket base (ws/wss) for the change feed; derived from baseUrl. */
@@ -56,11 +57,11 @@ interface ChangeFrame {
     value?: unknown;
 }
 
-export class StorageNamespace {
+export class KvNamespace {
     private cipher: StorageCipher | null = null;
     private cipherIdentity: ZkIdentity | null = null;
 
-    constructor(private readonly deps: StorageNamespaceDeps) {}
+    constructor(private readonly deps: KvNamespaceDeps) {}
 
     /** Store `value` under `collection`/`id` (encrypted at rest by default). */
     async set<T = unknown>(collection: string, id: string, value: T, opts?: SetOptions): Promise<void> {
@@ -98,7 +99,7 @@ export class StorageNamespace {
 
     /** Reserved — server-side query is deferred (see the overhaul plan). */
     async query(_collection: string, _filter?: unknown): Promise<never> {
-        throw new Error("client.storage.query is not implemented yet (deferred in the SDK overhaul).");
+        throw new Error("client.kv.query is not implemented yet (deferred in the SDK overhaul).");
     }
 
     /**
@@ -109,13 +110,13 @@ export class StorageNamespace {
      * Requires a `WebSocket` global (browsers; Node 22+ or a `ws` shim).
      */
     on<T = unknown>(event: "change", handler: (e: StorageChangeEvent<T>) => void): () => void {
-        if (event !== "change") throw new Error(`client.storage: unknown event "${event}"`);
+        if (event !== "change") throw new Error(`client.kv: unknown event "${event}"`);
 
         if (typeof (globalThis as { WebSocket?: typeof WebSocket }).WebSocket !== "function") {
-            throw new Error("client.storage.on: no `WebSocket` global available in this runtime.");
+            throw new Error("client.kv.on: no `WebSocket` global available in this runtime.");
         }
         const token = this.deps.session.token;
-        if (!token) throw new Error("client.storage.on: not signed in.");
+        if (!token) throw new Error("client.kv.on: not signed in.");
 
         const commitment = this.commitment();
         const url = `${this.deps.wsBaseUrl}/api/personal/${encodeURIComponent(commitment)}/websocket?session=${encodeURIComponent(token)}`;
@@ -173,7 +174,7 @@ export class StorageNamespace {
 
     private commitment(): string {
         const c = this.deps.session.commitment;
-        if (!c) throw new Error("client.storage: not signed in — call client.auth.zk.login() first.");
+        if (!c) throw new Error("client.kv: not signed in — call client.auth.zk.login() first.");
         return c;
     }
 
@@ -196,4 +197,4 @@ export class StorageNamespace {
     }
 }
 
-export default StorageNamespace;
+export default KvNamespace;

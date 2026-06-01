@@ -396,9 +396,13 @@ export class Space {
     }
 
     private fileStorage(): FileStorage {
+        // Global, content-addressed shard store — same store `client.storage`
+        // uses, so a file shared into a channel resolves from anywhere by
+        // manifest. (Shards are encrypted ciphertext; the manifest is the
+        // capability.)
         const shards = new ShardClient({
             baseUrl: this.deps.httpBaseUrl,
-            pathPrefix: `/api/spaces/${encodeURIComponent(this.name)}/shards`,
+            pathPrefix: "/api/shards",
             fetch: this.deps.fetch,
         });
         return new FileStorage({ shards });
