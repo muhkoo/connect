@@ -27,7 +27,8 @@ import { defaultCircuitUrls, type CircuitUrls } from "../auth/proof";
 import { HttpClient } from "./HttpClient";
 import { SessionState, defaultSessionStore, type SessionStore } from "./Session";
 import { AuthNamespace } from "./namespaces/AuthNamespace";
-import { StorageNamespace } from "./namespaces/StorageNamespace";
+import { KvNamespace } from "./namespaces/KvNamespace";
+import { StorageNamespace } from "./namespaces/FileNamespace";
 import { MessageNamespace } from "./namespaces/MessageNamespace";
 import { SpaceNamespace } from "./namespaces/SpaceNamespace";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
@@ -80,7 +81,9 @@ export class Client {
 
     /** Authentication — `client.auth.zk.login(...)`, etc. */
     readonly auth: AuthNamespace;
-    /** Per-user persistent storage — `client.storage.set(...)`, etc. */
+    /** Per-user key/value storage — `client.kv.set(...)`, etc. */
+    readonly kv: KvNamespace;
+    /** File storage — `client.storage.writeFile(...)`, etc. */
     readonly storage: StorageNamespace;
     /** Realtime messaging — `client.message.subscribe(...)`, etc. */
     readonly message: MessageNamespace;
@@ -89,6 +92,11 @@ export class Client {
 
     private readonly session: SessionState;
     private readonly http: HttpClient;
+
+    /** Subscribers notified when a session expires and can't be recovered. */
+    private readonly sessionExpiredHandlers = new Set<() => void>();
+    /** Shared in-flight recovery so a burst of 401s triggers one re-auth. */
+    private recoverInFlight: Promise<boolean> | null = null;
 
     constructor(options: ClientOptions = {}) {
         if (options.logLevel && typeof globalThis.appLogger?.setLevel === "function") {
@@ -103,6 +111,10 @@ export class Client {
             apiKey: options.apiKey,
             getSessionToken: () => this.session.token,
             fetch: options.fetch,
+            // Self-heal stale sessions: on a 401, try a silent re-auth (only
+            // works while unlocked). If it can't, `recoverSession` fires the
+            // session-expired event so the app can redirect to login.
+            onUnauthorized: () => this.recoverSession(),
         });
 
         const circuits = options.circuits ?? defaultCircuitUrls(this.baseUrl);
@@ -110,15 +122,16 @@ export class Client {
 
         const wsBaseUrl = toWsBase(this.baseUrl);
         this.auth = new AuthNamespace({ auth: authClient, circuits, session: this.session });
-        this.storage = new StorageNamespace({ http: this.http, session: this.session, wsBaseUrl });
+        this.kv = new KvNamespace({ http: this.http, session: this.session, wsBaseUrl });
+        this.storage = new StorageNamespace({ http: this.http, baseUrl: this.baseUrl, kv: this.kv });
         this.message = new MessageNamespace({ http: this.http, session: this.session, wsBaseUrl });
 
         // Group keys are cached in the user's PersonalSpace (encrypted at rest
-        // by StorageNamespace), so a returning member hydrates without a fresh
-        // keyring round-trip. The server only ever sees the ciphertext.
+        // by client.kv), so a returning member hydrates without a fresh keyring
+        // round-trip. The server only ever sees the ciphertext.
         const spaceKeyCache: SpaceKeyCache = {
-            loadKeys: (spaceId) => this.storage.get<Record<string, string>>("space-keys", spaceId),
-            saveKeys: (spaceId, keys) => this.storage.set("space-keys", spaceId, keys),
+            loadKeys: (spaceId) => this.kv.get<Record<string, string>>("space-keys", spaceId),
+            saveKeys: (spaceId, keys) => this.kv.set("space-keys", spaceId, keys),
         };
         this.space = new SpaceNamespace({
             http: this.http,
@@ -136,6 +149,46 @@ export class Client {
     /** Whether a token-bearing session is active. */
     get isAuthenticated(): boolean {
         return this.session.isAuthenticated;
+    }
+
+    /**
+     * Subscribe to session expiry that couldn't be silently recovered (the
+     * user's identity wasn't in memory to re-prove — typically after a reload
+     * where only the token was persisted, and that token has since gone stale).
+     * This is the signal to send the user back to the login screen.
+     *
+     * Returns an unsubscribe function.
+     *
+     *   const off = client.onSessionExpired(() => router.push('/login'));
+     */
+    onSessionExpired(handler: () => void): () => void {
+        this.sessionExpiredHandlers.add(handler);
+        return () => this.sessionExpiredHandlers.delete(handler);
+    }
+
+    /**
+     * Attempt a silent re-auth of the current user. Concurrent callers share a
+     * single in-flight attempt (a stale token usually 401s several requests at
+     * once — we re-auth once, not once per request). On failure the
+     * session-expired event fires so the app can react. Exposed so apps can
+     * also drive recovery proactively (e.g. on `visibilitychange`).
+     */
+    recoverSession(): Promise<boolean> {
+        if (this.recoverInFlight) return this.recoverInFlight;
+        this.recoverInFlight = this.auth.zk
+            .recover()
+            .then((ok) => {
+                if (!ok) {
+                    for (const handler of this.sessionExpiredHandlers) {
+                        try { handler(); } catch { /* a bad listener mustn't break recovery */ }
+                    }
+                }
+                return ok;
+            })
+            .finally(() => {
+                this.recoverInFlight = null;
+            });
+        return this.recoverInFlight;
     }
 }
 

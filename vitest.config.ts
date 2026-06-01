@@ -18,8 +18,12 @@ export default defineConfig({
     include: [
       // Unified Client facade + namespaces
       "**/client.test.ts",
-      "**/tests/client/storage.test.ts",
+      "**/tests/client/kv.test.ts",
+      "**/tests/client/file-storage.test.ts",
       "**/tests/client/message.test.ts",
+      // HTTP credential plumbing + session recovery, WebSocket transport
+      "**/tests/core/HttpClient.test.ts",
+      "**/tests/transport/WSTransport.test.ts",
       // "**/ecdh.test.ts",
       "**/tests/crypto/ratchet.test.ts",
       "**/tests/crypto/zk-real.test.ts",

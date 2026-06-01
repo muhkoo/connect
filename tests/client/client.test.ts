@@ -52,6 +52,7 @@ describe('Client — construction', () => {
         const client = new Client({ apiKey: API_KEY, baseUrl: BASE_URL });
         expect(client.auth).toBeDefined();
         expect(client.auth.zk).toBeDefined();
+        expect(client.kv).toBeDefined();
         expect(client.storage).toBeDefined();
         expect(client.message).toBeDefined();
         expect(client.isAuthenticated).toBe(false);
@@ -146,10 +147,10 @@ describe('Client — namespaces pending implementation', () => {
         client = new Client({ apiKey: API_KEY, baseUrl: BASE_URL });
     });
 
-    it('storage methods refuse to run unauthenticated', async () => {
+    it('kv methods refuse to run unauthenticated', async () => {
         // Encrypted write needs identity; read needs at least a session.
-        await expect(client.storage.set('todos', '1', {})).rejects.toThrow(/identity/);
-        await expect(client.storage.get('todos', '1')).rejects.toThrow(/not signed in/);
+        await expect(client.kv.set('todos', '1', {})).rejects.toThrow(/identity/);
+        await expect(client.kv.get('todos', '1')).rejects.toThrow(/not signed in/);
     });
 
     it('message send refuses to run unauthenticated', async () => {

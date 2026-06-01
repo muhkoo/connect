@@ -85,6 +85,48 @@ export class ZkAuth {
      */
     async login(username: string, password: string, opts: LoginOptions = {}): Promise<AuthUser> {
         const identity = await deriveIdentity(username, password);
+        return this.proveAndStore(username, identity, opts);
+    }
+
+    /**
+     * Silently re-authenticate the current user without prompting for a
+     * password. Only possible while the client is **unlocked** — i.e. the
+     * derived {@link ZkIdentity} (secret + keypairs) is still in memory from a
+     * prior `login()`/`unlock()`. Re-runs the full challenge→proof→authenticate
+     * dance with that in-memory identity and swaps in the fresh token.
+     *
+     * Returns `true` if a new session was minted, `false` if recovery isn't
+     * possible (no active user, or locked — the identity was never derived or
+     * was lost on reload). A `false` result is the app's cue to send the user
+     * back to the login screen.
+     *
+     * Used automatically by the {@link Client} when a token-gated request comes
+     * back `401` (stale/expired token), so transient session expiry self-heals
+     * instead of surfacing errors mid-session.
+     */
+    async recover(): Promise<boolean> {
+        const username = this.deps.session.username;
+        const identity = this.deps.session.identity;
+        if (!username || !identity) return false;
+        try {
+            await this.proveAndStore(username, identity, {});
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Shared sign-in core: prove knowledge of `identity` against a fresh
+     * challenge and persist the resulting session + identity. Used by both
+     * `login()` (identity derived from a password) and `recover()` (identity
+     * already in memory).
+     */
+    private async proveAndStore(
+        username: string,
+        identity: ZkIdentity,
+        opts: LoginOptions,
+    ): Promise<AuthUser> {
         const ecdsaPubHex = await exportPublicKeyHex(identity.ecdsaKeyPair.publicKey);
 
         const challenge = await this.deps.auth.getChallenge(username);

@@ -47,7 +47,36 @@ export interface SpaceMessageEvent {
     channel: string;
     epoch: number;
     contentType?: string;
+    /**
+     * Server storage handle — the monotonic server timestamp this message is
+     * persisted under (`msg:<handle>`). Stable across history replay; pass it to
+     * {@link Space.editMessage} / {@link Space.deleteMessage} to mutate the
+     * persisted entry. Carried on edit events too (same handle as the original).
+     */
+    handle: number;
     message: Message;
+}
+
+/**
+ * An inbound ephemeral signal — an application broadcast the server relays to
+ * the room but never persists (no history). Rides the generic `pub` relay:
+ * `subject` is an app-defined routing key, `data` is opaque app JSON, and
+ * `from` is the server-authenticated sender. Typing indicators, presence pings,
+ * live cursors, etc. are built on top of this in the app layer — the SDK and
+ * server stay domain-agnostic.
+ */
+export interface EphemeralEvent {
+    /** Server-stamped authenticated sender. */
+    from: string;
+    /** Application-defined routing key (e.g. "typing"). */
+    subject: string;
+    /** Opaque application payload. */
+    data: unknown;
+}
+
+/** A server-authoritative deletion of the persisted message at `handle`. */
+export interface MessageDeletedEvent {
+    handle: number;
 }
 
 export interface SpaceDeps {
@@ -204,23 +233,7 @@ export class Space {
         payload: unknown,
         opts: { channel?: string; contentType?: string } = {},
     ): Promise<void> {
-        const cipher = this.requireCipher(opts.contentType);
-        const message = new Message(payload);
-        const headers = await cipher.seal(message.serialize());
-        const source = this.deps.myId();
-        const subject = opts.channel ?? "default";
-        // Sign the message with our identity ECDSA key so receivers can verify
-        // authorship end-to-end (independent of the relay's `source` stamp).
-        const authPriv = KeyStore.getInstance().getAuthKeyPair(source)?.privateKey;
-        if (authPriv) {
-            const canonical = canonicalMessage({
-                source, target: this.name, subject,
-                epoch: Number(headers.epoch), iv: String(headers.iv), ciphertext: String(headers.ciphertext),
-            });
-            headers.sig = await signSpaceMessage(canonical, authPriv);
-        }
-        const packet = new Packet({ subject, source, target: this.name, headers });
-        this.sendRaw({ spaceMessage: packet.serialize() });
+        this.sendRaw({ spaceMessage: await this.sealMessage(payload, opts.channel, opts.contentType) });
     }
 
     /** Subscribe to decrypted fan-out messages. Returns an unsubscribe fn. */
@@ -228,6 +241,61 @@ export class Space {
         const listener = (e: Event) => handler((e as CustomEvent<SpaceMessageEvent>).detail);
         this.events.addEventListener("message", listener);
         return () => this.events.removeEventListener("message", listener);
+    }
+
+    /**
+     * Edit a persisted message IN PLACE, addressed by its server
+     * {@link SpaceMessageEvent.handle}. Re-seals `payload` and asks the server
+     * to replace the stored entry; the server authorizes against the original
+     * author. Receivers get an {@link onMessageEdited} event carrying the new
+     * content at the same handle. This is a generic persisted-item edit — the
+     * server has no notion of what the payload means.
+     */
+    async editMessage(handle: number, payload: unknown, opts: { channel?: string; contentType?: string } = {}): Promise<void> {
+        const spaceMessage = await this.sealMessage(payload, opts.channel, opts.contentType);
+        this.sendRaw({ editSpaceMessage: { ts: handle, spaceMessage } });
+    }
+
+    /**
+     * Hard-delete a persisted message by its server {@link SpaceMessageEvent.handle}
+     * — the ciphertext is removed from storage. Server authorizes against the
+     * original author. Receivers get an {@link onMessageDeleted} event.
+     */
+    async deleteMessage(handle: number): Promise<void> {
+        this.sendRaw({ deleteSpaceMessage: { ts: handle } });
+    }
+
+    /** Subscribe to in-place edits of persisted messages (new content at the same handle). */
+    onMessageEdited(handler: (e: SpaceMessageEvent) => void): () => void {
+        const listener = (e: Event) => handler((e as CustomEvent<SpaceMessageEvent>).detail);
+        this.events.addEventListener("message-edited", listener);
+        return () => this.events.removeEventListener("message-edited", listener);
+    }
+
+    /** Subscribe to deletions of persisted messages. */
+    onMessageDeleted(handler: (e: MessageDeletedEvent) => void): () => void {
+        const listener = (e: Event) => handler((e as CustomEvent<MessageDeletedEvent>).detail);
+        this.events.addEventListener("message-deleted", listener);
+        return () => this.events.removeEventListener("message-deleted", listener);
+    }
+
+    /**
+     * Broadcast an ephemeral, never-persisted signal to the room over the
+     * generic `pub` relay. `subject` is an app-defined routing key; `data` is
+     * opaque. The transport stays domain-agnostic — app concepts like typing
+     * indicators, presence, or live cursors are built on top of this. No-op if
+     * the space isn't connected (ephemeral signals aren't worth queuing).
+     */
+    sendEphemeral(subject: string, data: unknown): void {
+        if (!this.isConnected()) return;
+        this.sendRaw({ pub: { subject, data } });
+    }
+
+    /** Subscribe to inbound ephemeral signals. `from` is the authenticated sender. */
+    onEphemeral(handler: (e: EphemeralEvent) => void): () => void {
+        const listener = (e: Event) => handler((e as CustomEvent<EphemeralEvent>).detail);
+        this.events.addEventListener("ephemeral", listener);
+        return () => this.events.removeEventListener("ephemeral", listener);
     }
 
     /** Subscribe to inbound join requests (for a key-holder to admit). */
@@ -328,9 +396,13 @@ export class Space {
     }
 
     private fileStorage(): FileStorage {
+        // Global, content-addressed shard store — same store `client.storage`
+        // uses, so a file shared into a channel resolves from anywhere by
+        // manifest. (Shards are encrypted ciphertext; the manifest is the
+        // capability.)
         const shards = new ShardClient({
             baseUrl: this.deps.httpBaseUrl,
-            pathPrefix: `/api/spaces/${encodeURIComponent(this.name)}/shards`,
+            pathPrefix: "/api/shards",
             fetch: this.deps.fetch,
         });
         return new FileStorage({ shards });
@@ -351,8 +423,35 @@ export class Space {
         const f = frame as Record<string, unknown>;
         if (!f || typeof f !== "object") return;
         if (typeof f.spaceMessage === "string" && this.cipher) {
-            const decoded = await this.decodeFrame(f.spaceMessage as string, this.cipher, /*raw*/ true);
+            const decoded = await this.decodeFrame(f.spaceMessage as string, this.cipher, /*raw*/ true, Number(f.timestamp ?? 0));
             if (decoded) this.emitEvent("message", decoded);
+            return;
+        }
+        if (f.editSpaceMessage && typeof f.editSpaceMessage === "object" && this.cipher) {
+            // Server-authoritative in-place edit: new sealed content at the same
+            // handle. Decode and surface it; the app replaces by `handle`.
+            const e = f.editSpaceMessage as { ts?: number; spaceMessage?: string };
+            if (typeof e.spaceMessage === "string") {
+                const decoded = await this.decodeFrame(e.spaceMessage, this.cipher, /*raw*/ true, Number(e.ts ?? 0));
+                if (decoded) this.emitEvent("message-edited", decoded);
+            }
+            return;
+        }
+        if (f.deleteSpaceMessage && typeof f.deleteSpaceMessage === "object") {
+            const d = f.deleteSpaceMessage as { ts?: number };
+            this.emitEvent("message-deleted", { handle: Number(d.ts ?? 0) });
+            return;
+        }
+        if (f.pub && typeof f.pub === "object") {
+            // Generic ephemeral relay frame. The server stamps the authenticated
+            // sender as `name`; `pub` carries the app's {subject, data}. We
+            // surface the authenticated `name` as `from` (not any client-set
+            // value inside `pub`), so app signals can't spoof their sender.
+            const p = f.pub as { subject?: unknown; data?: unknown };
+            const from = typeof f.name === "string" ? f.name : "";
+            if (from && typeof p.subject === "string") {
+                this.emitEvent("ephemeral", { from, subject: p.subject, data: p.data });
+            }
             return;
         }
         if (f.joinRequest && typeof f.joinRequest === "object") {
@@ -373,21 +472,50 @@ export class Space {
     }
 
     /**
+     * Seal `payload` once with the current group key + sign it, returning the
+     * serialized `Packet` string. Shared by send (a new message) and edit
+     * (replacement content for an existing handle). Requires a keyring.
+     */
+    private async sealMessage(payload: unknown, channel?: string, contentType?: string): Promise<string> {
+        const cipher = this.requireCipher(contentType);
+        const message = new Message(payload);
+        const headers = await cipher.seal(message.serialize());
+        const source = this.deps.myId();
+        const subject = channel ?? "default";
+        // Sign with our identity ECDSA key so receivers can verify authorship
+        // end-to-end (independent of the relay's `source` stamp).
+        const authPriv = KeyStore.getInstance().getAuthKeyPair(source)?.privateKey;
+        if (authPriv) {
+            const canonical = canonicalMessage({
+                source, target: this.name, subject,
+                epoch: Number(headers.epoch), iv: String(headers.iv), ciphertext: String(headers.ciphertext),
+            });
+            headers.sig = await signSpaceMessage(canonical, authPriv);
+        }
+        return new Packet({ subject, source, target: this.name, headers }).serialize();
+    }
+
+    /**
      * Decode one persisted/broadcast frame into a SpaceMessageEvent.
      * `isRawFrame` true means `input` is the already-extracted `spaceMessage`
-     * packet string; false means it's the full `{spaceMessage, name, ...}` frame.
+     * packet string (and `serverTs` carries the message's storage handle from
+     * the enclosing frame); false means `input` is the full
+     * `{spaceMessage, name, timestamp}` frame and the handle is read from it.
      */
     private async decodeFrame(
         input: string,
         cipher: SpacePacketCipher,
         isRawFrame = false,
+        serverTs = 0,
     ): Promise<SpaceMessageEvent | null> {
         try {
             let packetJson = input;
+            let handle = serverTs;
             if (!isRawFrame) {
-                const outer = JSON.parse(input) as { spaceMessage?: string };
+                const outer = JSON.parse(input) as { spaceMessage?: string; timestamp?: number };
                 if (typeof outer.spaceMessage !== "string") return null;
                 packetJson = outer.spaceMessage;
+                handle = Number(outer.timestamp ?? 0);
             }
             const packet = Packet.deserialize(packetJson);
             if (!cipher.handles(packet.headers)) return null;
@@ -407,6 +535,7 @@ export class Space {
                 channel: packet.subject,
                 epoch: Number(packet.headers?.epoch ?? 0),
                 contentType: packet.headers?.contentType as string | undefined,
+                handle,
                 message,
             };
         } catch (err) {

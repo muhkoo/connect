@@ -16,8 +16,8 @@ export * from "../workers/groth16-verifier";
 // PersonalSpaceClient + passphrase wrap helpers. Pulls in snarkjs as an
 // external — the consuming app's import map (or bundler) resolves it.
 export * from "../personal";
-// FileStorage + ShardClient + SharedSpaceClient. Excluded from the workers
-// build (SharedSpaceClient depends on snarkjs).
+// FileStorage + ShardClient + SharedSpaceClient (session-based, no snarkjs).
+// Wrapped by `client.storage` on the unified Client.
 export * from "../storage";
 // AuthClient — `/api/auth/*` HTTP wrapper. Browser + server only; the
 // workers build is the auth backend itself, no point importing the client.
@@ -33,7 +33,8 @@ export * from "../core/HttpClient";
 export * from "../core/Session";
 export * from "../core/Room";
 export * from "../core/namespaces/AuthNamespace";
-export * from "../core/namespaces/StorageNamespace";
+export * from "../core/namespaces/KvNamespace";
+export * from "../core/namespaces/FileNamespace";
 export * from "../core/namespaces/MessageNamespace";
 export * from "../core/namespaces/SpaceNamespace";
 // Fan-out group-encryption layer (Space, keyring, cipher). Flat `export *`
