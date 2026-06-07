@@ -21,6 +21,7 @@ export default defineConfig({
       "**/tests/client/kv.test.ts",
       "**/tests/client/file-storage.test.ts",
       "**/tests/client/message.test.ts",
+      "**/tests/client/functions.test.ts",
       // HTTP credential plumbing + session recovery, WebSocket transport
       "**/tests/core/HttpClient.test.ts",
       "**/tests/transport/WSTransport.test.ts",

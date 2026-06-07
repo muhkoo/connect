@@ -31,6 +31,8 @@ import { KvNamespace } from "./namespaces/KvNamespace";
 import { StorageNamespace } from "./namespaces/FileNamespace";
 import { MessageNamespace } from "./namespaces/MessageNamespace";
 import { SpaceNamespace } from "./namespaces/SpaceNamespace";
+import { AgentsNamespace } from "./namespaces/AgentsNamespace";
+import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 
 /** The hosted Muhkoo Accelerator — the default {@link ClientOptions.baseUrl}. */
@@ -89,6 +91,10 @@ export class Client {
     readonly message: MessageNamespace;
     /** Fan-out group spaces — `client.space.createSpace(...)`, etc. */
     readonly space: SpaceNamespace;
+    /** Programmable Agents — `client.agents.create(appId, …)`, etc. */
+    readonly agents: AgentsNamespace;
+    /** Serverless functions — `client.functions.deploy(appId, …)`, etc. */
+    readonly functions: FunctionsNamespace;
 
     private readonly session: SessionState;
     private readonly http: HttpClient;
@@ -139,6 +145,8 @@ export class Client {
             wsBaseUrl,
             cache: spaceKeyCache,
         });
+        this.agents = new AgentsNamespace({ http: this.http });
+        this.functions = new FunctionsNamespace({ http: this.http });
     }
 
     /** The currently signed-in user, or `null`. */
