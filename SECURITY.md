@@ -10,7 +10,7 @@ vulnerabilities seriously and appreciate responsible disclosure.
 
 Report privately via GitHub's **[Private Vulnerability Reporting](https://github.com/muhkoo/connect/security/advisories/new)**
 (Security → Report a vulnerability). If that is unavailable, email
-**security@muhkoo.dev** with:
+**security@muhkoo.com** with:
 
 - a description of the issue and its impact,
 - steps to reproduce (a minimal proof-of-concept if possible),

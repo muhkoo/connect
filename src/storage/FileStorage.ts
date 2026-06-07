@@ -103,6 +103,12 @@ export interface WriteToShardsInput {
      * resumable uploads: the same id always maps to the same manifest slot.
      */
     fileId?: string;
+    /**
+     * Optional upload-progress callback, invoked after each chunk finishes
+     * (`completed` of `total` chunks). Lets a UI show a progress bar. Called once
+     * with `(0, total)` before the first chunk so a bar can render immediately.
+     */
+    onProgress?: (completed: number, total: number) => void;
 }
 
 export class FileStorage {
@@ -151,6 +157,8 @@ export class FileStorage {
         const fileId = input.fileId ?? generateId();
         const createdAt = Date.now();
         const chunks: ChunkManifest[] = [];
+        const totalChunks = Math.max(1, Math.ceil(data.length / this.chunkSize));
+        input.onProgress?.(0, totalChunks);
 
         // Slicing + encrypting + encoding + uploading is done per-chunk so
         // the peak memory footprint stays at ~chunkSize even for huge files.
@@ -161,6 +169,7 @@ export class FileStorage {
             const end = Math.min(start + this.chunkSize, data.length);
             const plaintext = data.subarray(start, end);
             chunks.push(await this.writeChunk(plaintext, chunkIndex));
+            input.onProgress?.(chunks.length, totalChunks);
             // Stop after one iteration if the file is empty — we still emit a
             // single zero-length chunk so the manifest has a stable shape.
             if (data.length === 0) break;

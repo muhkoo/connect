@@ -13,7 +13,7 @@
  */
 
 import type { KeyringTransport } from "./SpaceKeyring";
-import type { WrappedKey, JoinRequest, SpaceMetadata, RosterMember } from "./types";
+import type { WrappedKey, JoinRequest, SpaceMetadata, RosterMember, InviteLink } from "./types";
 
 export interface KeyringClientDeps {
     spaceId: string;
@@ -76,6 +76,41 @@ export class KeyringClient implements KeyringTransport {
 
     async invite(username: string): Promise<void> {
         await this.post("/keyring/invite", { username });
+    }
+
+    // -- Shareable invite links ----------------------------------------------
+    // A capability token tied to this space. Redeeming it allowlists the holder
+    // so the keeper admits them — the link IS the invitation. Mint/list/revoke
+    // require the caller to be the creator or an existing member.
+
+    async createInviteLink(opts: { expiresInSec?: number; maxUses?: number; role?: string } = {}): Promise<InviteLink> {
+        return this.post<InviteLink>("/keyring/link", opts);
+    }
+
+    async listInviteLinks(): Promise<InviteLink[]> {
+        const body = await this.get<{ links?: InviteLink[] }>("/keyring/links");
+        return body.links ?? [];
+    }
+
+    /** Set a member's role ("viewer" | "editor"). Owner-only on the server. */
+    async setMemberRole(username: string, role: string): Promise<void> {
+        await this.post("/keyring/role", { username, role });
+    }
+
+    /** Roster with roles (owner/members only). */
+    async members(): Promise<Array<{ memberId: string; role: string }>> {
+        const body = await this.get<{ members?: Array<{ memberId: string; role: string }> }>("/keyring/members");
+        return body.members ?? [];
+    }
+
+    async revokeInviteLink(token: string): Promise<void> {
+        await this.post("/keyring/link-revoke", { token });
+    }
+
+    /** Redeem a link: the server allowlists this member and asks the keeper to
+     *  wrap the group key for their identity. Caller must be authenticated. */
+    async redeemInvite(req: { token: string; identityEcdhPub: string; identityEcdsaPub?: string; desiredEpoch?: number }): Promise<void> {
+        await this.post("/keyring/redeem", req);
     }
 
     async fetchMetadata(): Promise<SpaceMetadata | null> {

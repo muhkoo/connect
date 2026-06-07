@@ -35,3 +35,27 @@ export { MessageNamespace } from "./namespaces/MessageNamespace";
 export type { MessageSubscription } from "./namespaces/MessageNamespace";
 export { SpaceNamespace, ChannelNotFoundError, ChannelExistsError } from "./namespaces/SpaceNamespace";
 export type { SpaceNamespaceDeps } from "./namespaces/SpaceNamespace";
+export { AgentsNamespace } from "./namespaces/AgentsNamespace";
+export type {
+    AgentConfig,
+    AgentCreateInput,
+    AgentUpdateInput,
+    AgentProvisioned,
+    AgentSkill,
+    AgentTrigger,
+    AgentTriggerType,
+    AgentScopeOpts,
+    AgentsNamespaceDeps,
+} from "./namespaces/AgentsNamespace";
+export { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
+export type {
+    FunctionConfig,
+    FunctionDeployInput,
+    FunctionUpdateInput,
+    FunctionTriggers,
+    FunctionTrigger,
+    FunctionTriggerType,
+    FunctionCaps,
+    FunctionScopeOpts,
+    FunctionsNamespaceDeps,
+} from "./namespaces/FunctionsNamespace";

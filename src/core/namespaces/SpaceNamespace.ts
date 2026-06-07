@@ -22,7 +22,7 @@ import { Space } from "../../spaces/Space";
 import { SpaceKeyring, KEEPER_MEMBER_ID, type SpaceKeyCache } from "../../spaces/SpaceKeyring";
 import { KeyringClient } from "../../spaces/KeyringClient";
 import { generateSpaceIdentity, exportEcdhPublicKey, exportEcdsaPublicKey } from "../../spaces/SpaceCipher";
-import type { HistoryPolicy } from "../../spaces/types";
+import type { HistoryPolicy, InviteLink } from "../../spaces/types";
 
 /** Thrown by `joinChannel` when no channel with that name is registered. */
 export class ChannelNotFoundError extends Error {
@@ -147,6 +147,65 @@ export class SpaceNamespace {
         const spaceId = await this.resolveChannel(name);
         if (!spaceId) throw new ChannelNotFoundError(name);
         return this.joinSpace(spaceId, opts);
+    }
+
+    // -------------------------------------------------------------------------
+    // Invite links — shareable, keeper-gated invitations to a space. The token
+    // is a capability: anyone signed in who redeems it is admitted by the
+    // keeper. Mint/list/revoke require the caller to be the space's creator or
+    // an existing member.
+    // -------------------------------------------------------------------------
+
+    /** Mint a shareable invite link for a space. `opts.expiresInSec` / `maxUses`
+     *  bound it (0/undefined = unlimited); `opts.role` ("viewer"|"editor") is the
+     *  access granted to redeemers (default viewer). Returns the link. */
+    async createInviteLink(spaceId: string, opts: { expiresInSec?: number; maxUses?: number; role?: string } = {}): Promise<InviteLink> {
+        return this.keyringFor(spaceId).createInviteLink(opts);
+    }
+
+    /** Set a member's role on a space ("viewer" | "editor"). Owner-only. */
+    async setMemberRole(spaceId: string, username: string, role: string): Promise<void> {
+        await this.keyringFor(spaceId).setMemberRole(username, role);
+    }
+
+    /** Roster with roles (owner/members only). */
+    async members(spaceId: string): Promise<Array<{ memberId: string; role: string }>> {
+        return this.keyringFor(spaceId).members();
+    }
+
+    /** List a space's active invite links (creator/members only). */
+    async listInviteLinks(spaceId: string): Promise<InviteLink[]> {
+        return this.keyringFor(spaceId).listInviteLinks();
+    }
+
+    /** Revoke an invite link by token. */
+    async revokeInviteLink(spaceId: string, token: string): Promise<void> {
+        await this.keyringFor(spaceId).revokeInviteLink(token);
+    }
+
+    /**
+     * Join a space using an invite link: redeem the token (the keeper admits
+     * this member), then connect and resolve once the group key arrives.
+     * Returns the open {@link Space}.
+     */
+    async joinByInvite(spaceId: string, token: string, opts: { timeoutMs?: number } = {}): Promise<Space> {
+        const memberId = this.myId();
+        const { ecdhPub, ecdsaPub } = await this.ensureIdentity(memberId);
+        await this.keyringFor(spaceId).redeemInvite({ token, identityEcdhPub: ecdhPub, identityEcdsaPub: ecdsaPub });
+        return this.joinSpace(spaceId, opts);
+    }
+
+    /** The current member roster of a space (member id → identity public keys). */
+    async roster(spaceId: string): Promise<Array<{ memberId: string; identityEcdhPub: string; identityEcdsaPub?: string }>> {
+        return this.keyringFor(spaceId).fetchRoster();
+    }
+
+    private keyringFor(spaceId: string): KeyringClient {
+        return new KeyringClient({
+            spaceId,
+            httpBaseUrl: this.deps.http.baseUrl,
+            fetch: this.deps.http.fetch,
+        });
     }
 
     // -------------------------------------------------------------------------

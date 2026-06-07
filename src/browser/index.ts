@@ -37,6 +37,8 @@ export * from "../core/namespaces/KvNamespace";
 export * from "../core/namespaces/FileNamespace";
 export * from "../core/namespaces/MessageNamespace";
 export * from "../core/namespaces/SpaceNamespace";
+export * from "../core/namespaces/AgentsNamespace";
+export * from "../core/namespaces/FunctionsNamespace";
 // Fan-out group-encryption layer (Space, keyring, cipher). Flat `export *`
 // for the same dts-plugin reason as the Client exports above.
 export * from "../spaces/Space";

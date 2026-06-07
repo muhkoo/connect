@@ -1,12 +1,16 @@
 # @muhkoo/connect
 
 Client SDK for the Muhkoo Accelerator. The headline surface is a single
-**`Client`** that hangs everything off four namespaces —
-`client.auth` / `client.storage` / `client.message` / `client.space` — backed by
-end-to-end-encrypted messaging (fan-out group channels with history, plus
-Double Ratchet + ECDH P-384 for direct messages), ZK identity + personal/shared
-spaces, and a Cloudflare-Workers-compatible Groth16 verifier — all bundled from
-a single TypeScript source tree.
+**`Client`** that hangs everything off its namespaces —
+`client.auth` / `client.kv` / `client.storage` / `client.message` /
+`client.space` / `client.agents` / `client.functions` — backed by
+end-to-end-encrypted messaging (fan-out group channels with history, plus Double
+Ratchet + ECDH P-384 for direct messages), ZK identity + personal/shared spaces,
+server-side Programmable Agents, developer-authored serverless functions, and a
+Cloudflare-Workers-compatible Groth16 verifier — all bundled from a single
+TypeScript source tree.
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for what's new.
 
 > Status: alpha. The library is consumed in tree by `../accelerator` and the
 > `../web` SPA.
@@ -162,6 +166,69 @@ key — so a channel is joinable even when no one else is online. The relay stay
 blind (it only ever sees opaque, ECIES-wrapped key blobs). The space handle was
 once `Room`; that name is still exported as an alias, and `client.message.room()`
 returns the same handle.
+
+**Shareable invite links + member roles.** A private Space (`createChannel(name,
+{ private: true })`) admits only allowlisted members. Instead of inviting
+people one username at a time, mint a **capability link** anyone can redeem —
+the keeper admits them on redemption. Members carry a **role** (`viewer` /
+`editor`) the owner controls; apps use roles to gate delegated management (e.g.
+who can edit an app's config).
+
+```typescript
+// Owner: mint a shareable invite (optionally time-/use-bounded, with a role).
+const { token } = await client.space.createInviteLink(space.id, { role: "viewer", maxUses: 10 });
+const url = `https://yourapp.com/join?space=${space.id}&token=${token}`;
+await client.space.listInviteLinks(space.id);     // owner: active links
+await client.space.revokeInviteLink(space.id, token);
+
+// Recipient: redeem the link → admitted by the keeper, group key wrapped for them.
+const joined = await client.space.joinByInvite(space.id, token);
+
+// Owner: see members + roles, and promote/demote.
+await client.space.members(space.id);             // [{ memberId, role }]
+await client.space.setMemberRole(space.id, "alice", "editor");
+await client.space.roster(space.id);              // member identity pubkeys
+```
+
+**Programmable Agents (`client.agents`).** Server-side "virtual users" backed by
+Cloudflare Workers AI: an app editor gives an agent a persona (system prompt), a
+model, and **triggers** (e.g. reply on @-mention), then enables it per-Space;
+members chat with it inside that Space. Management is session-authed (owner or
+Space editor) and **paid-tier-only**. Enabling an agent on a Space makes that
+Space readable by the app's keeper (per-Space opt-in); every other Space stays
+blind.
+
+```typescript
+const { config } = await client.agents.create(appId, {
+  handle: "@assistant",
+  displayName: "Assistant",
+  model: "@cf/meta/llama-3.1-8b-instruct",
+  systemPrompt: "You are a concise, friendly teammate in this Space.",
+  triggers: [{ type: "mention" }],
+});
+await client.agents.enable(appId, config.agentId, space.id);  // per-Space opt-in
+// list / update / delete / disable also available.
+```
+
+**Serverless Functions (`client.functions`).** Deploy your own code that runs on
+the accelerator. A function is an untrusted single-module ES worker
+(`export default { fetch }`) with two triggers: **HTTP** (reachable at its own
+`<name>--<slug>.fns.<zone>` subdomain) and **Space-bound** (invoked on Space
+messages, like an agent). Source is encrypted at rest and uploaded just-in-time
+on invocation. Management is session-authed (owner / Space editor) and
+**paid-tier-only**.
+
+```typescript
+const { config } = await client.functions.deploy(appId, {
+  name: "hello",
+  displayName: "Hello",
+  code: `export default { fetch: () => new Response("hi from Muhkoo!") }`,
+  triggers: { http: { enabled: true } },
+});
+// → reachable at https://hello--<app-slug>.fns.<zone>/
+await client.functions.enable(appId, config.functionId, space.id); // Space-bound
+// list / get / code / update / delete / disable also available.
+```
 
 Auth lifecycle:
 

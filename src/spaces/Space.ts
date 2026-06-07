@@ -153,13 +153,29 @@ export class Space {
     /** Open the space websocket (resolves the ticket + identity lazily). */
     async connect(): Promise<void> {
         if (!this.channel) {
-            const ticket = await this.deps.fetchTicket();
-            const url =
-                `${this.deps.wsBaseUrl}/api/spaces/${encodeURIComponent(this.name)}/websocket` +
-                (ticket ? `?ticket=${encodeURIComponent(ticket)}` : "");
+            // The WS upgrade ticket is single-use + short-TTL, so a reconnect
+            // must mint a FRESH one — otherwise the socket drops (idle timeout,
+            // network blip) and never comes back. `buildUrl` is handed to the
+            // transport as a `urlProvider` it calls before each reconnect.
+            const buildUrl = async () => {
+                const ticket = await this.deps.fetchTicket();
+                return (
+                    `${this.deps.wsBaseUrl}/api/spaces/${encodeURIComponent(this.name)}/websocket` +
+                    (ticket ? `?ticket=${encodeURIComponent(ticket)}` : "")
+                );
+            };
+            const url = await buildUrl();
             this.channel = this.deps.createChannel
                 ? this.deps.createChannel(url, this.deps.myId())
-                : new BroadcastChannel({ url, myId: this.deps.myId(), autoAnnounce: false });
+                : new BroadcastChannel({
+                      url,
+                      myId: this.deps.myId(),
+                      autoAnnounce: false,
+                      urlProvider: buildUrl,
+                      // Keep recovering across network flaps (each attempt mints a
+                      // fresh ticket); teardown calls disconnect() which stops it.
+                      maxReconnectAttempts: 0,
+                  });
             for (const [event, handler] of this.pending) this.channel.on(event, handler);
             this.pending.length = 0;
             // Fan-out spaces drive their own `{name}` handshake + frame routing.
@@ -387,8 +403,9 @@ export class Space {
     async putFile(
         file: File | Blob | Uint8Array,
         metadata: SpaceFileMetadata,
+        opts: { onProgress?: (completed: number, total: number) => void } = {},
     ): Promise<{ manifest: FileManifest; stat: FileStat }> {
-        return this.fileStorage().writeFileToShards({ data: file, metadata });
+        return this.fileStorage().writeFileToShards({ data: file, metadata, onProgress: opts.onProgress });
     }
 
     async getFile(manifest: FileManifest): Promise<{ data: Uint8Array; stat: FileStat }> {
@@ -551,6 +568,11 @@ export class Space {
      * nothing to verify against → reject.
      */
     private async verifySender(packet: Packet): Promise<boolean> {
+        // Trust our OWN messages — we sent them, so there's nothing to prove
+        // against the roster. This also keeps a returning member (who loaded a
+        // cached key and never re-published a join-request) from dropping the
+        // echo of their own messages when their `ecdsaPub` isn't in the roster.
+        if (packet.source === this.deps.myId()) return true;
         const keyring = this.deps.keyring;
         const sig = packet.headers?.sig;
         if (!keyring || typeof sig !== "string") return false;

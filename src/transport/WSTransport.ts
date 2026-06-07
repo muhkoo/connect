@@ -23,6 +23,14 @@ export interface WSTransportOptions {
   /** WebSocket URL, e.g. `ws://localhost:8787/foo`. */
   url: string;
   /**
+   * Optional async provider for a FRESH connection URL, called before each
+   * RECONNECT. Use it when the URL carries a single-use/expiring credential
+   * (e.g. a one-time WS upgrade ticket): on reconnect the baked-in ticket is
+   * already consumed/expired, so without this the reconnect is rejected and the
+   * transport burns through its attempts. The initial connect uses `url` as-is.
+   */
+  urlProvider?: () => string | Promise<string>;
+  /**
    * Stable identifier for this connection (a channel / space / personal-space
    * id). Lifecycle + MESSAGE events are namespaced by it on the shared
    * `EventCore` bus so concurrent transports (chat room A, room B, the storage
@@ -89,6 +97,7 @@ export class WSTransport extends EventCore {
   }
 
   private url: string;
+  private urlProvider?: () => string | Promise<string>;
   private socket: WebSocket | null = null;
   private _isConnected = false;
   private _isConnecting = false;
@@ -118,6 +127,7 @@ export class WSTransport extends EventCore {
       throw new Error("WSTransport: `url` is required");
     }
     this.url = opts.url;
+    this.urlProvider = opts.urlProvider;
     this.id = opts.id ?? `ws${++__wsInstanceSeq}`;
     this.autoReconnect = opts.autoReconnect ?? true;
     this.reconnectDelay = opts.reconnectDelay ?? 3000;
@@ -135,6 +145,18 @@ export class WSTransport extends EventCore {
       throw new Error("WSTransport: already connected or connecting");
     }
     this._isConnecting = true;
+
+    // On a RECONNECT, refresh the URL (the baked-in single-use ticket is spent).
+    // The first connect uses `url` as-is. If the provider throws (e.g. can't
+    // mint a ticket), surface it and let scheduleReconnect retry.
+    if (this.urlProvider && this.reconnectAttempts > 0) {
+      try {
+        this.url = await this.urlProvider();
+      } catch (err) {
+        this._isConnecting = false;
+        throw err;
+      }
+    }
 
     return new Promise<void>((resolve, reject) => {
       try {
@@ -316,7 +338,11 @@ export class WSTransport extends EventCore {
       try {
         await this.connect();
       } catch {
-        // scheduleReconnect will fire again from onclose
+        // A failed reconnect never opened the socket, so its `onclose` won't
+        // re-schedule (that path is guarded by `wasConnected`). Re-schedule here
+        // so we keep retrying (with a fresh ticket each time) until we succeed
+        // or hit the attempt cap.
+        if (this.autoReconnect) this.scheduleReconnect();
       }
     }, this.reconnectDelay);
   }

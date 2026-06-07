@@ -90,3 +90,21 @@ export interface RosterMember {
     /** Base64url-encoded JWK of the member's identity ECDSA public key. */
     identityEcdsaPub?: string;
 }
+
+/** A shareable invite link to a space. Redeeming it allowlists the holder so
+ *  the keeper admits them. */
+export interface InviteLink {
+    /** The capability token; embed in a URL to share. */
+    token: string;
+    /** Member id (username) that created the link. */
+    createdBy?: string;
+    createdAt?: number;
+    /** Epoch ms when the link stops working; 0 = never. */
+    expiresAt?: number;
+    /** Max redemptions; 0 = unlimited. */
+    maxUses?: number;
+    /** Redemptions so far. */
+    uses?: number;
+    /** Access level granted to redeemers ("viewer" | "editor"). */
+    role?: string;
+}
