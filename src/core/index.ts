@@ -29,6 +29,8 @@ export { AuthNamespace, ZkAuth } from "./namespaces/AuthNamespace";
 export type { AuthUser, RegisterParams, LoginOptions } from "./namespaces/AuthNamespace";
 export { KvNamespace } from "./namespaces/KvNamespace";
 export type { SetOptions, StorageChangeEvent } from "./namespaces/KvNamespace";
+export { DbNamespace, DbTable } from "./namespaces/DbNamespace";
+export type { DbFilterOp, DbWhereCondition, DbQuery, DbQueryResult } from "./namespaces/DbNamespace";
 export { StorageNamespace } from "./namespaces/FileNamespace";
 export type { WriteFileOptions } from "./namespaces/FileNamespace";
 export { MessageNamespace } from "./namespaces/MessageNamespace";
@@ -44,6 +46,8 @@ export type {
     AgentSkill,
     AgentTrigger,
     AgentTriggerType,
+    AgentToolsConfig,
+    AgentDbToolMode,
     AgentScopeOpts,
     AgentsNamespaceDeps,
 } from "./namespaces/AgentsNamespace";
@@ -59,3 +63,24 @@ export type {
     FunctionScopeOpts,
     FunctionsNamespaceDeps,
 } from "./namespaces/FunctionsNamespace";
+
+// App-describing decorators — declare your agent-facing surface in code and
+// eject a system prompt for a Programmable Agent.
+export {
+    MuhkooAgent,
+    MuhkooSpace,
+    MuhkooDB,
+    MuhkooFunction,
+    ejectAgentPrompt,
+    ejectAgentTools,
+    getMuhkooAppDescriptor,
+} from "./agents/describe";
+export type {
+    MuhkooAgentMeta,
+    MuhkooSpaceMeta,
+    MuhkooDBMeta,
+    MuhkooFunctionMeta,
+    MuhkooDBAccess,
+    MuhkooAppDescriptor,
+    MuhkooAgentToolsConfig,
+} from "./agents/describe";

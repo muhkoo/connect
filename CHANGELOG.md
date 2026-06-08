@@ -4,6 +4,47 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.6.0-alpha.1
+
+### Changed
+
+- **`ejectAgentPrompt` now emits a "How to respond" section** that compels the
+  agent to finish its turn with a short, plain-language reply after using tools —
+  and never to end with only tool calls, an empty message, or a recitation of its
+  tool list. This fixes agents (notably on `gpt-oss-*` models) that ran their tool
+  loop but never posted a user-facing answer ("you can see the work, but no reply").
+  Toolless agents get the "always reply" rule without the tool-specific lines.
+
+## 0.6.0-alpha.0
+
+### Added
+
+- **App-describing decorators + `ejectAgentPrompt`** — declare your app's
+  agent-facing surface in code and generate a system prompt for a Programmable
+  Agent. Annotate a plain class with `@MuhkooAgent` (the app's identity, purpose,
+  and behavioral guidance) plus per-surface member decorators — `@MuhkooSpace`
+  (a channel the agent can resolve/post to), `@MuhkooDB` (an app table, with
+  `access: "read" | "write"`), and `@MuhkooFunction` (a callable function) — then
+  call `ejectAgentPrompt(AppClass)` to compose the `systemPrompt` string. The
+  prompt carries the **semantic** layer (what the app is, how to act, what each
+  surface means); the Muhkoo runtime still appends the authoritative roster
+  (exact columns, function params, the closed tool list) at invocation time, so
+  the prompt never restates schema or drifts from it. Also exports
+  `ejectAgentTools` (derive a tools allowlist matching the described surface),
+  `getMuhkooAppDescriptor`, and the `MuhkooAgentMeta` / `MuhkooSpaceMeta` /
+  `MuhkooDBMeta` / `MuhkooFunctionMeta` / `MuhkooDBAccess` /
+  `MuhkooAppDescriptor` / `MuhkooAgentToolsConfig` types. Requires
+  `experimentalDecorators` (no `reflect-metadata` dependency). Available in the
+  browser and server builds.
+- **Agent tool-use via the SDK** — `client.agents.create`/`update` now accept a
+  `tools` field (`AgentToolsConfig`: db read/write + table allowlist, function
+  allowlist, channels, `maxIterations`), and `AgentConfig` returns it. This lets
+  you grant an agent the same function-calling tool-use the portal exposes —
+  e.g. `client.agents.create(appId, { handle, displayName, model, systemPrompt:
+  ejectAgentPrompt(App), tools: ejectAgentTools(App) })`. Enabling tools
+  requires a function-calling `model` in the same call (server-enforced). Adds
+  the `AgentToolsConfig` and `AgentDbToolMode` exports.
+
 ## 0.4.0-alpha.1
 
 ### Added

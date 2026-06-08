@@ -14,13 +14,45 @@
  * (viewers can read). Authorization rides the user session token; non-owner
  * editors pass their management Space via `opts.space`.
  *
- * v1 is "prompts + persona": a system prompt, a model, named prompt `skills`,
- * and `triggers` that decide when the agent speaks. No tools, no code.
+ * An agent is "prompts + persona": a system prompt, a model, named prompt
+ * `skills`, and `triggers` that decide when it speaks — plus optional `tools`
+ * that let it act on the app (query/write its database, call its functions,
+ * resolve its channels) via a server-side function-calling loop. See
+ * {@link AgentToolsConfig}. Pair with the `@MuhkooAgent`/`@MuhkooSpace`/
+ * `@MuhkooDB`/`@MuhkooFunction` decorators + `ejectAgentPrompt`/`ejectAgentTools`
+ * to generate `systemPrompt` and `tools` straight from your app's surface.
  */
 
 import type { HttpClient } from "../HttpClient";
 
 export type AgentTriggerType = "mention" | "keyword" | "regex" | "always";
+
+/** How much database access the agent's tool-use has. */
+export type AgentDbToolMode = "off" | "read" | "write";
+
+/**
+ * Tool-use config — lets the agent act on the app through a function-calling
+ * loop. Opt-in and conservatively gated server-side: a fresh agent has tools
+ * off, the DB is read-only and per-table allowlisted, functions are per-name
+ * allowlisted, and channels are off. **Enabling tools requires a
+ * function-calling `model` in the same create/update payload** (the server
+ * rejects `enabled: true` otherwise). `ejectAgentTools` produces this shape.
+ */
+export interface AgentToolsConfig {
+    enabled: boolean;
+    db: {
+        /** `off` = no DB tools; `read` = query/get; `write` = + insert/update/delete. */
+        mode: AgentDbToolMode;
+        /** Allowlisted table names the agent may touch. */
+        tables: string[];
+    };
+    /** Allowlisted serverless-function names the agent may call. */
+    functions: string[];
+    /** Whether the agent may resolve the app's PUBLIC channels. */
+    channels: boolean;
+    /** Max tool-call rounds per reply (1..6). */
+    maxIterations: number;
+}
 
 export interface AgentTrigger {
     type: AgentTriggerType;
@@ -47,6 +79,8 @@ export interface AgentConfig {
     /** Space ids this agent is enabled on (per-Space opt-in). */
     enabledSpaces: string[];
     caps: { dailyTokenBudget: number };
+    /** Tool-use config (absent / `enabled: false` = prompt-only). */
+    tools?: AgentToolsConfig;
     createdAt: number;
     updatedAt: number;
 }
@@ -60,6 +94,8 @@ export interface AgentCreateInput {
     skills?: AgentSkill[];
     triggers?: AgentTrigger[];
     caps?: { dailyTokenBudget: number };
+    /** Grant tool-use. Requires `model` to be a function-calling model. */
+    tools?: AgentToolsConfig;
 }
 
 export type AgentUpdateInput = Partial<AgentCreateInput>;

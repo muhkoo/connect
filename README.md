@@ -2,12 +2,13 @@
 
 Client SDK for the Muhkoo Accelerator. The headline surface is a single
 **`Client`** that hangs everything off its namespaces —
-`client.auth` / `client.kv` / `client.storage` / `client.message` /
-`client.space` / `client.agents` / `client.functions` — backed by
+`client.auth` / `client.kv` / `client.db` / `client.storage` /
+`client.message` / `client.space` / `client.agents` / `client.functions` —
+backed by
 end-to-end-encrypted messaging (fan-out group channels with history, plus Double
 Ratchet + ECDH P-384 for direct messages), ZK identity + personal/shared spaces,
-server-side Programmable Agents, developer-authored serverless functions, and a
-Cloudflare-Workers-compatible Groth16 verifier — all bundled from a single
+server-side Programmable Agents, developer-authored serverless functions, and an
+edge-compatible Groth16 verifier — all bundled from a single
 TypeScript source tree.
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for what's new.
@@ -18,10 +19,17 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for what's new.
 ## What's in the box
 
 - **`Client`** — the unified entry point. `new Client({ apiKey, baseUrl })`
-  exposes `auth` (ZK register/login), `storage` (per-user encrypted KV +
-  files), and `message` (pub/sub + E2E direct messages) over one shared
-  session. This is the supported surface; everything below is a building block
-  it composes.
+  exposes, over one shared session: `auth` (ZK register/login), `kv` (per-user
+  encrypted key/value), `db` (the app's scalable database), `storage` (encrypted
+  files), `message` (pub/sub + E2E direct messages), `space` (fan-out group
+  channels with history), `agents` (server-side Programmable Agents), and
+  `functions` (developer-authored serverless functions). This is the supported
+  surface; everything below is a building block it composes.
+
+- **App-describing decorators** — `@MuhkooAgent` / `@MuhkooSpace` / `@MuhkooDB` /
+  `@MuhkooFunction` annotate a plain class with your app's agent-facing surface;
+  `ejectAgentPrompt()` / `ejectAgentTools()` turn that into a `systemPrompt` +
+  tool allowlist for a Programmable Agent. See the [agents reference](https://docs.muhkoo.dev/reference/agents/).
 
 - **`BroadcastChannel`** — multi-peer end-to-end-encrypted "room". Wires
   `WSTransport` (socket lifecycle, reconnect, offline queue) together with
@@ -191,7 +199,7 @@ await client.space.roster(space.id);              // member identity pubkeys
 ```
 
 **Programmable Agents (`client.agents`).** Server-side "virtual users" backed by
-Cloudflare Workers AI: an app editor gives an agent a persona (system prompt), a
+the edge AI runtime: an app editor gives an agent a persona (system prompt), a
 model, and **triggers** (e.g. reply on @-mention), then enables it per-Space;
 members chat with it inside that Space. Management is session-authed (owner or
 Space editor) and **paid-tier-only**. Enabling an agent on a Space makes that
@@ -202,12 +210,34 @@ blind.
 const { config } = await client.agents.create(appId, {
   handle: "@assistant",
   displayName: "Assistant",
-  model: "@cf/meta/llama-3.1-8b-instruct",
+  model: "meta/llama-3.1-8b-instruct",
   systemPrompt: "You are a concise, friendly teammate in this Space.",
   triggers: [{ type: "mention" }],
 });
 await client.agents.enable(appId, config.agentId, space.id);  // per-Space opt-in
 // list / update / delete / disable also available.
+```
+
+Give the agent **tools** (a function-calling loop over the app's database,
+functions, and channels) by passing `tools` — requires a function-calling
+`model`. Generate both the prompt and the tool allowlist from decorators:
+
+```typescript
+import { MuhkooAgent, MuhkooSpace, MuhkooDB, ejectAgentPrompt, ejectAgentTools } from "@muhkoo/connect";
+
+@MuhkooAgent({ name: "Assistant", purpose: "A helpful teammate in this chat." })
+class ChatApp {
+  @MuhkooSpace({ description: "Main team discussion." })             general!: string;
+  @MuhkooDB({ access: "read", description: "Chat message history." }) messages!: unknown;
+}
+
+await client.agents.create(appId, {
+  handle: "@assistant",
+  displayName: "Assistant",
+  model: "openai/gpt-oss-120b",            // a function-calling model
+  systemPrompt: ejectAgentPrompt(ChatApp),
+  tools: ejectAgentTools(ChatApp),
+});
 ```
 
 **Serverless Functions (`client.functions`).** Deploy your own code that runs on
