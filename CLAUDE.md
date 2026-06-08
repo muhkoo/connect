@@ -7,11 +7,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Muhkoo Connect is a client SDK for building **end-to-end-encrypted apps** on the
 Muhkoo Accelerator (a Cloudflare Workers + Durable Objects backend). The
 headline surface is a single **`Client`** (`src/core/Client.ts`) that exposes
-three namespaces over one shared session:
+eight namespaces over one shared session:
 
 - `client.auth` — zero-knowledge identity (`client.auth.zk.{register,login,restore,unlock,logout}`)
-- `client.storage` — per-user key/value, AES-256-GCM **encrypted at rest**
-- `client.message` — pub/sub + end-to-end-encrypted DMs and group rooms
+- `client.kv` — per-user key/value, AES-256-GCM **encrypted at rest**
+- `client.db` — the app's scalable database (table specs in the portal; typed query/insert/update/delete)
+- `client.storage` — encrypted, chunked file storage
+- `client.message` — pub/sub + end-to-end-encrypted DMs
+- `client.space` — fan-out group channels with persisted history
+- `client.agents` — server-side Programmable Agents (persona, triggers, optional `tools`)
+- `client.functions` — developer-authored serverless functions (HTTP + Space-bound)
+
+Plus app-describing **decorators** (`src/core/agents/describe.ts`):
+`@MuhkooAgent`/`@MuhkooSpace`/`@MuhkooDB`/`@MuhkooFunction` + `ejectAgentPrompt`/
+`ejectAgentTools` generate an agent `systemPrompt` + tool allowlist from a class.
 
 The lower-level building blocks (`AuthClient`, `PersonalSpaceClient`,
 `FileStorage`, `BroadcastChannel`, `EncryptedSession`, the Groth16 verifier)
@@ -24,8 +33,9 @@ remain exported, but the `Client` is the supported surface.
 
 ### Core concepts
 
-1. **One client, three namespaces** — `client.auth` / `client.storage` /
-   `client.message`, all driven off one session (`src/core/Session.ts`,
+1. **One client, eight namespaces** — `client.auth` / `client.kv` / `client.db` /
+   `client.storage` / `client.message` / `client.space` / `client.agents` /
+   `client.functions`, all driven off one session (`src/core/Session.ts`,
    `src/core/HttpClient.ts`).
 2. **Zero-knowledge identity** — derived from `(username, password)` on the
    device; the server stores only a Poseidon commitment. Login proves knowledge

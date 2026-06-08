@@ -22,6 +22,8 @@ export default defineConfig({
       "**/tests/client/file-storage.test.ts",
       "**/tests/client/message.test.ts",
       "**/tests/client/functions.test.ts",
+      // App-describing decorators (@MuhkooAgent/@MuhkooSpace/… + ejectAgentPrompt)
+      "**/tests/core/agentDescribe.test.ts",
       // HTTP credential plumbing + session recovery, WebSocket transport
       "**/tests/core/HttpClient.test.ts",
       "**/tests/transport/WSTransport.test.ts",

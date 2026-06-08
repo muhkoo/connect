@@ -28,6 +28,7 @@ import { HttpClient } from "./HttpClient";
 import { SessionState, defaultSessionStore, type SessionStore } from "./Session";
 import { AuthNamespace } from "./namespaces/AuthNamespace";
 import { KvNamespace } from "./namespaces/KvNamespace";
+import { DbNamespace } from "./namespaces/DbNamespace";
 import { StorageNamespace } from "./namespaces/FileNamespace";
 import { MessageNamespace } from "./namespaces/MessageNamespace";
 import { SpaceNamespace } from "./namespaces/SpaceNamespace";
@@ -85,6 +86,8 @@ export class Client {
     readonly auth: AuthNamespace;
     /** Per-user key/value storage — `client.kv.set(...)`, etc. */
     readonly kv: KvNamespace;
+    /** App scalable database — `client.db.table('todos').query(...)`, etc. */
+    readonly db: DbNamespace;
     /** File storage — `client.storage.writeFile(...)`, etc. */
     readonly storage: StorageNamespace;
     /** Realtime messaging — `client.message.subscribe(...)`, etc. */
@@ -129,6 +132,7 @@ export class Client {
         const wsBaseUrl = toWsBase(this.baseUrl);
         this.auth = new AuthNamespace({ auth: authClient, circuits, session: this.session });
         this.kv = new KvNamespace({ http: this.http, session: this.session, wsBaseUrl });
+        this.db = new DbNamespace({ http: this.http });
         this.storage = new StorageNamespace({ http: this.http, baseUrl: this.baseUrl, kv: this.kv });
         this.message = new MessageNamespace({ http: this.http, session: this.session, wsBaseUrl });
 
