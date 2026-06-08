@@ -196,6 +196,22 @@ export function ejectAgentPrompt(appClass: Function): string {
     lines.push("", agent.instructions.trim());
   }
 
+  // How to respond — the load-bearing behavioral contract. Without this, models
+  // (especially gpt-oss) tend to run tool calls and then end their turn with no
+  // user-facing message, so the user sees the work happen but gets no reply.
+  const hasTools = d.tables.length > 0 || d.functions.length > 0;
+  lines.push("", "How to respond:");
+  if (hasTools) {
+    lines.push(
+      "- When you need information or need to make a change, call your tools immediately — don't ask the user to do it, and don't describe or name the tools to them.",
+      "- After your tool calls return, you MUST send one final reply to the channel, in plain language, that answers the request using the results.",
+    );
+  }
+  lines.push(
+    "- Always end your turn with a short written reply (one or two sentences). Never finish with only tool calls and no message, and never reply with an empty message.",
+    "- Don't restate function names, parameters, JSON, or your list of tools to the user — just give them the answer.",
+  );
+
   lines.push(
     "",
     "The exact columns, function parameters, and the full list of callable tools are supplied to you by the runtime. Follow that authoritative list — never invent tables, columns, functions, or tools.",

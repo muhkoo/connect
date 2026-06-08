@@ -4,6 +4,17 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.6.0-alpha.1
+
+### Changed
+
+- **`ejectAgentPrompt` now emits a "How to respond" section** that compels the
+  agent to finish its turn with a short, plain-language reply after using tools —
+  and never to end with only tool calls, an empty message, or a recitation of its
+  tool list. This fixes agents (notably on `gpt-oss-*` models) that ran their tool
+  loop but never posted a user-facing answer ("you can see the work, but no reply").
+  Toolless agents get the "always reply" rule without the tool-specific lines.
+
 ## 0.6.0-alpha.0
 
 ### Added

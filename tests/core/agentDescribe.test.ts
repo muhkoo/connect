@@ -60,6 +60,9 @@ describe("Muhkoo app decorators", () => {
     expect(prompt).toContain("Sign off as ~assistant.");
     // Defers exact schema to the runtime roster.
     expect(prompt).toContain("supplied to you by the runtime");
+    // Compels a closing reply after tool use (so the agent never goes silent).
+    expect(prompt).toContain("How to respond:");
+    expect(prompt).toContain("one final reply to the channel");
   });
 
   it("omits empty sections for a bare agent", () => {
@@ -68,6 +71,9 @@ describe("Muhkoo app decorators", () => {
     expect(prompt).not.toContain("Channels (Spaces)");
     expect(prompt).not.toContain("App database tables");
     expect(prompt).not.toContain("call_function");
+    // A toolless agent still gets the "always reply" rule, but not the tool line.
+    expect(prompt).toContain("Always end your turn with a short written reply");
+    expect(prompt).not.toContain("call your tools immediately");
   });
 
   it("derives a tools allowlist matching the described surface", () => {
