@@ -38,6 +38,7 @@ export default defineConfig({
       "**/tests/auth/vault-migration.e2e.test.ts",
       "**/tests/auth/change-password.e2e.test.ts",
       "**/tests/auth/ecdsa-signature.e2e.test.ts",
+      "**/tests/auth/hex-pubkey-login.e2e.test.ts",
       // Storage pipeline (cipher + RS codec + FileStorage end-to-end)
       "**/tests/storage/FileStorage.test.ts",
       // Space fan-out group-encryption layer
