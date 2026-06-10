@@ -23,6 +23,7 @@
  */
 
 import { AuthClient } from "../auth";
+import { VERSION } from "../version";
 import { defaultCircuitUrls, type CircuitUrls } from "../auth/proof";
 import { HttpClient } from "./HttpClient";
 import { SessionState, defaultSessionStore, type SessionStore } from "./Session";
@@ -108,6 +109,13 @@ export class Client {
     private recoverInFlight: Promise<boolean> | null = null;
 
     constructor(options: ClientOptions = {}) {
+        // Build stamp — always logged (independent of logLevel) so the running
+        // build is identifiable in the console. Catches stale cached bundles
+        // during development; bump `VERSION` (and package.json) each build.
+        try {
+            console.info(`[@muhkoo/connect] initialized — v${VERSION}`);
+        } catch { /* console may be unavailable in some runtimes */ }
+
         if (options.logLevel && typeof globalThis.appLogger?.setLevel === "function") {
             globalThis.appLogger.setLevel(options.logLevel);
         }

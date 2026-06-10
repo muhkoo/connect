@@ -61,6 +61,17 @@ export interface AuthSuccess {
     username: string;
 }
 
+/** A vault factor record (M1.0). Wrap/iv are base64 AES-GCM; absent for phrase. */
+export interface VaultFactor {
+    id: string;
+    type: "password" | "passkey" | "phrase-marker";
+    wrap?: string;
+    iv?: string;
+    params?: Record<string, unknown>;
+    label?: string;
+    createdAt?: number;
+}
+
 // ---------------------------------------------------------------------------
 // AuthClient
 // ---------------------------------------------------------------------------
@@ -112,6 +123,45 @@ export class AuthClient {
     async verify(token: string): Promise<{ username: string }> {
         const res = await this.fetchFn(`${this.baseUrl}/api/auth/verify`, this.json("POST", { token }));
         return await this.parse<{ username: string }>("verify", res);
+    }
+
+    // ---- Identity vault (M1.0) ----------------------------------------------
+
+    /** Blinded OPRF evaluation — the server-gated half of a password/recovery wrap key. */
+    async oprfEvaluate(username: string, blinded: string): Promise<{ evaluated: string }> {
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/oprf`, this.json("POST", { username, blinded }));
+        return await this.parse<{ evaluated: string }>("oprfEvaluate", res);
+    }
+
+    /** Read a factor record for `username` (returns an indistinguishable decoy if absent). */
+    async vaultRead(username: string, factorType: VaultFactor["type"]): Promise<{ factor: VaultFactor | null }> {
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault`, this.json("POST", { username, factorType }));
+        return await this.parse<{ factor: VaultFactor | null }>("vaultRead", res);
+    }
+
+    /** Add/replace a factor (session-authed; the seed is already wrapped client-side). */
+    async vaultPutFactor(token: string, factor: VaultFactor): Promise<{ ok: boolean; id: string }> {
+        const init = this.json("PUT", { factor });
+        (init.headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault/factor`, init);
+        return await this.parse<{ ok: boolean; id: string }>("vaultPutFactor", res);
+    }
+
+    /** List the user's factor metadata (no ciphertext). Session-authed. */
+    async vaultFactors(token: string): Promise<{ factors: VaultFactor[]; migrated: boolean }> {
+        const init: RequestInit = { method: "GET", headers: { Authorization: `Bearer ${token}` } };
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault/factors`, init);
+        return await this.parse<{ factors: VaultFactor[]; migrated: boolean }>("vaultFactors", res);
+    }
+
+    /** Remove a factor by id (can't remove the last one). Session-authed. */
+    async vaultDeleteFactor(token: string, id: string): Promise<{ deleted: boolean }> {
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault/factor`, {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ id }),
+        });
+        return await this.parse<{ deleted: boolean }>("vaultDeleteFactor", res);
     }
 
     // -------------------------------------------------------------------------
