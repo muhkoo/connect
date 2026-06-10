@@ -17,6 +17,7 @@ export {
 // Unified client surface.
 export { DEFAULT_BASE_URL } from "./Client";
 export type { ClientOptions } from "./Client";
+export { VERSION } from "../version";
 export { HttpClient, HttpError } from "./HttpClient";
 export type { HttpClientOptions } from "./HttpClient";
 export { SessionState, MemorySessionStore, LocalStorageSessionStore, defaultSessionStore } from "./Session";
@@ -25,7 +26,7 @@ export { Room } from "./Room";
 export type { RoomDeps, RoomFileMetadata } from "./Room";
 export { Space } from "../spaces/Space";
 export type { SpaceDeps, SpaceFileMetadata, SpaceMessageEvent, EphemeralEvent, MessageDeletedEvent } from "../spaces/Space";
-export { AuthNamespace, ZkAuth } from "./namespaces/AuthNamespace";
+export { AuthNamespace, ZkAuth, VaultUnavailableError } from "./namespaces/AuthNamespace";
 export type { AuthUser, RegisterParams, LoginOptions } from "./namespaces/AuthNamespace";
 export { KvNamespace } from "./namespaces/KvNamespace";
 export type { SetOptions, StorageChangeEvent } from "./namespaces/KvNamespace";

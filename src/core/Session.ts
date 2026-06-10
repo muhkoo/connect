@@ -133,6 +133,10 @@ export function defaultSessionStore(keyPrefix?: string): SessionStore {
 export class SessionState {
     private session: StoredSession | null = null;
     private _identity: ZkIdentity | null = null;
+    /** The 32-byte master seed, in-memory only (never persisted). Held after
+     *  login/register so additional recovery factors (passkey, phrase) can be
+     *  enrolled, and a password can be changed, without re-deriving. */
+    private _seed: Uint8Array | null = null;
     private readonly store: SessionStore;
 
     constructor(store?: SessionStore) {
@@ -187,6 +191,16 @@ export class SessionState {
         this._identity = identity;
     }
 
+    /** The in-memory master seed (or null when locked / not held). */
+    get seed(): Uint8Array | null {
+        return this._seed;
+    }
+
+    /** Hold the master seed in memory (set on login/register when available). */
+    setSeed(seed: Uint8Array | null): void {
+        this._seed = seed;
+    }
+
     /** Load a persisted session (used by `restore()`); identity stays null. */
     async loadPersisted(): Promise<StoredSession | null> {
         const loaded = await this.store.load();
@@ -198,6 +212,8 @@ export class SessionState {
     async clear(): Promise<void> {
         this.session = null;
         this._identity = null;
+        if (this._seed) this._seed.fill(0); // wipe the master seed
+        this._seed = null;
         await this.store.clear();
     }
 }

@@ -156,8 +156,33 @@ export async function deriveIdentity(username: string, password: string): Promis
     if (typeof password !== "string" || password.length === 0) {
         throw new Error("deriveIdentity: `password` is required");
     }
+    const seed = await deriveMasterSeedFromPassword(username, password);
+    return deriveIdentityFromSeed(seed);
+}
 
-    const seed = await pbkdf2Bytes(password, "muhkoo-zk-v1:" + username, SCALAR_BYTES);
+/**
+ * Legacy master-seed derivation: `PBKDF2(password, "muhkoo-zk-v1:"||username)`.
+ *
+ * This was the *only* path pre-vault, where the identity descended directly from
+ * the password. It's kept so existing accounts still re-derive their seed (and
+ * the vault can adopt that exact seed on migration, preserving the commitment).
+ * New accounts use a random seed (`vault.randomSeed`) instead, so their identity
+ * is no longer a function of the password.
+ */
+export async function deriveMasterSeedFromPassword(username: string, password: string): Promise<Uint8Array> {
+    return pbkdf2Bytes(password, "muhkoo-zk-v1:" + username, SCALAR_BYTES);
+}
+
+/**
+ * Derive the (unchanged) ZK identity from a 32-byte **master seed**. The seed is
+ * HKDF-expanded into secret/salt + the P-256 ECDSA & ECDH keypairs exactly as
+ * before — so the resulting commitment is byte-identical for a given seed. The
+ * vault wraps THIS seed under each recovery factor.
+ */
+export async function deriveIdentityFromSeed(seed: Uint8Array): Promise<ZkIdentity> {
+    if (!(seed instanceof Uint8Array) || seed.length !== SCALAR_BYTES) {
+        throw new Error(`deriveIdentityFromSeed: expected a ${SCALAR_BYTES}-byte seed`);
+    }
 
     const secretBytes = await hkdfExpand(seed, "zk-secret", SCALAR_BYTES);
     const saltBytes = await hkdfExpand(seed, "zk-salt", SCALAR_BYTES);

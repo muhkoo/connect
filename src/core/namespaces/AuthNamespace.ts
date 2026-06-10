@@ -16,10 +16,37 @@
  */
 
 import { AuthClient } from "../../auth/AuthClient";
-import { deriveIdentity, type ZkIdentity } from "../../auth/identity";
+import { deriveIdentity, deriveIdentityFromSeed, deriveMasterSeedFromPassword, type ZkIdentity } from "../../auth/identity";
+import { seedToMnemonic, mnemonicToSeed } from "../../auth/recoveryPhrase";
 import { generateAuthProof, buildCommitment, type CircuitUrls } from "../../auth/proof";
 import { exportPublicKeyHex, exportPublicKeyBase64, signMessage } from "../../auth/keys";
+import {
+    randomSeed, passwordPreHash, wrapKeyFromOprf, wrapKeyFromBytes, wrapSeed, unwrapSeed, toBase64, fromBase64,
+} from "../../auth/vault";
+import { oprfBlind, oprfFinalize } from "../../auth/oprf";
+import { passkeySupported, passkeyPrfCapable, createPasskeyWithPrf, evaluatePasskeyPrf, defaultRpId } from "../../auth/passkey";
 import type { SessionState } from "../Session";
+
+/**
+ * Thrown when the identity vault can't be reached to unlock the seed — a network
+ * failure, a 5xx, or the per-user rate limit (429). This is distinct from a wrong
+ * password, and is surfaced so `login`/`unlock` do NOT silently fall back to the
+ * legacy password derivation (which, for a vault account, yields a misleading
+ * "commitment mismatch"). Callers should ask the user to retry, not re-enter a
+ * password.
+ */
+export class VaultUnavailableError extends Error {
+    constructor(cause?: unknown) {
+        const detail = cause instanceof Error ? cause.message : String(cause ?? "");
+        super(
+            /too many|rate.?limit|\b429\b/i.test(detail)
+                ? "Too many attempts — please wait a moment and try again."
+                : "Couldn't reach the secure vault. Check your connection and try again.",
+        );
+        this.name = "VaultUnavailableError";
+        (this as Error & { cause?: unknown }).cause = cause;
+    }
+}
 
 /** What the auth methods resolve to — the stable, non-secret user facts. */
 export interface AuthUser {
@@ -55,13 +82,18 @@ export class ZkAuth {
     constructor(private readonly deps: ZkAuthDeps) {}
 
     /**
-     * Register a new user, then (by default) sign them in. The identity is
-     * derived deterministically from `(username, password)` — the same inputs
-     * reproduce it on any device, so there's no key material to ship around.
+     * Register a new user, then (by default) sign them in.
+     *
+     * M1.0: the identity now descends from a **random master seed** (not the
+     * password), so it's recoverable + the password can be changed. We register
+     * the commitment, sign in with the in-memory identity to get a token, then
+     * enroll the OPRF-gated **password factor** (the seed wrapped under a key the
+     * server can't derive offline). Future logins unlock the seed via that factor.
      */
     async register(params: RegisterParams): Promise<AuthUser> {
         const { username, password, email = null, login = true } = params;
-        const identity = await deriveIdentity(username, password);
+        const seed = randomSeed();
+        const identity = await deriveIdentityFromSeed(seed);
         const commitment = await this.commitmentFor(identity);
 
         await this.deps.auth.register({
@@ -72,20 +104,51 @@ export class ZkAuth {
             email,
         });
 
-        if (login) {
-            return this.login(username, password);
-        }
-        return { username, commitment };
+        // Sign in with the in-memory (random-seed) identity to obtain a session
+        // token, then enroll the password factor so the next login can recover
+        // the seed. (A token is required to write the factor.)
+        const user = await this.proveAndStore(username, identity, {});
+        await this.enrollPasswordFactor(username, password, seed, this.deps.session.token!);
+        this.deps.session.setSeed(seed); // held so a passkey/phrase can be enrolled next
+
+        if (!login) await this.logout();
+        return user;
     }
 
     /**
-     * Sign in: re-derive the identity, prove knowledge of it against a fresh
-     * server challenge, and trade the proof for a session token. On success
-     * both the session and the identity are stored on the client.
+     * Sign in. M1.0 is **vault-first**: read the password factor and OPRF-unwrap
+     * the master seed → identity. If that fails (a pre-vault account, whose factor
+     * is absent so the server returns a decoy, or a wrong password), fall back to
+     * the legacy password-derived identity. Either way we then prove knowledge of
+     * the identity and trade it for a session token.
      */
     async login(username: string, password: string, opts: LoginOptions = {}): Promise<AuthUser> {
-        const identity = await deriveIdentity(username, password);
-        return this.proveAndStore(username, identity, opts);
+        // Vault-first; fall back to the legacy password-derived seed (pre-vault
+        // accounts). Either way we end up with the master seed, which we hold so
+        // recovery factors can be enrolled.
+        const vaultSeed = await this.tryUnlockSeed(username, password);
+        const seed = vaultSeed ?? await deriveMasterSeedFromPassword(username, password);
+        const identity = await deriveIdentityFromSeed(seed);
+        const user = await this.proveAndStore(username, identity, opts);
+        this.deps.session.setSeed(seed);
+        // Migrate a legacy account into the vault on first vault-aware login: it has
+        // no password factor (`vaultSeed` is null), so enroll one now — wrapping the
+        // exact legacy-derived seed the proof just validated, so the commitment is
+        // preserved. Best-effort; the legacy path still works if this fails.
+        if (!vaultSeed) await this.migrateLegacyPasswordFactor(username, password, seed);
+        return user;
+    }
+
+    /** Enroll the password factor for a legacy (pre-vault) account. Idempotent +
+     *  best-effort; failure just means we retry on the next login. */
+    private async migrateLegacyPasswordFactor(username: string, password: string, seed: Uint8Array): Promise<void> {
+        const token = this.deps.session.token;
+        if (!token) return;
+        try {
+            await this.enrollPasswordFactor(username, password, seed, token);
+        } catch {
+            /* migrate next time */
+        }
     }
 
     /**
@@ -193,12 +256,148 @@ export class ZkAuth {
         if (!username || !expected) {
             throw new Error("ZkAuth.unlock: no active session to unlock — sign in first.");
         }
-        const identity = await deriveIdentity(username, password);
+        const vaultSeed = await this.tryUnlockSeed(username, password);
+        const seed = vaultSeed ?? await deriveMasterSeedFromPassword(username, password);
+        const identity = await deriveIdentityFromSeed(seed);
         const commitment = await this.commitmentFor(identity);
         if (commitment !== expected) {
             throw new Error("ZkAuth.unlock: incorrect password (commitment mismatch).");
         }
         this.deps.session.setIdentity(identity);
+        this.deps.session.setSeed(seed);
+        // Migrate a legacy account into the vault if it has no password factor.
+        if (!vaultSeed) await this.migrateLegacyPasswordFactor(username, password, seed);
+    }
+
+    /**
+     * Generate a 24-word **recovery phrase** that encodes the master seed, and
+     * record a marker in the vault so the UI knows one exists. Show the returned
+     * phrase to the user ONCE — it's never stored server-side (the phrase *is* the
+     * seed). Requires being signed in (the seed must be held in memory).
+     */
+    async enrollRecoveryPhrase(): Promise<string> {
+        const seed = this.deps.session.seed;
+        const token = this.deps.session.token;
+        if (!seed || !token) {
+            throw new Error("Sign in first to set up a recovery phrase.");
+        }
+        const mnemonic = seedToMnemonic(seed);
+        await this.deps.auth.vaultPutFactor(token, { id: "phrase", type: "phrase-marker", createdAt: Date.now() });
+        return mnemonic;
+    }
+
+    /**
+     * Recover an account with its recovery phrase (the "forgot password" path).
+     * Decodes the phrase to the master seed → identity → session. After this,
+     * call {@link changePassword} to set a new password. No server lookup needed.
+     */
+    async recoverWithPhrase(username: string, mnemonic: string, opts: LoginOptions = {}): Promise<AuthUser> {
+        const seed = mnemonicToSeed(mnemonic);
+        const identity = await deriveIdentityFromSeed(seed);
+        const user = await this.proveAndStore(username, identity, opts);
+        this.deps.session.setSeed(seed);
+        return user;
+    }
+
+    /**
+     * Change the password — re-wraps the (unchanged) master seed under the new
+     * password's OPRF-gated key. The identity/commitment never moves. Requires
+     * being signed in (or freshly recovered) so the seed is held.
+     */
+    async changePassword(newPassword: string): Promise<void> {
+        const seed = this.deps.session.seed;
+        const username = this.deps.session.username;
+        const token = this.deps.session.token;
+        if (!seed || !username || !token) {
+            throw new Error("Sign in first to change your password.");
+        }
+        await this.enrollPasswordFactor(username, newPassword, seed, token);
+    }
+
+    /** Whether this browser can use passkeys (WebAuthn) at all. */
+    passkeyAvailable(): boolean {
+        return passkeySupported();
+    }
+
+    /**
+     * Whether this browser's authenticator can do the **PRF extension** our
+     * passkey factor requires. A browser may support passkeys generally but not
+     * PRF — in which case enrolling one would fail. Resolves `true`/`false`, or
+     * `null` when it can't be determined (no capabilities API). Use this to gate
+     * the passkey UI so users don't hit a dead-end error.
+     */
+    async passkeyPrfAvailable(): Promise<boolean | null> {
+        return passkeyPrfCapable();
+    }
+
+    /**
+     * Add a **passkey** recovery factor. Creates a WebAuthn passkey with PRF,
+     * wraps the master seed under its PRF output, and stores the factor. The
+     * passkey (synced via the platform's keychain) then unlocks the account on
+     * any device — no password. Requires being signed in (seed held in memory).
+     */
+    async enrollPasskey(opts?: { rpId?: string; rpName?: string; label?: string }): Promise<void> {
+        const seed = this.deps.session.seed;
+        const token = this.deps.session.token;
+        const username = this.deps.session.username;
+        if (!seed || !token || !username) {
+            throw new Error("Sign in first to add a passkey.");
+        }
+        const rpId = opts?.rpId ?? defaultRpId();
+        const { credentialId, prfSalt, prfOutput } = await createPasskeyWithPrf({
+            rpId,
+            rpName: opts?.rpName ?? "Muhkoo",
+            username,
+        });
+        const key = await wrapKeyFromBytes(prfOutput, "muhkoo-passkey-wrap");
+        const wrapped = await wrapSeed(seed, key);
+        await this.deps.auth.vaultPutFactor(token, {
+            id: `passkey:${toBase64(credentialId).slice(0, 16)}`,
+            type: "passkey",
+            wrap: wrapped.ct,
+            iv: wrapped.iv,
+            params: { credentialId: toBase64(credentialId), prfSalt: toBase64(prfSalt), rpId },
+            label: opts?.label ?? "Passkey",
+            createdAt: Date.now(),
+        });
+    }
+
+    /**
+     * Sign in with a passkey (no password). Reads the passkey factor, evaluates
+     * its PRF, unwraps the master seed → identity → session.
+     */
+    async loginWithPasskey(username: string, opts: LoginOptions = {}): Promise<AuthUser> {
+        const { factor } = await this.deps.auth.vaultRead(username, "passkey");
+        const params = factor?.params as { credentialId?: string; prfSalt?: string; rpId?: string } | undefined;
+        if (!factor?.wrap || !factor?.iv || !params?.credentialId || !params?.prfSalt) {
+            throw new Error("No passkey is set up for this account.");
+        }
+        const prfOutput = await evaluatePasskeyPrf(
+            params.rpId ?? defaultRpId(),
+            fromBase64(params.credentialId),
+            fromBase64(params.prfSalt),
+        );
+        const key = await wrapKeyFromBytes(prfOutput, "muhkoo-passkey-wrap");
+        const seed = await unwrapSeed({ iv: factor.iv, ct: factor.wrap }, key);
+        const identity = await deriveIdentityFromSeed(seed);
+        const user = await this.proveAndStore(username, identity, opts);
+        this.deps.session.setSeed(seed);
+        return user;
+    }
+
+    /** List the user's enrolled login methods (metadata only). Session-authed. */
+    async listFactors(): Promise<Array<{ id: string; type: string; label?: string; createdAt?: number }>> {
+        const token = this.deps.session.token;
+        if (!token) throw new Error("Sign in first to view your login methods.");
+        const { factors } = await this.deps.auth.vaultFactors(token);
+        return factors;
+    }
+
+    /** Remove a login method by id (can't remove your only one). Session-authed. */
+    async removeFactor(id: string): Promise<void> {
+        const token = this.deps.session.token;
+        if (!token) throw new Error("Sign in first to manage your login methods.");
+        await this.deps.auth.vaultDeleteFactor(token, id);
     }
 
     /** Sign out: clears the session, identity, and persisted token. */
@@ -228,6 +427,17 @@ export class ZkAuth {
         return this.deps.session.token;
     }
 
+    /**
+     * The master seed as base64, or `null` when locked. The host app uses this to
+     * wrap app-level data (e.g. chat ratchet keys) to the **seed** instead of the
+     * password — so that data survives password changes and can be unlocked by a
+     * passwordless (passkey) login, both of which recover the same seed.
+     */
+    get seedBase64(): string | null {
+        const seed = this.deps.session.seed;
+        return seed ? toBase64(seed) : null;
+    }
+
     // -------------------------------------------------------------------------
 
     /** Poseidon commitment for an identity — the value the server stores. */
@@ -236,6 +446,79 @@ export class ZkAuth {
         // it before any challenge exists, so derive it directly here.
         const ecdsaPubHex = await exportPublicKeyHex(identity.ecdsaKeyPair.publicKey);
         return buildCommitment(identity.secretHex, identity.saltHex, ecdsaPubHex);
+    }
+
+    // ---- Identity vault (M1.0) ----------------------------------------------
+
+    /**
+     * Derive the OPRF-gated wrap key for the password factor: `scrypt(password)`
+     * is blinded, evaluated by the server's secret OPRF key (so it can't be
+     * derived offline), unblinded, then HKDF'd into an AES-GCM key.
+     */
+    private async passwordWrapKey(username: string, password: string): Promise<CryptoKey> {
+        const pre = passwordPreHash(username, password);
+        const { blind, blinded } = oprfBlind(pre);
+        const { evaluated } = await this.deps.auth.oprfEvaluate(username, toBase64(blinded));
+        return wrapKeyFromOprf(oprfFinalize(pre, blind, fromBase64(evaluated)));
+    }
+
+    /**
+     * Try to recover the master seed from the password factor.
+     *
+     * Returns `null` only when the vault read SUCCEEDS but the seed can't be
+     * unwrapped — i.e. there's no real factor (a pre-vault/legacy account, whose
+     * read returns a decoy that won't unwrap) or the password is wrong. The caller
+     * then legitimately falls back to the legacy password-derived identity.
+     *
+     * Throws {@link VaultUnavailableError} when the vault itself can't be reached
+     * (network / 5xx / rate-limit) — so a *transient* failure is NOT silently
+     * turned into a legacy fallback (which would surface as "commitment mismatch").
+     */
+    private async tryUnlockSeed(username: string, password: string): Promise<Uint8Array | null> {
+        const read = await this.deps.auth
+            .vaultRead(username, "password")
+            .catch((e) => { throw new VaultUnavailableError(e); });
+        const factor = read.factor;
+        if (!factor?.wrap || !factor?.iv) return null; // genuinely no factor → legacy account
+
+        const key = await this
+            .passwordWrapKey(username, password)
+            .catch((e) => { throw new VaultUnavailableError(e); }); // OPRF eval unreachable / rate-limited
+
+        try {
+            return await unwrapSeed({ iv: factor.iv, ct: factor.wrap }, key);
+        } catch {
+            return null; // factor present but won't unwrap → wrong password, or a decoy
+        }
+    }
+
+    /**
+     * Enroll/replace the password factor for `username` — wraps `seed` under the
+     * OPRF-gated key and stores it (needs a session `token`).
+     *
+     * Retries: this is the step that persists the (otherwise in-memory-only)
+     * master seed. If it fails after a fresh registration the account would be
+     * unrecoverable, so we retry a few times before surfacing the error.
+     */
+    private async enrollPasswordFactor(username: string, password: string, seed: Uint8Array, token: string): Promise<void> {
+        const key = await this.passwordWrapKey(username, password);
+        const wrapped = await wrapSeed(seed, key);
+        const factor = { id: "password", type: "password" as const, wrap: wrapped.ct, iv: wrapped.iv, createdAt: Date.now() };
+
+        let lastErr: unknown;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                await this.deps.auth.vaultPutFactor(token, factor);
+                return;
+            } catch (err) {
+                lastErr = err;
+                await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+            }
+        }
+        throw new Error(
+            "Registration could not finish securing your account (vault enrollment failed). " +
+            "Please try again. " + (lastErr instanceof Error ? lastErr.message : ""),
+        );
     }
 }
 
