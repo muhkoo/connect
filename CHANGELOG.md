@@ -4,6 +4,27 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## Unreleased
+
+### Added
+
+- **Email recovery factor (M2 — verification-gated split-key):**
+  - `client.auth.zk.enrollEmailFactor(email)` — add an email as a recovery + login factor. Sends a 6-digit code to the address and returns `{ confirm(code) }`; confirming wraps the master seed under a wrap key released only after the address is verified. Requires being signed in.
+  - `client.auth.zk.recoverWithEmail(username)` — account recovery from nothing but the username + inbox access. Sends a code to the *enrolled* address (the response never reveals whether one exists) and returns `{ confirm(code) }`, which completes the recovery and signs in (→ `AuthUser`). Call `changePassword` afterwards.
+  - How it works: the wrap key is `HKDF( OPRF(K1, input) ‖ OPRF(K2, input) )` — two evaluations in **separate trust domains**, each only released after a fresh proof of inbox control. No single server-side compromise can derive it offline. The ZK identity layer is unchanged.
+  - `listFactors()` entries for gated factors carry a `masked` display hint (`m•••@gmail.com`); the full address is never exposed in list responses.
+- **Google factor (M2.3 — "Sign in with Google", verification-gated split-key):**
+  - `client.auth.zk.enrollGoogleFactor(idToken)` — link a Google account as a recovery + login factor (signed-in). The app obtains `idToken` via Google Identity Services and passes it in; the SDK never renders Google UI.
+  - `client.auth.zk.loginWithGoogle(username, idToken)` — sign in with Google (the account must have linked it). Unlocks the seed via the Google-gated split-key eval; the ZK identity layer is unchanged.
+  - `client.auth.zk.registerWithGoogle(username, idToken)` — create a brand-new **passwordless** account whose only factor is Google.
+  - Google is pure authentication UX — the verified ID token only gates the wrap-key release. The `google` factor is keyed on the stable Google `sub`.
+- **Hosted auth — `client.auth.hosted` (auth.muhkoo.dev):** centralize sign-in so apps drop the embedded login UI (and ~6 MiB of snarkjs), and provider config (Google OAuth origins, WebAuthn, DKIM) lives in one place instead of per-app.
+  - `client.auth.hosted.login({ appId, redirectUri })` — redirect to the hosted page (PKCE + `state` stashed automatically). `redirectUri` must be registered for the app in the portal (App Detail → Hosted sign-in).
+  - `client.auth.hosted.handleCallback()` — on the callback route, exchange the returned code, unseal the master seed from the URL fragment, establish the session, and scrub the URL (→ `{ username, commitment }`). `client.auth.hosted.isCallback()` guards it.
+  - Sealed-seed handoff: the hosted page AES-GCM-seals the seed under a one-time key carried only in the URL fragment (never sent to a server); the app unseals it after the code exchange. Authorization-code + PKCE (S256); single-use, 60s codes. `authBaseUrl` client option overrides the hosted origin (default `auth.muhkoo.dev`).
+- **`client.functions.invoke(target, opts?)`** — invoke an HTTP-triggered serverless function with the SDK's credentials attached (`X-Muhkoo-Key` + `X-Muhkoo-Session` when signed in), JSON in/out (non-2xx → `HttpError`). `target` is `{ name, slug }`, a `name--slug` host label, or a full URL; `opts` takes `method`, `body`, `headers`, `path`. `client.functions.invokeRaw(...)` returns the raw `Response` for non-JSON functions, and `client.functions.invokeUrl(...)` resolves a target to its URL.
+- **`functionsHostSuffix`** client option — override the HTTP-function zone (`fns.muhkoo.dev` by default) for staging/self-hosted deployments. Exported `DEFAULT_FN_HOST_SUFFIX`.
+
 ## 0.6.0-alpha.11 — Account recovery (M1)
 
 Recoverable zero-knowledge identity: the password is now a **factor**, not the

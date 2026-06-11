@@ -39,6 +39,15 @@ export default defineConfig({
       "**/tests/auth/change-password.e2e.test.ts",
       "**/tests/auth/ecdsa-signature.e2e.test.ts",
       "**/tests/auth/hex-pubkey-login.e2e.test.ts",
+      // M2.1 email factor (gated split-key) e2e - local form: MUHKOO_BASE_URL +
+      // OTP_LOG (scrapes the dev-mode OTP from the accelerator's wrangler log)
+      "**/tests/auth/email-factor.e2e.test.ts",
+      // Staging close-out e2e (real mailbox; codes handed in via $OTP_DIR files)
+      "**/tests/auth/email-factor-staging.e2e.test.ts",
+      // Hosted-auth handoff crypto (unit)
+      "**/tests/auth/hosted-handoff.test.ts",
+      // Hosted-auth full flow (e2e; opt-in: E2E_STAGING=1 + MUHKOO_BASE_URL)
+      "**/tests/auth/hosted-flow.e2e.test.ts",
       // Storage pipeline (cipher + RS codec + FileStorage end-to-end)
       "**/tests/storage/FileStorage.test.ts",
       // Space fan-out group-encryption layer

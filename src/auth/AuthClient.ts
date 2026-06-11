@@ -61,15 +61,17 @@ export interface AuthSuccess {
     username: string;
 }
 
-/** A vault factor record (M1.0). Wrap/iv are base64 AES-GCM; absent for phrase. */
+/** A vault factor record (M1.0 + M2 gated types). Wrap/iv are base64 AES-GCM; absent for phrase. */
 export interface VaultFactor {
     id: string;
-    type: "password" | "passkey" | "phrase-marker";
+    type: "password" | "passkey" | "phrase-marker" | "email" | "google";
     wrap?: string;
     iv?: string;
     params?: Record<string, unknown>;
     label?: string;
     createdAt?: number;
+    /** Display hint for gated factors ("m•••@gmail.com") — list responses only. */
+    masked?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,15 +135,93 @@ export class AuthClient {
         return await this.parse<{ evaluated: string }>("oprfEvaluate", res);
     }
 
-    /** Read a factor record for `username` (returns an indistinguishable decoy if absent). */
-    async vaultRead(username: string, factorType: VaultFactor["type"]): Promise<{ factor: VaultFactor | null }> {
-        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault`, this.json("POST", { username, factorType }));
+    /**
+     * Gated split-key OPRF evaluation (M2 — email/google factors). Requires a
+     * live `verifyToken` from {@link emailOtpVerify}; returns BOTH trust
+     * domains' evaluations. The recover token is consumed by this call.
+     */
+    async oprfEvaluateGated(
+        username: string,
+        blinded: string,
+        factorType: "email" | "google",
+        purpose: "enroll" | "recover",
+        verifyToken: string,
+    ): Promise<{ evaluated: string; evaluated2: string }> {
+        const res = await this.fetchFn(
+            `${this.baseUrl}/api/auth/oprf`,
+            this.json("POST", { username, blinded, factorType, purpose, verifyToken }),
+        );
+        return await this.parse<{ evaluated: string; evaluated2: string }>("oprfEvaluateGated", res);
+    }
+
+    /**
+     * Request an email OTP. With a session `token` this is the ENROLL flow
+     * (code sent to `email`); without one it's RECOVER (code sent to the
+     * account's enrolled address — the response is uniform either way).
+     */
+    async emailOtpStart(opts: { token?: string; email?: string; username?: string }): Promise<void> {
+        const init = this.json("POST", { email: opts.email, username: opts.username });
+        if (opts.token) (init.headers as Record<string, string>)["X-Muhkoo-Session"] = opts.token;
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/email/start`, init);
+        await this.parse<{ sent: boolean }>("emailOtpStart", res);
+    }
+
+    /** Trade an emailed code for a single-use verifyToken (+ the proven address). */
+    async emailOtpVerify(opts: { code: string; token?: string; username?: string }): Promise<{ verifyToken: string; email: string }> {
+        const init = this.json("POST", { code: opts.code, username: opts.username });
+        if (opts.token) (init.headers as Record<string, string>)["X-Muhkoo-Session"] = opts.token;
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/email/verify`, init);
+        return await this.parse<{ verifyToken: string; email: string }>("emailOtpVerify", res);
+    }
+
+    /**
+     * Verify a Google ID token (M2.3). With a session `token` it's the ENROLL
+     * gate; without, it's RECOVER/LOGIN (the Google account must already be
+     * linked). Returns a single-use verifyToken bound to the account's `sub`.
+     */
+    async googleVerify(opts: { idToken: string; token?: string; username?: string }): Promise<{ verifyToken: string; sub: string; emailHint: string | null }> {
+        const init = this.json("POST", { idToken: opts.idToken, username: opts.username });
+        if (opts.token) (init.headers as Record<string, string>)["X-Muhkoo-Session"] = opts.token;
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/google/verify`, init);
+        return await this.parse<{ verifyToken: string; sub: string; emailHint: string | null }>("googleVerify", res);
+    }
+
+    // ---- Hosted-auth authorization-code flow (H0) ---------------------------
+
+    /** Mint a single-use authorization code for an app (called by the hosted page; session-authed). */
+    async grant(token: string, body: { appId: string; redirectUri: string; codeChallenge: string; sealedKeys: string }): Promise<{ code: string }> {
+        const init = this.json("POST", body);
+        (init.headers as Record<string, string>)["X-Muhkoo-Session"] = token;
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/grant`, init);
+        return await this.parse<{ code: string }>("grant", res);
+    }
+
+    /** Exchange an authorization code + PKCE verifier for the session + sealed key material. */
+    async token(body: { code: string; codeVerifier: string; appId?: string }): Promise<{ sessionToken: string; username: string; commitment: string; sealedKeys: string; appId: string }> {
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/token`, this.json("POST", body));
+        return await this.parse<{ sessionToken: string; username: string; commitment: string; sealedKeys: string; appId: string }>("token", res);
+    }
+
+    /**
+     * Read a factor record for `username` (returns an indistinguishable decoy if
+     * absent). Gated types (email) require the recover `verifyToken`.
+     */
+    async vaultRead(
+        username: string,
+        factorType: VaultFactor["type"],
+        verifyToken?: string,
+    ): Promise<{ factor: VaultFactor | null }> {
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault`, this.json("POST", { username, factorType, verifyToken }));
         return await this.parse<{ factor: VaultFactor | null }>("vaultRead", res);
     }
 
-    /** Add/replace a factor (session-authed; the seed is already wrapped client-side). */
-    async vaultPutFactor(token: string, factor: VaultFactor): Promise<{ ok: boolean; id: string }> {
-        const init = this.json("PUT", { factor });
+    /**
+     * Add/replace a factor (session-authed; the seed is already wrapped
+     * client-side). Email factors additionally require (and consume) the
+     * enroll `verifyToken`; the stored address must be the verified one.
+     */
+    async vaultPutFactor(token: string, factor: VaultFactor, verifyToken?: string): Promise<{ ok: boolean; id: string }> {
+        const init = this.json("PUT", { factor, verifyToken });
         (init.headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
         const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault/factor`, init);
         return await this.parse<{ ok: boolean; id: string }>("vaultPutFactor", res);

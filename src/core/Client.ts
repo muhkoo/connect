@@ -40,6 +40,9 @@ import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 /** The hosted Muhkoo Accelerator — the default {@link ClientOptions.baseUrl}. */
 export const DEFAULT_BASE_URL = "https://api.muhkoo.dev";
 
+/** The hosted auth SPA — the default {@link ClientOptions.authBaseUrl}. */
+export const DEFAULT_AUTH_BASE_URL = "https://auth.muhkoo.dev";
+
 export interface ClientOptions {
     /**
      * App / publishable key issued by the accelerator (e.g. `mk_test_pk_…`).
@@ -70,6 +73,19 @@ export interface ClientOptions {
     fetch?: typeof fetch;
     /** Optional log level for the SDK logger. */
     logLevel?: string;
+    /**
+     * Wildcard zone HTTP serverless functions are served from
+     * (`<name>--<slug>.<suffix>`), used by `client.functions.invoke(...)`.
+     * Defaults to the hosted platform's zone (`fns.muhkoo.dev`); override for
+     * staging or a self-hosted deployment.
+     */
+    functionsHostSuffix?: string;
+    /**
+     * Base URL of the centralized hosted auth SPA (`client.auth.hosted`).
+     * Defaults to {@link DEFAULT_AUTH_BASE_URL} (`auth.muhkoo.dev`); override for
+     * staging (`auth.staging.muhkoo.dev`) or a self-hosted deployment.
+     */
+    authBaseUrl?: string;
 }
 
 /**
@@ -138,7 +154,8 @@ export class Client {
         const authClient = new AuthClient({ baseUrl: this.baseUrl, fetch: this.http.fetch });
 
         const wsBaseUrl = toWsBase(this.baseUrl);
-        this.auth = new AuthNamespace({ auth: authClient, circuits, session: this.session });
+        const authBaseUrl = (options.authBaseUrl ?? DEFAULT_AUTH_BASE_URL).replace(/\/+$/, "");
+        this.auth = new AuthNamespace({ auth: authClient, circuits, session: this.session, authBaseUrl });
         this.kv = new KvNamespace({ http: this.http, session: this.session, wsBaseUrl });
         this.db = new DbNamespace({ http: this.http });
         this.storage = new StorageNamespace({ http: this.http, baseUrl: this.baseUrl, kv: this.kv });
@@ -158,7 +175,7 @@ export class Client {
             cache: spaceKeyCache,
         });
         this.agents = new AgentsNamespace({ http: this.http });
-        this.functions = new FunctionsNamespace({ http: this.http });
+        this.functions = new FunctionsNamespace({ http: this.http, fnHostSuffix: options.functionsHostSuffix });
     }
 
     /** The currently signed-in user, or `null`. */

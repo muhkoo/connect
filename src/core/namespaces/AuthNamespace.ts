@@ -24,8 +24,10 @@ import {
     randomSeed, passwordPreHash, wrapKeyFromOprf, wrapKeyFromBytes, wrapSeed, unwrapSeed, toBase64, fromBase64,
 } from "../../auth/vault";
 import { oprfBlind, oprfFinalize } from "../../auth/oprf";
+import { emailFactorInput, googleFactorInput, gatedBlind, gatedWrapKey } from "../../auth/gatedFactor";
 import { passkeySupported, passkeyPrfCapable, createPasskeyWithPrf, evaluatePasskeyPrf, defaultRpId } from "../../auth/passkey";
 import type { SessionState } from "../Session";
+import { HostedAuth } from "./HostedAuth";
 
 /**
  * Thrown when the identity vault can't be reached to unlock the seed — a network
@@ -300,6 +302,149 @@ export class ZkAuth {
     }
 
     /**
+     * Add an **email** as a recovery + login factor (M2 verification-gated:
+     * the server only releases the split-key OPRF eval after the address is
+     * OTP-verified). Sends the code, then returns a `confirm` continuation:
+     *
+     *   const { confirm } = await client.auth.zk.enrollEmailFactor("me@x.com");
+     *   await confirm(codeFromInbox);
+     *
+     * Requires being signed in with the seed held (like the other enrolls).
+     * Custody note: gated factors trade some custody for recoverability — the
+     * trade-off should be disclosed in the enroll UI.
+     */
+    async enrollEmailFactor(email: string): Promise<{ email: string; confirm: (code: string) => Promise<void> }> {
+        const seed = this.deps.session.seed;
+        const token = this.deps.session.token;
+        const username = this.deps.session.username;
+        if (!seed || !token || !username) {
+            throw new Error("Sign in first to add a recovery email.");
+        }
+        await this.deps.auth.emailOtpStart({ token, email });
+        return {
+            email,
+            confirm: async (code: string) => {
+                const { verifyToken, email: verified } = await this.deps.auth.emailOtpVerify({ token, code });
+                const input = await emailFactorInput(username, verified);
+                const { blind, blinded } = gatedBlind(input);
+                const evals = await this.deps.auth.oprfEvaluateGated(username, toBase64(blinded), "email", "enroll", verifyToken);
+                const key = await gatedWrapKey(input, blind, evals.evaluated, evals.evaluated2);
+                const wrapped = await wrapSeed(seed, key);
+                await this.deps.auth.vaultPutFactor(
+                    token,
+                    { id: "email", type: "email", wrap: wrapped.ct, iv: wrapped.iv, params: { email: verified }, createdAt: Date.now() },
+                    verifyToken,
+                );
+            },
+        };
+    }
+
+    /**
+     * Recover an account via its enrolled **email** factor. Sends a code to the
+     * enrolled address (the response never reveals whether one exists), then
+     * `confirm(code)` completes: gated read + split-key eval → unwrap seed →
+     * normal ZK login. After this, call {@link changePassword} to set a new
+     * password.
+     *
+     *   const { confirm } = await client.auth.zk.recoverWithEmail("alice");
+     *   const user = await confirm(codeFromInbox);
+     */
+    async recoverWithEmail(username: string, opts: LoginOptions = {}): Promise<{ confirm: (code: string) => Promise<AuthUser> }> {
+        await this.deps.auth.emailOtpStart({ username });
+        return {
+            confirm: async (code: string) => {
+                const { verifyToken, email } = await this.deps.auth.emailOtpVerify({ username, code });
+                const { factor } = await this.deps.auth.vaultRead(username, "email", verifyToken);
+                if (!factor?.wrap || !factor?.iv) {
+                    throw new Error("This account has no email recovery set up.");
+                }
+                const input = await emailFactorInput(username, email);
+                const { blind, blinded } = gatedBlind(input);
+                const evals = await this.deps.auth.oprfEvaluateGated(username, toBase64(blinded), "email", "recover", verifyToken);
+                const key = await gatedWrapKey(input, blind, evals.evaluated, evals.evaluated2);
+                const seed = await unwrapSeed({ iv: factor.iv, ct: factor.wrap }, key);
+                const identity = await deriveIdentityFromSeed(seed);
+                const user = await this.proveAndStore(username, identity, opts);
+                this.deps.session.setSeed(seed);
+                return user;
+            },
+        };
+    }
+
+    // --- Google factor (M2.3) ------------------------------------------------
+    // Google is pure authentication UX: its verified ID token gates the
+    // split-key OPRF eval that releases the master seed. The ZK identity layer
+    // is unchanged. The app obtains `idToken` via Google Identity Services and
+    // passes it in; the SDK never renders Google UI.
+
+    /**
+     * Link a Google account as a recovery + login factor. Requires being signed
+     * in with the seed held. `idToken` is a fresh Google ID token (GIS).
+     */
+    async enrollGoogleFactor(idToken: string): Promise<void> {
+        const seed = this.deps.session.seed;
+        const token = this.deps.session.token;
+        const username = this.deps.session.username;
+        if (!seed || !token || !username) throw new Error("Sign in first to link a Google account.");
+        const { verifyToken, sub, emailHint } = await this.deps.auth.googleVerify({ idToken, token });
+        const input = await googleFactorInput(username, sub);
+        const { blind, blinded } = gatedBlind(input);
+        const evals = await this.deps.auth.oprfEvaluateGated(username, toBase64(blinded), "google", "enroll", verifyToken);
+        const key = await gatedWrapKey(input, blind, evals.evaluated, evals.evaluated2);
+        const wrapped = await wrapSeed(seed, key);
+        await this.deps.auth.vaultPutFactor(
+            token,
+            { id: "google", type: "google", wrap: wrapped.ct, iv: wrapped.iv, params: { sub, emailHint: emailHint ?? undefined }, createdAt: Date.now() },
+            verifyToken,
+        );
+    }
+
+    /**
+     * Sign in with Google — verify the ID token, unlock the seed via the gated
+     * split-key eval, and establish a session. Same machinery serves "Sign in
+     * with Google" and "recover with Google"; the account must have linked the
+     * factor first.
+     */
+    async loginWithGoogle(username: string, idToken: string, opts: LoginOptions = {}): Promise<AuthUser> {
+        const { verifyToken, sub } = await this.deps.auth.googleVerify({ idToken, username });
+        const { factor } = await this.deps.auth.vaultRead(username, "google", verifyToken);
+        if (!factor?.wrap || !factor?.iv) throw new Error("No Google account is linked to this username.");
+        const input = await googleFactorInput(username, sub);
+        const { blind, blinded } = gatedBlind(input);
+        const evals = await this.deps.auth.oprfEvaluateGated(username, toBase64(blinded), "google", "recover", verifyToken);
+        const key = await gatedWrapKey(input, blind, evals.evaluated, evals.evaluated2);
+        const seed = await unwrapSeed({ iv: factor.iv, ct: factor.wrap }, key);
+        const identity = await deriveIdentityFromSeed(seed);
+        const user = await this.proveAndStore(username, identity, opts);
+        this.deps.session.setSeed(seed);
+        return user;
+    }
+
+    /**
+     * Register a brand-new, **passwordless** account whose only factor is Google.
+     * A random master seed is generated and wrapped under the Google-gated key;
+     * the user can add a password / passkey / phrase later. The ZK registration
+     * is identical to a password signup.
+     */
+    async registerWithGoogle(username: string, idToken: string): Promise<AuthUser> {
+        const seed = randomSeed();
+        const identity = await deriveIdentityFromSeed(seed);
+        const commitment = await this.commitmentFor(identity);
+        await this.deps.auth.register({
+            username,
+            commitment,
+            ecdhPublicKey: await exportPublicKeyBase64(identity.ecdhKeyPair.publicKey),
+            ecdsaPublicKey: await exportPublicKeyBase64(identity.ecdsaKeyPair.publicKey),
+            email: null,
+        });
+        const user = await this.proveAndStore(username, identity, {});
+        this.deps.session.setSeed(seed);
+        // Enroll Google as the sole factor (session + seed are now in hand).
+        await this.enrollGoogleFactor(idToken);
+        return user;
+    }
+
+    /**
      * Change the password — re-wraps the (unchanged) master seed under the new
      * password's OPRF-gated key. The identity/commitment never moves. Requires
      * being signed in (or freshly recovered) so the seed is held.
@@ -385,8 +530,12 @@ export class ZkAuth {
         return user;
     }
 
-    /** List the user's enrolled login methods (metadata only). Session-authed. */
-    async listFactors(): Promise<Array<{ id: string; type: string; label?: string; createdAt?: number }>> {
+    /**
+     * List the user's enrolled login methods (metadata only). Session-authed.
+     * Gated factors (email/google) carry a `masked` display hint
+     * ("m•••@gmail.com"); the full value is never returned.
+     */
+    async listFactors(): Promise<Array<{ id: string; type: string; label?: string; createdAt?: number; masked?: string }>> {
         const token = this.deps.session.token;
         if (!token) throw new Error("Sign in first to view your login methods.");
         const { factors } = await this.deps.auth.vaultFactors(token);
@@ -525,8 +674,11 @@ export class ZkAuth {
 /** `client.auth` — the auth namespace. Strategies hang off here. */
 export class AuthNamespace {
     readonly zk: ZkAuth;
-    constructor(deps: ZkAuthDeps) {
+    /** Centralized hosted auth (auth.muhkoo.dev) — `client.auth.hosted.login(...)`. */
+    readonly hosted: HostedAuth;
+    constructor(deps: ZkAuthDeps & { authBaseUrl: string }) {
         this.zk = new ZkAuth(deps);
+        this.hosted = new HostedAuth({ auth: deps.auth, session: deps.session, authBaseUrl: deps.authBaseUrl });
     }
 
     /** Convenience pass-through: the currently signed-in user, or `null`. */
