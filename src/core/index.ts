@@ -52,7 +52,7 @@ export type {
     AgentScopeOpts,
     AgentsNamespaceDeps,
 } from "./namespaces/AgentsNamespace";
-export { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
+export { FunctionsNamespace, DEFAULT_FN_HOST_SUFFIX } from "./namespaces/FunctionsNamespace";
 export type {
     FunctionConfig,
     FunctionDeployInput,
@@ -62,6 +62,7 @@ export type {
     FunctionTriggerType,
     FunctionCaps,
     FunctionScopeOpts,
+    FunctionInvokeOptions,
     FunctionsNamespaceDeps,
 } from "./namespaces/FunctionsNamespace";
 

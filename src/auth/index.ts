@@ -18,3 +18,4 @@ export * from "./identity";
 export * from "./poseidon";
 export * from "./proof";
 export * from "./keys";
+export * from "./hostedHandoff";
