@@ -42,8 +42,9 @@ describe.skipIf(!RUN || !circuits)("Hosted-auth full flow — e2e", () => {
 
         const { codeVerifier, codeChallenge } = await generatePkce();
         const state = randomState();
-        // A FIRST_PARTY_REDIRECT_URIS entry on staging; appId is just a label here.
-        const redirectUri = "https://portal.staging.muhkoo.dev/auth/callback";
+        // A FIRST_PARTY_REDIRECT_URIS entry for this env (api.* → portal.*); appId is a label.
+        const portalHost = new URL(BASE_URL).host.replace(/^api\./, "portal.");
+        const redirectUri = `https://${portalHost}/auth/callback`;
         const redirectUrl = await hosted.auth.hosted.completeAuthorize({ appId: "muhkoo-portal", redirectUri, codeChallenge, state });
 
         const code = new URL(redirectUrl).searchParams.get("code")!;
