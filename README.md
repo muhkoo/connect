@@ -459,12 +459,6 @@ yarn lint               # eslint ./src
   (true for all of the above; on CF Workers, pre-compile via wrangler's
   `.wasm` import if you want to skip startup cost).
 
-## Related
-
-- [`muhkoo/accelerator`](https://github.com/muhkoo/accelerator) — the CF
-  Workers + DOs backend this SDK targets, including the personal-space DO,
-  message-bus DO, and the bn128.wasm-driven `verifyZkAuthProof`.
-
 ## License
 
 GPL-3.0 — see `LICENSE`.
