@@ -142,9 +142,10 @@ const client = new Client({
 const user = await client.auth.zk.login("alice", "correct horse battery staple");
 //    └ { username, commitment }
 
-// Storage — per-user persistent KV (collection + id), encrypted at rest.
-await client.storage.set("todos", "t1", { title: "Buy groceries", completed: false });
-const todo = await client.storage.get("todos", "t1");
+// KV — per-user persistent key/value (collection + id); client-side encrypted,
+// the server stores only ciphertext.
+await client.kv.set("todos", "t1", { title: "Buy groceries", completed: false });
+const todo = await client.kv.get("todos", "t1");
 const ids  = await client.storage.list("todos");
 await client.storage.delete("todos", "t1");
 
@@ -169,9 +170,12 @@ online).
 message once with a shared group key so the server can persist + replay it.
 `createChannel(name)` mints + registers a channel (you become its first
 key-holder); `joinChannel(name)` resolves an existing one and is admitted by the
-app's **keeper** — a trusted, always-available member that re-issues the group
-key — so a channel is joinable even when no one else is online. The relay stays
-blind (it only ever sees opaque, ECIES-wrapped key blobs). The space handle was
+app's **keeper** — a server-side process (the app's Durable Object) that holds
+the channel's group key and re-issues it to newcomers — so a channel is joinable
+even when no human member is online. The message **relay** stays blind (it only
+ever sees opaque, ECIES-wrapped key blobs); the **keeper** does hold group keys,
+so channels are *relay-blind*, not fully server-blind. (Enabling a server-side
+agent on a channel likewise gives that agent the group key.) The space handle was
 once `Room`; that name is still exported as an alias, and `client.message.room()`
 returns the same handle.
 
@@ -461,4 +465,4 @@ yarn lint               # eslint ./src
 
 ## License
 
-GPL-3.0 — see `LICENSE`.
+MIT — see `LICENSE`.
