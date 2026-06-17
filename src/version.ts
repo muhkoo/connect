@@ -6,4 +6,4 @@
  * expect (and isn't serving a stale cached bundle). Keep this in sync with
  * `package.json` `version`.
  */
-export const VERSION = "0.7.0-alpha.3";
+export const VERSION = "0.7.0-alpha.4";

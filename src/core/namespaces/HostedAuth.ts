@@ -61,6 +61,20 @@ export class HostedAuth {
         return url;
     }
 
+    /**
+     * (App side) Send the user to centralized account & security management on
+     * the hosted page (auth.muhkoo.dev/security) — manage passkeys, recovery
+     * phrase, email, Google, change password, and remove login methods, all in
+     * one place. `returnUri` (default: the current URL) gives the hosted page a
+     * "Back to app" target. Redirects the browser; resolves to the URL.
+     */
+    async manageAccount(opts: { returnUri?: string } = {}): Promise<string> {
+        const ret = opts.returnUri ?? this.location().href;
+        const url = `${this.deps.authBaseUrl}/security?` + new URLSearchParams({ return: ret }).toString();
+        this.location().assign(url);
+        return url;
+    }
+
     /** Whether the current URL looks like a hosted-auth callback (has code + state). */
     isCallback(): boolean {
         try {

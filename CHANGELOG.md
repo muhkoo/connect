@@ -4,7 +4,7 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
-## Unreleased
+## 0.7.0-alpha.4 — Hosted auth, recovery factors & function invoke (2026-06-17)
 
 ### Added
 
@@ -21,6 +21,7 @@ minor, fixes bump the patch/alpha).
 - **Hosted auth — `client.auth.hosted` (auth.muhkoo.dev):** centralize sign-in so apps drop the embedded login UI (and ~6 MiB of snarkjs), and provider config (Google OAuth origins, WebAuthn, DKIM) lives in one place instead of per-app.
   - `client.auth.hosted.login({ appId, redirectUri })` — redirect to the hosted page (PKCE + `state` stashed automatically). `redirectUri` must be registered for the app in the portal (App Detail → Hosted sign-in).
   - `client.auth.hosted.handleCallback()` — on the callback route, exchange the returned code, unseal the master seed from the URL fragment, establish the session, and scrub the URL (→ `{ username, commitment }`). `client.auth.hosted.isCallback()` guards it.
+  - `client.auth.hosted.manageAccount({ returnUri? })` — redirect to **centralized account & security management** (`auth.muhkoo.dev/security`): manage passkeys, recovery email, Google, recovery phrase, and password in one place across every app, with a "Back to app" return. Replaces the per-app security UI.
   - Sealed-seed handoff: the hosted page AES-GCM-seals the seed under a one-time key carried only in the URL fragment (never sent to a server); the app unseals it after the code exchange. Authorization-code + PKCE (S256); single-use, 60s codes. `authBaseUrl` client option overrides the hosted origin (default `auth.muhkoo.dev`).
 - **`client.functions.invoke(target, opts?)`** — invoke an HTTP-triggered serverless function with the SDK's credentials attached (`X-Muhkoo-Key` + `X-Muhkoo-Session` when signed in), JSON in/out (non-2xx → `HttpError`). `target` is `{ name, slug }`, a `name--slug` host label, or a full URL; `opts` takes `method`, `body`, `headers`, `path`. `client.functions.invokeRaw(...)` returns the raw `Response` for non-JSON functions, and `client.functions.invokeUrl(...)` resolves a target to its URL.
 - **`functionsHostSuffix`** client option — override the HTTP-function zone (`fns.muhkoo.dev` by default) for staging/self-hosted deployments. Exported `DEFAULT_FN_HOST_SUFFIX`.
