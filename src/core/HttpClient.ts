@@ -63,6 +63,8 @@ export class HttpError extends Error {
 
 export class HttpClient {
     readonly baseUrl: string;
+    /** Origin of {@link baseUrl} — credentials are only attached same-origin. */
+    private readonly baseOrigin: string;
     private readonly apiKey: string | null;
     private readonly getSessionToken: () => string | null;
     private readonly onUnauthorized: (() => Promise<boolean>) | null;
@@ -71,6 +73,7 @@ export class HttpClient {
     constructor(opts: HttpClientOptions) {
         if (!opts?.baseUrl) throw new Error("HttpClient: `baseUrl` is required");
         this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
+        try { this.baseOrigin = new URL(this.baseUrl).origin; } catch { this.baseOrigin = ""; }
         this.apiKey = opts.apiKey ?? null;
         this.getSessionToken = opts.getSessionToken ?? (() => null);
         this.onUnauthorized = opts.onUnauthorized ?? null;
@@ -91,11 +94,32 @@ export class HttpClient {
      */
     readonly fetch: typeof fetch = (input, init) => {
         const headers = new Headers(init?.headers);
-        if (this.apiKey) headers.set("X-Muhkoo-Key", this.apiKey);
-        const token = this.getSessionToken();
-        if (token) headers.set("X-Muhkoo-Session", token);
+        // Only attach credentials when the request stays on the accelerator's
+        // origin. An absolute URL pointing elsewhere (e.g. a caller-supplied or
+        // server-reflected path that escapes `baseUrl`) must NOT receive the app
+        // key or session token, or it becomes a token-exfiltration vector.
+        if (this.isSameOrigin(input)) {
+            if (this.apiKey) headers.set("X-Muhkoo-Key", this.apiKey);
+            const token = this.getSessionToken();
+            if (token) headers.set("X-Muhkoo-Session", token);
+        }
         return this.fetchFn(input, { ...init, headers });
     };
+
+    /** True when `input` resolves to {@link baseOrigin} (relative URLs always do). */
+    private isSameOrigin(input: RequestInfo | URL): boolean {
+        try {
+            const urlStr =
+                typeof input === "string" ? input
+                : input instanceof URL ? input.href
+                : (input as Request).url;
+            // Relative URLs are resolved against baseUrl downstream → same origin.
+            if (!/^https?:\/\//i.test(urlStr)) return true;
+            return new URL(urlStr).origin === this.baseOrigin;
+        } catch {
+            return true;
+        }
+    }
 
     // -------------------------------------------------------------------------
     // JSON convenience helpers (path is relative to baseUrl)

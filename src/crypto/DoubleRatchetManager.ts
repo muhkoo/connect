@@ -35,17 +35,15 @@ class DoubleRatchetManager {
         ecdsaPub: CryptoKey,
     ): Promise<void> {
         await this._authenticator.initializeZK();
-        console.log(`Registering ZK for ${clientId}...`);
-        console.log('ECDSA Public Key:', ecdsaPub);
         const ecdsaJwk = await crypto.subtle.exportKey('jwk', ecdsaPub);
         const ecdsaHex = toHex(fromBase64Url(ecdsaJwk.x!)).slice(0, 64);
         const ecdsaPubField = new Field(BigInt('0x' + ecdsaHex));
         const ecdsaPubHash = await Poseidon.hash([ecdsaPubField]);
         const commitment = await Poseidon.hash([secret, salt, ecdsaPubHash]);
-        console.log(`Commitment for ${clientId}:`, { commitment, salt });
         this.registeredUsers.set(clientId, { commitment, salt });
-        appLogger.debug(`Registered ${clientId}: commitment=${commitment.toString()}, salt=${salt.toString()}`);
-
+        // NB: never log `secret`, `salt`, or `commitment` — `salt` is a private
+        // witness for the ZK circuit and `commitment` is the user's stable id.
+        appLogger.debug(`Registered ZK identity for ${clientId}`);
     }
 
     public async performHandshake(

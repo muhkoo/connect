@@ -4,6 +4,13 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.7.0-alpha.5 — Security hardening (2026-06-18)
+
+### Security
+
+- **`HttpClient` attaches credentials same-origin only.** The app key (`X-Muhkoo-Key`) and user session token (`X-Muhkoo-Session`) are no longer sent when a request URL escapes the configured `baseUrl` origin — closing a token-exfiltration vector through absolute / `http`-prefixed request paths.
+- **Stopped logging identity material.** Removed `console.log` of the ZK salt and commitment in `DoubleRatchetManager` (the salt is a private circuit witness; the commitment is the user's stable id).
+
 ## 0.7.0-alpha.4 — Hosted auth, recovery factors & function invoke (2026-06-17)
 
 ### Added
