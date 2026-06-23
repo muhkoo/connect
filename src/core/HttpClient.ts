@@ -36,6 +36,15 @@ export interface HttpClientOptions {
     /** Custom fetch — defaults to `globalThis.fetch`. */
     fetch?: typeof fetch;
     /**
+     * The platform's function-host zone suffix (e.g. `fns.muhkoo.dev`). Subdomains
+     * of it are ALSO trusted to receive credentials — `functions.invoke` calls a
+     * function at `<name>--<slug>.<suffix>`, a different origin than `baseUrl` but
+     * a platform-controlled host that legitimately acts on the user's session.
+     * Without this, the same-origin guard would strip the session from function
+     * calls (→ the function sees no caller). Set by {@link Client}.
+     */
+    functionsHostSuffix?: string;
+    /**
      * Called when a token-gated request comes back `401` (stale/expired
      * session). Should attempt to silently re-establish a session and resolve
      * `true` if it succeeded (the request is then retried once with the fresh
@@ -65,6 +74,8 @@ export class HttpClient {
     readonly baseUrl: string;
     /** Origin of {@link baseUrl} — credentials are only attached same-origin. */
     private readonly baseOrigin: string;
+    /** Lowercased function-host zone suffix whose subdomains are also trusted. */
+    private readonly fnsSuffix: string;
     private readonly apiKey: string | null;
     private readonly getSessionToken: () => string | null;
     private readonly onUnauthorized: (() => Promise<boolean>) | null;
@@ -74,6 +85,7 @@ export class HttpClient {
         if (!opts?.baseUrl) throw new Error("HttpClient: `baseUrl` is required");
         this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
         try { this.baseOrigin = new URL(this.baseUrl).origin; } catch { this.baseOrigin = ""; }
+        this.fnsSuffix = (opts.functionsHostSuffix ?? "").toLowerCase().replace(/^\.+/, "");
         this.apiKey = opts.apiKey ?? null;
         this.getSessionToken = opts.getSessionToken ?? (() => null);
         this.onUnauthorized = opts.onUnauthorized ?? null;
@@ -98,7 +110,7 @@ export class HttpClient {
         // origin. An absolute URL pointing elsewhere (e.g. a caller-supplied or
         // server-reflected path that escapes `baseUrl`) must NOT receive the app
         // key or session token, or it becomes a token-exfiltration vector.
-        if (this.isSameOrigin(input)) {
+        if (this.isCredentialedTarget(input)) {
             if (this.apiKey) headers.set("X-Muhkoo-Key", this.apiKey);
             const token = this.getSessionToken();
             if (token) headers.set("X-Muhkoo-Session", token);
@@ -106,8 +118,12 @@ export class HttpClient {
         return this.fetchFn(input, { ...init, headers });
     };
 
-    /** True when `input` resolves to {@link baseOrigin} (relative URLs always do). */
-    private isSameOrigin(input: RequestInfo | URL): boolean {
+    /** Whether `input` is a trusted platform target that may receive credentials:
+     *  the accelerator origin (relative URLs always resolve there), or — so
+     *  `functions.invoke` works — a subdomain of the platform's function-host
+     *  zone. Anything else (caller-supplied / server-reflected external URLs) is
+     *  NOT credentialed, to avoid token exfiltration. */
+    private isCredentialedTarget(input: RequestInfo | URL): boolean {
         try {
             const urlStr =
                 typeof input === "string" ? input
@@ -115,7 +131,14 @@ export class HttpClient {
                 : (input as Request).url;
             // Relative URLs are resolved against baseUrl downstream → same origin.
             if (!/^https?:\/\//i.test(urlStr)) return true;
-            return new URL(urlStr).origin === this.baseOrigin;
+            const u = new URL(urlStr);
+            if (u.origin === this.baseOrigin) return true;
+            // Platform function host (https only): `<name>--<slug>.<fnsSuffix>`.
+            if (this.fnsSuffix && u.protocol === "https:") {
+                const host = u.hostname.toLowerCase();
+                if (host === this.fnsSuffix || host.endsWith(`.${this.fnsSuffix}`)) return true;
+            }
+            return false;
         } catch {
             return true;
         }

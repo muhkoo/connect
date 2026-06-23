@@ -34,7 +34,7 @@ import { StorageNamespace } from "./namespaces/FileNamespace";
 import { MessageNamespace } from "./namespaces/MessageNamespace";
 import { SpaceNamespace } from "./namespaces/SpaceNamespace";
 import { AgentsNamespace } from "./namespaces/AgentsNamespace";
-import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
+import { FunctionsNamespace, DEFAULT_FN_HOST_SUFFIX } from "./namespaces/FunctionsNamespace";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 
 /** The hosted Muhkoo Accelerator — the default {@link ClientOptions.baseUrl}. */
@@ -144,6 +144,9 @@ export class Client {
             apiKey: options.apiKey,
             getSessionToken: () => this.session.token,
             fetch: options.fetch,
+            // So credentials reach the app's serverless functions (a different
+            // origin than baseUrl, but a platform-controlled host).
+            functionsHostSuffix: options.functionsHostSuffix ?? DEFAULT_FN_HOST_SUFFIX,
             // Self-heal stale sessions: on a 401, try a silent re-auth (only
             // works while unlocked). If it can't, `recoverSession` fires the
             // session-expired event so the app can redirect to login.
