@@ -8,6 +8,14 @@ export enum EventCoreEvents {
     MESSAGE = "message",
     GET_HISTORY = "get_history",
     RECEIVED_HISTORY = "received_history",
+    // Offline layer — connectivity + background sync lifecycle. Emitted by the
+    // ConnectivityManager / SyncEngine; apps subscribe to drive a status UI.
+    ONLINE = "online",
+    OFFLINE = "offline",
+    SYNCING = "syncing",
+    SYNC_PROGRESS = "sync_progress",
+    SYNC_COMPLETE = "sync_complete",
+    SYNC_ERROR = "sync_error",
 }
 
 

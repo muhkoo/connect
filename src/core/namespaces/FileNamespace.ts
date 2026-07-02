@@ -27,7 +27,7 @@
 import type { HttpClient } from "../HttpClient";
 import type { KvNamespace } from "./KvNamespace";
 import { FileStorage } from "../../storage/FileStorage";
-import { ShardClient } from "../../storage/transport/ShardClient";
+import { ShardClient, type ShardByteCache } from "../../storage/transport/ShardClient";
 import { SharedSpaceClient } from "../../storage/transport/SharedSpaceClient";
 import { manifestToStat, type FileManifest, type FileStat } from "../../storage/types";
 
@@ -45,6 +45,10 @@ export interface FileNamespaceDeps {
      * deploy-time-precompiled environments). Forwarded to {@link FileStorage}.
      */
     rsWasmModule?: WebAssembly.Module;
+    /** Offline shard-byte cache (browser). Enables offline reads of cached files. */
+    shardCache?: ShardByteCache;
+    /** Queue a shard PUT that couldn't reach the network (offline). */
+    deferShardUpload?: (hash: string) => Promise<void>;
 }
 
 export interface WriteFileOptions {
@@ -163,6 +167,8 @@ export class StorageNamespace {
                 baseUrl: this.deps.baseUrl,
                 pathPrefix: "/api/shards",
                 fetch: this.deps.http.fetch,
+                cache: this.deps.shardCache,
+                deferUpload: this.deps.deferShardUpload,
             });
         }
         return this._shards;

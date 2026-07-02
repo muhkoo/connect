@@ -49,6 +49,27 @@ export interface HttpClientOptions {
     onUnauthorized?: () => Promise<boolean>;
 }
 
+/** Per-request timing logs, enabled on staging only (temporary diagnostic). */
+const HTTP_DEBUG = (() => {
+    try {
+        return typeof location !== "undefined" && /(^|\.)staging\./.test(location.hostname);
+    } catch {
+        return false;
+    }
+})();
+
+/** Short, readable request path (pathname + search) for the timing log. */
+function reqPath(input: RequestInfo | URL): string {
+    try {
+        const u = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+        if (!/^https?:\/\//i.test(u)) return u;
+        const parsed = new URL(u);
+        return parsed.pathname + parsed.search;
+    } catch {
+        return "?";
+    }
+}
+
 /** Thrown for any non-2xx accelerator response. Carries the HTTP status. */
 export class HttpError extends Error {
     constructor(
@@ -103,7 +124,16 @@ export class HttpClient {
             const token = this.getSessionToken();
             if (token) headers.set("X-Muhkoo-Session", token);
         }
-        return this.fetchFn(input, { ...init, headers });
+        const finalInit = { ...init, headers };
+        if (!HTTP_DEBUG) return this.fetchFn(input, finalInit);
+        // Staging diagnostic: time every accelerator request (this `fetch` is the
+        // single chokepoint — JSON helpers + the roster/shard fetches ride it).
+        const t = performance.now();
+        const tag = `${init?.method ?? "GET"} ${reqPath(input)}`;
+        return this.fetchFn(input, finalInit).then(
+            (res) => { console.info(`[muhkoo:http] ${tag} → ${res.status} ${Math.round(performance.now() - t)}ms`); return res; },
+            (err) => { console.info(`[muhkoo:http] ${tag} → ERROR ${Math.round(performance.now() - t)}ms`); throw err; },
+        );
     };
 
     /** True when `input` resolves to {@link baseOrigin} (relative URLs always do). */

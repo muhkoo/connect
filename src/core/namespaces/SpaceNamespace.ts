@@ -23,6 +23,12 @@ import { SpaceKeyring, KEEPER_MEMBER_ID, type SpaceKeyCache } from "../../spaces
 import { KeyringClient } from "../../spaces/KeyringClient";
 import { generateSpaceIdentity, exportEcdhPublicKey, exportEcdsaPublicKey } from "../../spaces/SpaceCipher";
 import type { HistoryPolicy, InviteLink } from "../../spaces/types";
+import type { OfflineManager } from "../../offline/OfflineManager";
+import { SpaceCache } from "../../offline/SpaceCache";
+import { PeerNetwork } from "../../p2p/PeerNetwork";
+import { isP2pCapable } from "../../p2p/detect";
+import type { ChatKeyVault } from "../ChatKeyVault";
+import { toBase64 } from "../../utilities";
 
 /** Thrown by `joinChannel` when no channel with that name is registered. */
 export class ChannelNotFoundError extends Error {
@@ -47,10 +53,42 @@ export interface SpaceNamespaceDeps {
     wsBaseUrl: string;
     /** Optional PersonalSpace-backed cache of group keys (encrypted at rest). */
     cache?: SpaceKeyCache;
+    /** Offline manager — enables message caching + offline send replay. */
+    offline?: OfflineManager;
+    /** SDK-owned ratchet-keypair vault — gives a STABLE member keypair across
+     *  reloads (rehydrate-or-provision) instead of a fresh one each session. */
+    chatKeys?: ChatKeyVault;
+    /** P2P swarm config — enables peer block exchange among Space members. */
+    p2p?: {
+        enabled?: boolean;
+        /** `() => new Worker(new URL(...))` to run the block engine off-thread. */
+        workerFactory?: () => Worker;
+        iceServers?: RTCIceServer[];
+        maxPeers?: number;
+        debug?: boolean;
+    };
 }
 
 export class SpaceNamespace {
-    constructor(private readonly deps: SpaceNamespaceDeps) {}
+    private spaceCache?: SpaceCache;
+    /** Spaces built this session, by id — used to route offline send replays. */
+    private readonly openSpaces = new Map<string, Space>();
+
+    constructor(private readonly deps: SpaceNamespaceDeps) {
+        if (deps.offline?.enabled) {
+            this.spaceCache = new SpaceCache(deps.offline);
+            // Replay queued space frames on reconnect: route each to its space
+            // (reopening + connecting it if needed), then re-send the raw frame.
+            deps.offline.registerReplayer("space", async (entry) => {
+                const { spaceId, frame } = entry.args as { spaceId: string; frame: unknown };
+                let space = this.openSpaces.get(spaceId);
+                if (!space) space = await this.get(spaceId);
+                await space.connect();
+                if (!space.isConnected()) throw new Error(`space ${spaceId} not connected for replay`);
+                space.sendRaw(frame);
+            });
+        }
+    }
 
     /**
      * Create a new space: generate its keypair (public key = id), register
@@ -230,7 +268,7 @@ export class SpaceNamespace {
             cache: this.deps.cache,
             historyPolicy,
         });
-        return new Space({
+        const space = new Space({
             name: spaceId,
             wsBaseUrl: this.deps.wsBaseUrl,
             httpBaseUrl: this.deps.http.baseUrl,
@@ -239,14 +277,53 @@ export class SpaceNamespace {
             fetchTicket: () => this.fetchTicket(),
             keyring,
             historyPolicy,
+            offline: this.spaceCache,
+            shardCache: this.deps.offline?.fileCache,
+            deferShardUpload: this.deps.offline
+                ? (hash: string) => this.deps.offline!.deferShardUpload(hash)
+                : undefined,
         });
+        this.openSpaces.set(spaceId, space);
+        // Attach a private P2P swarm scoped to this Space (block exchange among
+        // members; signaled over the Space relay). Discovery starts on connect.
+        if (this.deps.p2p?.enabled && isP2pCapable()) {
+            space.attachPeerNetwork(
+                new PeerNetwork({
+                    space,
+                    myId: memberId,
+                    workerFactory: this.deps.p2p.workerFactory,
+                    iceServers: this.deps.p2p.iceServers,
+                    maxPeers: this.deps.p2p.maxPeers,
+                    debug: this.deps.p2p.debug,
+                }),
+            );
+        }
+        return space;
     }
 
     /** Ensure the member has an identity keypair; return its public ECDH + ECDSA keys. */
     private async ensureIdentity(memberId: string): Promise<{ ecdhPub: string; ecdsaPub: string }> {
         const store = KeyStore.getInstance();
         if (!store.getKeyPair(memberId)) {
-            await store.generateOwnKeyPair(memberId);
+            // Unlocked (seed in hand): rehydrate the member's STABLE keypair from
+            // the vault, or provision + persist one on first use. This keeps the
+            // member the same identity across reloads — no re-admit each session,
+            // and the group-key cache round-trips. Best-effort: a personal-space
+            // hiccup falls through to an ephemeral keypair (today's behavior).
+            const seed = this.deps.session.seed;
+            const staging = (() => { try { return typeof location !== "undefined" && /(^|\.)staging\./.test(location.hostname); } catch { return false; } })();
+            if (staging) console.info(`[muhkoo:vault] ensureIdentity: unlocked=${!!seed} vault=${!!this.deps.chatKeys}`);
+            if (this.deps.chatKeys && seed) {
+                try {
+                    await this.deps.chatKeys.ensure(memberId, toBase64(seed));
+                } catch (e) {
+                    if (staging) console.info(`[muhkoo:vault] ensureIdentity: vault.ensure failed — ${e instanceof Error ? e.message : e}`);
+                }
+            }
+            if (!store.getKeyPair(memberId)) {
+                if (staging) console.info("[muhkoo:vault] ensureIdentity: EPHEMERAL keypair (locked / no vault) → will re-admit");
+                await store.generateOwnKeyPair(memberId);
+            }
         }
         const ecdhPub = await exportEcdhPublicKey(store.getKeyPair(memberId)!.publicKey);
         const ecdsaPub = await exportEcdsaPublicKey(store.getAuthKeyPair(memberId)!.publicKey);

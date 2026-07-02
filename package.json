@@ -1,6 +1,6 @@
 {
   "name": "@muhkoo/connect",
-  "version": "0.7.0-alpha.5",
+  "version": "0.10.1-alpha.0",
   "description": "Simple client SDK for building distributed edge based applications",
   "main": "dist/server/index.js",
   "module": "dist/server/index.js",
@@ -28,6 +28,8 @@
   "files": [
     "dist/**/index.js",
     "dist/**/index.js.map",
+    "dist/browser/blockEngine.worker.js",
+    "dist/browser/blockEngine.worker.js.map",
     "dist/connect.d.ts",
     "README.md",
     "LICENSE"
@@ -38,7 +40,8 @@
       "workerd": "./dist/workers/index.js",
       "browser": "./dist/browser/index.js",
       "default": "./dist/server/index.js"
-    }
+    },
+    "./p2p-worker": "./dist/browser/blockEngine.worker.js"
   },
   "scripts": {
     "build:dts": "rollup -c rollup.dts.config.js",
@@ -110,6 +113,7 @@
     "eslint-config-prettier": "^10.1.5",
     "eslint-plugin-prettier": "^5.2.1",
     "eslint-plugin-tsdoc": "^0.4.0",
+    "fake-indexeddb": "^6.2.5",
     "nodemon": "^3.1.9",
     "prettier": "^3.3.3",
     "rollup": "^4.25.0",

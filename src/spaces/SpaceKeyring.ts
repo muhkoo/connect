@@ -26,7 +26,6 @@ import {
     importEcdsaPublicKey,
 } from "./SpaceCipher";
 import type { EpochKeyProvider } from "./SpacePacketCipher";
-import { toBase64, fromBase64 } from "../utilities";
 
 /**
  * Reserved member id for the app's "keeper" — a trusted always-available member
@@ -36,6 +35,18 @@ import { toBase64, fromBase64 } from "../utilities";
  * `KEEPER_MEMBER_ID`.
  */
 export const KEEPER_MEMBER_ID = "__keeper__";
+
+/** Staging-only keyring diagnostics (group-key cache hit/miss, persist, pulls). */
+const KEYRING_DEBUG = (() => {
+    try {
+        return typeof location !== "undefined" && /(^|\.)staging\./.test(location.hostname);
+    } catch {
+        return false;
+    }
+})();
+function klog(msg: string): void {
+    if (KEYRING_DEBUG) console.info(`[muhkoo:keyring] ${msg}`);
+}
 
 /** Opaque-blob transport to the space's keyring (HTTP or in-memory test seam). */
 export interface KeyringTransport {
@@ -82,6 +93,14 @@ export class SpaceKeyring implements EpochKeyProvider {
     private readonly policy: HistoryPolicy;
     /** Cached member directory: memberId → imported ECDSA verify key. */
     private readonly memberEcdsa = new Map<string, CryptoKey>();
+    /** Coalesce concurrent roster refreshes (the parallel history/backlog decode
+     *  would otherwise fire one `roster` fetch PER message — a thundering herd). */
+    private dirInFlight: Promise<void> | null = null;
+    private dirRefreshedAt = 0;
+    /** Min gap between non-forced roster refreshes. A miss that persists within
+     *  this window won't re-fetch (the roster hasn't changed that fast); genuine
+     *  membership changes use `{ force: true }` (join requests / history loads). */
+    private static readonly DIR_COOLDOWN_MS = 5000;
 
     constructor(private readonly deps: SpaceKeyringDeps) {
         this.policy = deps.historyPolicy ?? "static";
@@ -94,8 +113,27 @@ export class SpaceKeyring implements EpochKeyProvider {
         return this.memberEcdsa.get(memberId);
     }
 
-    /** Refresh the member directory (memberId → ECDSA key) from the roster. */
-    async refreshDirectory(): Promise<void> {
+    /**
+     * Refresh the member directory (memberId → ECDSA key) from the roster.
+     * Coalesces concurrent callers into ONE fetch, and skips a fetch when one
+     * completed within {@link DIR_COOLDOWN_MS} (unless `force`). Without this, a
+     * page of N messages decoded in parallel — each missing the cold directory —
+     * fires N simultaneous `roster` requests that queue behind the browser's
+     * connection limit and take many seconds.
+     */
+    async refreshDirectory(opts?: { force?: boolean }): Promise<void> {
+        if (this.dirInFlight) return this.dirInFlight; // a refresh is already running
+        if (!opts?.force && Date.now() - this.dirRefreshedAt < SpaceKeyring.DIR_COOLDOWN_MS) {
+            return; // refreshed very recently — the roster won't have changed
+        }
+        this.dirInFlight = this.doRefreshDirectory().finally(() => {
+            this.dirRefreshedAt = Date.now();
+            this.dirInFlight = null;
+        });
+        return this.dirInFlight;
+    }
+
+    private async doRefreshDirectory(): Promise<void> {
         let roster: RosterMember[];
         try {
             roster = await this.deps.transport.fetchRoster();
@@ -132,30 +170,60 @@ export class SpaceKeyring implements EpochKeyProvider {
      * a cache miss/failure (e.g. not unlocked) must not block joining. */
     async loadFromCache(): Promise<boolean> {
         if (!this.deps.cache) return false;
+        // The cache entries are ECIES-wrapped to our identity key, so we unwrap
+        // with the keyring's OWN private key — available whenever chat works,
+        // unlike client.kv's StorageCipher which needs the full unlocked identity.
+        const priv = this.deps.ownPrivateKey();
+        if (!priv) {
+            klog("loadFromCache: no private key available yet");
+            return false;
+        }
         let cached: Record<string, string> | null;
         try {
             cached = await this.deps.cache.loadKeys(this.deps.spaceId);
-        } catch {
+        } catch (e) {
+            klog(`loadFromCache: ERROR reading cache — ${e instanceof Error ? e.message : e}`);
             return false;
         }
-        if (!cached) return false;
-        for (const [epochStr, b64] of Object.entries(cached)) {
-            this.keys.set(Number(epochStr), fromBase64(b64));
+        if (!cached) {
+            klog("loadFromCache: cache empty");
+            return false;
+        }
+        for (const [epochStr, serialized] of Object.entries(cached)) {
+            try {
+                const blob = JSON.parse(serialized) as WrappedKey;
+                this.keys.set(Number(epochStr), await unwrapSpaceKey(blob, priv));
+            } catch {
+                /* stale / old-format entry — skip; we'll re-admit and re-persist */
+            }
+        }
+        if (this.keys.size === 0) {
+            klog("loadFromCache: no usable entries (stale format → will re-admit)");
+            return false;
         }
         this.epoch = Math.max(0, ...Array.from(this.keys.keys()));
-        return this.keys.size > 0;
+        klog(`loadFromCache: HIT ${this.keys.size} epoch(s), current=${this.epoch}`);
+        return true;
     }
 
     private async persist(): Promise<void> {
-        if (!this.deps.cache) return;
-        const out: Record<string, string> = {};
-        for (const [epoch, key] of this.keys) out[String(epoch)] = toBase64(key);
-        // Best-effort: caching is an optimization; a write failure (e.g. locked
-        // storage) must not break key acquisition.
+        if (!this.deps.cache || this.keys.size === 0) return;
+        // Best-effort: caching is an optimization; a write failure must not break
+        // key acquisition.
         try {
+            // Wrap each epoch key to our OWN identity key (ECIES-to-self). The
+            // cache stays server-blind (the kv layer stores it with encrypt:false
+            // — it's already encrypted) AND readable with the keyring private key
+            // alone, so it works while the full identity is locked (post-reload).
+            const selfPub = await importEcdhPublicKey(this.deps.identityEcdhPub);
+            const out: Record<string, string> = {};
+            for (const [epoch, key] of this.keys) {
+                out[String(epoch)] = JSON.stringify(await wrapSpaceKey(key, epoch, selfPub));
+            }
             await this.deps.cache.saveKeys(this.deps.spaceId, out);
-        } catch {
-            /* ignore */
+            klog(`persist: saved ${Object.keys(out).length} epoch(s)`);
+        } catch (e) {
+            klog(`persist: FAILED — ${e instanceof Error ? e.message : e}`);
         }
     }
 
@@ -205,7 +273,23 @@ export class SpaceKeyring implements EpochKeyProvider {
             this.epoch = Math.max(this.epoch, ...Array.from(this.keys.keys()));
             await this.persist();
         }
+        klog(`pullKeys: +${added} epoch(s) (now hold ${this.keys.size}, current=${this.epoch})`);
         return added;
+    }
+
+    /**
+     * Background freshness check for the cache-hit fast path: confirm we hold the
+     * current epoch (picks up a rotation / our removal) WITHOUT the full newcomer
+     * admit handshake. Cheap + idempotent; never blocks first paint. Returns the
+     * number of newly-obtained epoch keys (0 = already current).
+     */
+    async reconcile(): Promise<number> {
+        await this.refreshDirectory({ force: true });
+        try {
+            return await this.pullKeys();
+        } catch {
+            return 0; // best-effort — the live keyringReady frame is the backstop
+        }
     }
 
     // -- key-holder: admit + rotate -------------------------------------------

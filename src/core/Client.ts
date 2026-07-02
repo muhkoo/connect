@@ -36,6 +36,16 @@ import { SpaceNamespace } from "./namespaces/SpaceNamespace";
 import { AgentsNamespace } from "./namespaces/AgentsNamespace";
 import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
+import { ChatKeyVault, type ChatKeyStore } from "./ChatKeyVault";
+import type { WrappedPayload } from "../crypto/PassphraseWrap";
+import { OfflineManager } from "../offline/OfflineManager";
+import { isOfflineCapable } from "../offline/detect";
+import { IndexedDbStore } from "../offline/store/IndexedDbStore";
+import { NoopStore } from "../offline/store/NoopStore";
+import type { OfflineStore } from "../offline/store/OfflineStore";
+import { KvCache } from "../offline/KvCache";
+import { DbCache } from "../offline/DbCache";
+import { ShardClient } from "../storage/transport/ShardClient";
 
 /** The hosted Muhkoo Accelerator — the default {@link ClientOptions.baseUrl}. */
 export const DEFAULT_BASE_URL = "https://api.muhkoo.dev";
@@ -86,6 +96,36 @@ export interface ClientOptions {
      * staging (`auth.staging.muhkoo.dev`) or a self-hosted deployment.
      */
     authBaseUrl?: string;
+    /**
+     * Offline support (`client.offline`) — transparent local caching + a durable
+     * write queue + CRDT sync. **On by default in browsers** (IndexedDB + Cache
+     * API present), a no-op everywhere else. Override to force it on/off or to
+     * supply a custom {@link OfflineStore}.
+     */
+    offline?: {
+        /** Force enable/disable. Default: auto-detect (browser on, Node off). */
+        enabled?: boolean;
+        /** Pluggable persistence. Default: IndexedDB in the browser. */
+        store?: OfflineStore;
+        /** Cache file-shard bytes in the Cache API. Default: true in the browser. */
+        cacheShards?: boolean;
+        /** Soft cap on durable-queue bytes before degrading to online-only. */
+        maxQueueBytes?: number;
+    };
+    /**
+     * Peer-to-peer block exchange (`client.space` files) among Space members,
+     * over WebRTC signaled on the Space relay. Best-effort — falls back to
+     * origin. **Opt-in** (browser only). Pass `workerFactory` to run the block
+     * engine off the main thread.
+     */
+    p2p?: {
+        enabled?: boolean;
+        workerFactory?: () => Worker;
+        iceServers?: RTCIceServer[];
+        maxPeers?: number;
+        /** Log P2P mesh + block-exchange activity to the console (staging/dev). */
+        debug?: boolean;
+    };
 }
 
 /**
@@ -115,6 +155,8 @@ export class Client {
     readonly agents: AgentsNamespace;
     /** Serverless functions — `client.functions.deploy(appId, …)`, etc. */
     readonly functions: FunctionsNamespace;
+    /** Offline cache + sync — `client.offline.status`, `client.offline.snapshot`, etc. */
+    readonly offline: OfflineManager;
 
     private readonly session: SessionState;
     private readonly http: HttpClient;
@@ -139,11 +181,42 @@ export class Client {
         this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
         this.session = new SessionState(options.sessionStore ?? defaultSessionStore());
 
+        // Offline layer. On by default in browsers, a no-op (NoopStore) in Node,
+        // Workers, and SSR — so existing consumers are unaffected unless they're
+        // in a browser that can actually cache.
+        const offlineEnabled = options.offline?.enabled ?? isOfflineCapable();
+        const offlineStore: OfflineStore = offlineEnabled
+            ? (options.offline?.store ?? new IndexedDbStore())
+            : new NoopStore();
+        this.offline = new OfflineManager({
+            store: offlineStore,
+            session: this.session,
+            enabled: offlineEnabled,
+        });
+
+        // Wrap fetch so every accelerator round-trip feeds the connectivity
+        // detector: a thrown fetch is the strongest "offline" signal, a 2xx the
+        // strongest "online" one. Only when offline support is active.
+        const baseFetch = options.fetch ?? globalThis.fetch?.bind(globalThis);
+        const reportingFetch: typeof fetch | undefined =
+            offlineEnabled && baseFetch
+                ? async (input, init) => {
+                      try {
+                          const res = await baseFetch(input, init);
+                          this.offline.reportFetchSuccess();
+                          return res;
+                      } catch (err) {
+                          this.offline.reportFetchFailure();
+                          throw err;
+                      }
+                  }
+                : options.fetch;
+
         this.http = new HttpClient({
             baseUrl: this.baseUrl,
             apiKey: options.apiKey,
             getSessionToken: () => this.session.token,
-            fetch: options.fetch,
+            fetch: reportingFetch,
             // Self-heal stale sessions: on a 401, try a silent re-auth (only
             // works while unlocked). If it can't, `recoverSession` fires the
             // session-expired event so the app can redirect to login.
@@ -156,26 +229,90 @@ export class Client {
         const wsBaseUrl = toWsBase(this.baseUrl);
         const authBaseUrl = (options.authBaseUrl ?? DEFAULT_AUTH_BASE_URL).replace(/\/+$/, "");
         this.auth = new AuthNamespace({ auth: authClient, circuits, session: this.session, authBaseUrl });
-        this.kv = new KvNamespace({ http: this.http, session: this.session, wsBaseUrl });
-        this.db = new DbNamespace({ http: this.http });
-        this.storage = new StorageNamespace({ http: this.http, baseUrl: this.baseUrl, kv: this.kv });
+        const deferShardUpload = offlineEnabled
+            ? (hash: string) => this.offline.deferShardUpload(hash)
+            : undefined;
+
+        const kvCache = offlineEnabled ? new KvCache(this.offline) : undefined;
+        this.kv = new KvNamespace({ http: this.http, session: this.session, wsBaseUrl, offline: kvCache });
+        if (offlineEnabled) this.offline.registerReplayer("kv", (e) => this.kv.replay(e));
+        const dbCache = offlineEnabled ? new DbCache(this.offline) : undefined;
+        this.db = new DbNamespace({ http: this.http, offline: dbCache });
+        if (offlineEnabled) this.offline.registerReplayer("db", (e) => this.db.replay(e));
+        this.storage = new StorageNamespace({
+            http: this.http,
+            baseUrl: this.baseUrl,
+            kv: this.kv,
+            shardCache: this.offline.fileCache,
+            deferShardUpload,
+        });
         this.message = new MessageNamespace({ http: this.http, session: this.session, wsBaseUrl });
 
         // Group keys are cached in the user's PersonalSpace (encrypted at rest
         // by client.kv), so a returning member hydrates without a fresh keyring
-        // round-trip. The server only ever sees the ciphertext.
+        // round-trip. The server only ever sees ciphertext.
+        //
+        // `encrypt: false` is deliberate: the keyring already ECIES-wraps each
+        // key to the member's identity (server-blind), and StorageCipher would
+        // additionally require the FULL unlocked identity (`requireIdentity()`),
+        // which is locked after a page reload — that coupling is exactly why the
+        // cache previously never read or persisted. The wrapped blobs are opaque.
         const spaceKeyCache: SpaceKeyCache = {
             loadKeys: (spaceId) => this.kv.get<Record<string, string>>("space-keys", spaceId),
-            saveKeys: (spaceId, keys) => this.kv.set("space-keys", spaceId, keys),
+            saveKeys: (spaceId, keys) => this.kv.set("space-keys", spaceId, keys, { encrypt: false }),
         };
+        // SDK-owned vault for the member's long-lived ratchet/space keypair.
+        // Stored at the personal-space `chat-keys` key (same key the app used to
+        // manage by hand), seed-wrapped, session-token authed (no snarkjs). This
+        // gives every app a STABLE keypair across reloads — no per-app scaffolding
+        // — so members don't re-admit each load and the group-key cache works.
+        const chatKeyStore: ChatKeyStore = {
+            get: async (key) => {
+                const c = this.session.commitment;
+                if (!c) return null;
+                const res = await this.http.post<{ value: unknown }>(
+                    `/api/personal/${encodeURIComponent(c)}/kv/${encodeURIComponent(key)}/get`,
+                    {},
+                );
+                return (res?.value ?? null) as WrappedPayload | null;
+            },
+            put: async (key, value) => {
+                const c = this.session.commitment;
+                if (!c) throw new Error("ChatKeyVault: no session — sign in first.");
+                await this.http.post(`/api/personal/${encodeURIComponent(c)}/kv/${encodeURIComponent(key)}`, { value });
+            },
+        };
+        const chatKeys = new ChatKeyVault(chatKeyStore);
+
         this.space = new SpaceNamespace({
             http: this.http,
             session: this.session,
             wsBaseUrl,
             cache: spaceKeyCache,
+            offline: this.offline,
+            p2p: options.p2p,
+            chatKeys,
         });
         this.agents = new AgentsNamespace({ http: this.http });
         this.functions = new FunctionsNamespace({ http: this.http, fnHostSuffix: options.functionsHostSuffix });
+
+        // Replay deferred shard uploads on reconnect. The bytes live in the
+        // Cache API keyed by hash; re-PUT them through a (defer-free) shard
+        // client so a failure surfaces as transient and the entry stays queued.
+        if (offlineEnabled && this.offline.fileCache) {
+            const replayShards = new ShardClient({
+                baseUrl: this.baseUrl,
+                pathPrefix: "/api/shards",
+                fetch: this.http.fetch,
+                cache: this.offline.fileCache,
+            });
+            this.offline.registerReplayer("file", async (entry) => {
+                const { hash } = entry.args as { hash: string };
+                const bytes = await this.offline.fileCache!.get(hash);
+                if (!bytes) return; // evicted from cache — nothing to replay
+                await replayShards.putShard(hash, bytes);
+            });
+        }
     }
 
     /** The currently signed-in user, or `null`. */

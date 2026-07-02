@@ -60,12 +60,14 @@ async function makeMember(
     transport: KeyringTransport,
     historyPolicy: HistoryPolicy,
     cache?: SpaceKeyCache,
+    /** Reuse a fixed identity keypair (a returning member keeps the same one). */
+    sharedKp?: CryptoKeyPair,
 ): Promise<Member> {
-    const kp = (await crypto.subtle.generateKey(
+    const kp = sharedKp ?? ((await crypto.subtle.generateKey(
         { name: "ECDH", namedCurve: "P-384" },
         true,
         ["deriveBits"],
-    )) as CryptoKeyPair;
+    )) as CryptoKeyPair);
     const pub = await exportEcdhPublicKey(kp.publicKey);
     const keyring = new SpaceKeyring({
         spaceId,
@@ -141,11 +143,19 @@ describe("SpaceKeyring — PersonalSpace cache", () => {
         const t = new MemTransport();
         const spaceId = "space-C";
 
-        const first = await makeMember("alice", spaceId, t, "static", cache);
+        // Same identity keypair across both sessions (the cache is ECIES-wrapped
+        // to the member's identity key, unwrapped with its private key).
+        const kp = (await crypto.subtle.generateKey(
+            { name: "ECDH", namedCurve: "P-384" },
+            true,
+            ["deriveBits"],
+        )) as CryptoKeyPair;
+
+        const first = await makeMember("alice", spaceId, t, "static", cache, kp);
         await first.keyring.bootstrapNew(); // persists epoch 0 to cache
 
         // A fresh keyring (e.g. next session) loads from cache.
-        const second = await makeMember("alice", spaceId, t, "static", cache);
+        const second = await makeMember("alice", spaceId, t, "static", cache, kp);
         expect(await second.keyring.loadFromCache()).toBe(true);
         expect(Array.from(second.keyring.keyForEpoch(0)!)).toEqual(
             Array.from(first.keyring.keyForEpoch(0)!),

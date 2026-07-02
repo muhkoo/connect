@@ -248,6 +248,32 @@ export class ZkAuth {
     }
 
     /**
+     * Boot helper — call this once on app start. Restores the session AND, when a
+     * passkey is enrolled, silently unlocks the identity via WebAuthn (recovering
+     * the master seed so the ratchet keypair rehydrates and `client.kv` works).
+     * The seed is never persisted, so a passkey (or password) is the only way to
+     * unlock after a reload — this keeps that off the app's plate.
+     *
+     * Returns `{ user, unlocked }`. When `unlocked` is false (no passkey, the
+     * user cancelled, or the browser required a gesture), prompt for a password
+     * and call {@link unlock}. Apps need no key-management scaffolding beyond this.
+     */
+    async resume(): Promise<{ user: AuthUser | null; unlocked: boolean }> {
+        const user = await this.restore();
+        if (!user) return { user: null, unlocked: false };
+        if (this.deps.session.isUnlocked) return { user, unlocked: true };
+        try {
+            const factors = await this.listFactors();
+            if (factors.some((f) => f.type === "passkey")) {
+                await this.loginWithPasskey(user.username);
+            }
+        } catch {
+            /* no passkey / cancelled / no user gesture — leave locked for a prompt */
+        }
+        return { user, unlocked: this.deps.session.isUnlocked };
+    }
+
+    /**
      * Re-derive identity material for an already-authenticated (restored)
      * session, so the client can decrypt storage and run the ratchet. Verifies
      * the password by checking the derived commitment matches the session's.

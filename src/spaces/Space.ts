@@ -22,7 +22,7 @@
 
 import { BroadcastChannel, BroadcastChannelEvents } from "../sessions/BroadcastChannel";
 import { FileStorage } from "../storage/FileStorage";
-import { ShardClient } from "../storage/transport/ShardClient";
+import { ShardClient, type ShardByteCache, type PeerBlockSource } from "../storage/transport/ShardClient";
 import type { FileManifest, FileStat } from "../storage/types";
 import { Message } from "../messaging/Message";
 import { Packet } from "../messaging/Packet";
@@ -33,6 +33,20 @@ import { KeyStore } from "../crypto/KeyStore";
 import type { JoinRequest, HistoryPolicy } from "./types";
 
 type Listener = (e: CustomEvent) => void;
+
+/**
+ * A P2P swarm attached to a Space (the p2p layer's `PeerNetwork` satisfies this
+ * structurally — Space never imports the p2p module). `exchange` is consulted by
+ * the Space's file `ShardClient`; `start` runs peer discovery on connect; `close`
+ * tears the mesh down.
+ */
+export interface AttachedPeerNetwork {
+    readonly exchange: PeerBlockSource;
+    start(): void;
+    close(): void;
+    gossip(data: Uint8Array): void;
+    onGossip(cb: (from: string, data: Uint8Array) => void): () => void;
+}
 
 export interface SpaceFileMetadata {
     name: string;
@@ -55,6 +69,45 @@ export interface SpaceMessageEvent {
      */
     handle: number;
     message: Message;
+    /**
+     * Sender-generated id, present on locally-originated messages (carried in the
+     * cleartext `cid` header). Lets the UI dedupe an optimistic send against its
+     * server echo, and the offline cache replace a pending entry with the real one.
+     */
+    clientId?: string;
+    /** True for an optimistic local send not yet acknowledged by the server. */
+    pending?: boolean;
+}
+
+/**
+ * One sealed message frame as cached for offline use. The `packet` is the
+ * ciphertext-bearing serialized {@link Packet} (decrypted lazily on read), so
+ * nothing readable is persisted. Structurally matches the offline layer's
+ * `MessageEntry`; declared here so the spaces module doesn't import `../offline`.
+ */
+export interface CachedSpaceMessage {
+    handle: string;
+    packet: string | null;
+    op: "msg" | "edit" | "delete";
+    clientId?: string;
+    hlc?: string;
+    pending?: boolean;
+    deleted?: boolean;
+}
+
+/** The offline adapter a {@link Space} drives. Implemented by `SpaceCache`. */
+export interface SpaceOfflineAdapter {
+    readonly enabled: boolean;
+    newClientId(): string;
+    nextHlc(): Promise<string>;
+    putMessage(spaceId: string, entry: CachedSpaceMessage): Promise<void>;
+    putDeleted(spaceId: string, handle: number): Promise<void>;
+    dropPending(spaceId: string, clientId: string): Promise<void>;
+    loadMessages(spaceId: string): Promise<CachedSpaceMessage[]>;
+    getCursor(spaceId: string): Promise<{ lastSeenHandle: number; oldestHandle: number } | null>;
+    observeHandle(spaceId: string, handle: number): Promise<void>;
+    enqueueFrame(spaceId: string, frame: unknown, clientId: string, hlc: string): Promise<void>;
+    registerCatchUp(task: () => Promise<void>): () => void;
 }
 
 /**
@@ -107,6 +160,12 @@ export interface SpaceDeps {
      * without a live websocket.
      */
     createChannel?: (url: string, myId: string) => SpaceChannelLike;
+    /** Offline shard-byte cache for room files (browser). */
+    shardCache?: ShardByteCache;
+    /** Queue a room-file shard PUT that couldn't reach the network. */
+    deferShardUpload?: (hash: string) => Promise<void>;
+    /** Offline message cache + send queue. Undefined ⇒ no offline behavior. */
+    offline?: SpaceOfflineAdapter;
 }
 
 /** The subset of {@link BroadcastChannel} a {@link Space} drives. */
@@ -131,6 +190,9 @@ export class Space {
     /** Per-instance event bus for fan-out events (isolated across spaces). */
     private readonly events = new EventTarget();
     private rawWired = false;
+    private catchUpUnsub: (() => void) | null = null;
+    /** Optional P2P swarm for this Space (block exchange among members). */
+    private peerNet: AttachedPeerNetwork | null = null;
 
     constructor(private readonly deps: SpaceDeps) {
         this.name = deps.name;
@@ -184,8 +246,16 @@ export class Space {
             if (this.deps.keyring) {
                 this.channel.on(BroadcastChannelEvents.CONNECTED, () => {
                     this.channel?.sendRaw({ name: this.deps.myId() });
+                    // Kick P2P peer discovery now the signaling channel is live
+                    // (re-runs on each reconnect to re-form the mesh).
+                    this.peerNet?.start();
                 });
                 this.wireFanout();
+                // Register offline catch-up once: on each reconnect the sync
+                // engine pages history forward to fill any gap we missed.
+                if (this.deps.offline?.enabled && !this.catchUpUnsub) {
+                    this.catchUpUnsub = this.deps.offline.registerCatchUp(() => this.catchUp());
+                }
             }
         }
         await this.channel.connect();
@@ -193,6 +263,32 @@ export class Space {
 
     disconnect(): void {
         this.channel?.disconnect();
+        this.catchUpUnsub?.();
+        this.catchUpUnsub = null;
+        this.peerNet?.close();
+        this.peerNet = null;
+    }
+
+    /** Attach a P2P swarm so this Space's file reads/writes can use peers. */
+    attachPeerNetwork(net: AttachedPeerNetwork): void {
+        this.peerNet = net;
+    }
+
+    /**
+     * Broadcast an app payload directly to connected Space peers over P2P,
+     * **bypassing the server** — for CRDT ops / high-frequency state (live
+     * cursors, presence, collaborative edits) you don't want to push through the
+     * relay. No-op when no P2P mesh is active (requires `client` `p2p`).
+     * Unlike {@link sendEphemeral} (server-relayed, metered, size-limited), this
+     * is peer-direct and fragments large payloads.
+     */
+    gossipToPeers(data: Uint8Array): void {
+        this.peerNet?.gossip(data);
+    }
+
+    /** Subscribe to peer gossip ({@link gossipToPeers}). Returns an unsubscribe fn. */
+    onPeerGossip(handler: (from: string, data: Uint8Array) => void): () => void {
+        return this.peerNet?.onGossip(handler) ?? (() => {});
     }
 
     /** Subscribe to a raw channel event. Buffered until `connect()` if early. */
@@ -249,7 +345,34 @@ export class Space {
         payload: unknown,
         opts: { channel?: string; contentType?: string } = {},
     ): Promise<void> {
-        this.sendRaw({ spaceMessage: await this.sealMessage(payload, opts.channel, opts.contentType) });
+        const offline = this.deps.offline;
+        if (!offline?.enabled) {
+            this.sendRaw({ spaceMessage: await this.sealMessage(payload, opts.channel, opts.contentType) });
+            return;
+        }
+        // Offline-aware path: stamp the message, cache it optimistically (so the
+        // UI can show it instantly via cachedMessages), then send if connected
+        // or durably queue it for replay on reconnect.
+        const clientId = offline.newClientId();
+        const hlc = await offline.nextHlc();
+        const packet = await this.sealMessage(payload, opts.channel, opts.contentType, clientId);
+        const frame = { spaceMessage: packet };
+        const entry = {
+            handle: provisionalSpaceKey(clientId),
+            packet,
+            op: "msg" as const,
+            clientId,
+            hlc,
+            pending: true,
+        };
+        if (this.isConnected()) {
+            this.sendRaw(frame); // send first — don't block the wire on IndexedDB
+            void offline.putMessage(this.id, entry); // optimistic cache off the hot path
+        } else {
+            // Offline: persist the optimistic entry + durable replay queue.
+            void offline.putMessage(this.id, entry);
+            await offline.enqueueFrame(this.id, frame, clientId, hlc);
+        }
     }
 
     /** Subscribe to decrypted fan-out messages. Returns an unsubscribe fn. */
@@ -269,7 +392,20 @@ export class Space {
      */
     async editMessage(handle: number, payload: unknown, opts: { channel?: string; contentType?: string } = {}): Promise<void> {
         const spaceMessage = await this.sealMessage(payload, opts.channel, opts.contentType);
-        this.sendRaw({ editSpaceMessage: { ts: handle, spaceMessage } });
+        const frame = { editSpaceMessage: { ts: handle, spaceMessage } };
+        const offline = this.deps.offline;
+        if (offline?.enabled) {
+            await offline.putMessage(this.id, {
+                handle: padSpaceHandle(handle),
+                packet: spaceMessage,
+                op: "edit",
+                hlc: await offline.nextHlc(),
+            });
+            if (this.isConnected()) this.sendRaw(frame);
+            else await offline.enqueueFrame(this.id, frame, offline.newClientId(), await offline.nextHlc());
+            return;
+        }
+        this.sendRaw(frame);
     }
 
     /**
@@ -278,7 +414,43 @@ export class Space {
      * original author. Receivers get an {@link onMessageDeleted} event.
      */
     async deleteMessage(handle: number): Promise<void> {
-        this.sendRaw({ deleteSpaceMessage: { ts: handle } });
+        const frame = { deleteSpaceMessage: { ts: handle } };
+        const offline = this.deps.offline;
+        if (offline?.enabled) {
+            await offline.putDeleted(this.id, handle);
+            if (this.isConnected()) this.sendRaw(frame);
+            else await offline.enqueueFrame(this.id, frame, offline.newClientId(), await offline.nextHlc());
+            return;
+        }
+        this.sendRaw(frame);
+    }
+
+    /**
+     * Decrypt and return the locally-cached message log for this space, in
+     * handle order (pending sends last). Works offline — the source is the
+     * IndexedDB cache populated by live frames + {@link history}. Apps call this
+     * on boot to paint instantly, then subscribe to {@link onMessage} for live
+     * updates. Returns `[]` when offline support is off.
+     */
+    async cachedMessages(): Promise<SpaceMessageEvent[]> {
+        const offline = this.deps.offline;
+        if (!offline?.enabled || !this.cipher) return [];
+        const entries = (await offline.loadMessages(this.id)).filter((e) => !e.deleted && e.packet);
+        // Decode in parallel (already verified when cached → skipVerify).
+        const decodedAll = await Promise.all(
+            entries.map((e) =>
+                this.decodeFrame(e.packet!, this.cipher!, /*isRawFrame*/ true, e.pending ? 0 : Number(e.handle), /*skipVerify*/ true),
+            ),
+        );
+        const out: SpaceMessageEvent[] = [];
+        for (let i = 0; i < decodedAll.length; i++) {
+            const decoded = decodedAll[i];
+            if (decoded) {
+                decoded.pending = entries[i].pending;
+                out.push(decoded);
+            }
+        }
+        return out;
     }
 
     /** Subscribe to in-place edits of persisted messages (new content at the same handle). */
@@ -302,9 +474,11 @@ export class Space {
      * indicators, presence, or live cursors are built on top of this. No-op if
      * the space isn't connected (ephemeral signals aren't worth queuing).
      */
-    sendEphemeral(subject: string, data: unknown): void {
+    sendEphemeral(subject: string, data: unknown, to?: string): void {
         if (!this.isConnected()) return;
-        this.sendRaw({ pub: { subject, data } });
+        // `to` (a member id) lets the server unicast a *directed* ephemeral
+        // instead of broadcasting; omitted ⇒ broadcast to the room (unchanged).
+        this.sendRaw({ pub: to ? { subject, data, to } : { subject, data } });
     }
 
     /** Subscribe to inbound ephemeral signals. `from` is the authenticated sender. */
@@ -335,16 +509,45 @@ export class Space {
         const url =
             `${this.deps.httpBaseUrl}/api/spaces/${encodeURIComponent(this.name)}/history` +
             (params.toString() ? `?${params}` : "");
+        // Temporary staging diagnostic: split fetch / directory / decode time.
+        const dbg = (() => { try { return globalThis.location?.hostname?.includes("staging"); } catch { return false; } })();
+        const mark = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+        const t0 = mark();
         const res = await this.deps.fetch(url);
         if (!res.ok) throw new Error(`Space.history: ${res.status} ${res.statusText}`);
         const body = (await res.json()) as { messages: string[]; nextCursor: string | null };
+        const tFetch = mark();
         // Warm the member directory once so historical senders' signatures verify.
-        // (refreshDirectory swallows its own transport errors.)
-        await this.deps.keyring?.refreshDirectory();
+        // Force past the cooldown — a history load is an explicit "get fresh".
+        await this.deps.keyring?.refreshDirectory({ force: true });
+        const tDir = mark();
+        // Decode the whole page in PARALLEL — each frame is an AES-GCM decrypt +
+        // ECDSA verify on the WebCrypto thread; doing them sequentially (await
+        // per message) serializes ~100 main↔crypto round-trips and dominates
+        // load time. Promise.all preserves input order.
+        const raws = body.messages ?? [];
+        const decodedAll = await Promise.all(raws.map((raw) => this.decodeFrame(raw, cipher)));
+        if (dbg) {
+            console.info(
+                `[muhkoo:space] history n=${raws.length} | fetch ${Math.round(tFetch - t0)}ms | dir ${Math.round(tDir - tFetch)}ms | decode ${Math.round(mark() - tDir)}ms`,
+            );
+        }
         const messages: SpaceMessageEvent[] = [];
-        for (const raw of body.messages ?? []) {
-            const decoded = await this.decodeFrame(raw, cipher);
-            if (decoded) messages.push(decoded);
+        for (let i = 0; i < decodedAll.length; i++) {
+            const decoded = decodedAll[i];
+            if (!decoded) continue;
+            messages.push(decoded);
+            // Warm the offline cache off the hot path (best-effort, non-blocking).
+            if (this.deps.offline?.enabled) {
+                try {
+                    const outer = JSON.parse(raws[i]) as { spaceMessage?: string };
+                    if (typeof outer.spaceMessage === "string") {
+                        void this.cacheFrame(outer.spaceMessage, decoded, "msg");
+                    }
+                } catch {
+                    /* unparseable history row — skip caching, still surfaced above */
+                }
+            }
         }
         return { messages, nextCursor: body.nextCursor ?? null };
     }
@@ -421,6 +624,9 @@ export class Space {
             baseUrl: this.deps.httpBaseUrl,
             pathPrefix: "/api/shards",
             fetch: this.deps.fetch,
+            cache: this.deps.shardCache,
+            deferUpload: this.deps.deferShardUpload,
+            peers: this.peerNet?.exchange,
         });
         return new FileStorage({ shards });
     }
@@ -440,8 +646,12 @@ export class Space {
         const f = frame as Record<string, unknown>;
         if (!f || typeof f !== "object") return;
         if (typeof f.spaceMessage === "string" && this.cipher) {
-            const decoded = await this.decodeFrame(f.spaceMessage as string, this.cipher, /*raw*/ true, Number(f.timestamp ?? 0));
-            if (decoded) this.emitEvent("message", decoded);
+            const handle = Number(f.timestamp ?? 0);
+            const decoded = await this.decodeFrame(f.spaceMessage as string, this.cipher, /*raw*/ true, handle);
+            if (decoded) {
+                this.emitEvent("message", decoded); // UI first
+                void this.cacheFrame(f.spaceMessage as string, decoded, "msg"); // cache off the hot path
+            }
             return;
         }
         if (f.editSpaceMessage && typeof f.editSpaceMessage === "object" && this.cipher) {
@@ -450,13 +660,23 @@ export class Space {
             const e = f.editSpaceMessage as { ts?: number; spaceMessage?: string };
             if (typeof e.spaceMessage === "string") {
                 const decoded = await this.decodeFrame(e.spaceMessage, this.cipher, /*raw*/ true, Number(e.ts ?? 0));
-                if (decoded) this.emitEvent("message-edited", decoded);
+                if (decoded) {
+                    this.emitEvent("message-edited", decoded);
+                    void this.cacheFrame(e.spaceMessage, decoded, "edit");
+                }
             }
             return;
         }
         if (f.deleteSpaceMessage && typeof f.deleteSpaceMessage === "object") {
             const d = f.deleteSpaceMessage as { ts?: number };
-            this.emitEvent("message-deleted", { handle: Number(d.ts ?? 0) });
+            const handle = Number(d.ts ?? 0);
+            this.emitEvent("message-deleted", { handle });
+            if (this.deps.offline?.enabled) {
+                // Cache the tombstone off the hot path.
+                void this.deps.offline.putDeleted(this.id, handle).then(() =>
+                    this.deps.offline?.observeHandle(this.id, handle),
+                );
+            }
             return;
         }
         if (f.pub && typeof f.pub === "object") {
@@ -476,7 +696,7 @@ export class Space {
             this.emitEvent("join-request", req);
             // A new member appeared — refresh the directory so their future
             // messages verify, and (if we hold the key) auto-admit them.
-            void this.deps.keyring?.refreshDirectory();
+            void this.deps.keyring?.refreshDirectory({ force: true });
             if (this.deps.autoAdmit !== false && this.deps.keyring?.hasAnyKey() && req.memberId !== this.deps.myId()) {
                 void this.deps.keyring.admit(req.memberId, req.identityEcdhPub).catch(() => {});
             }
@@ -493,12 +713,16 @@ export class Space {
      * serialized `Packet` string. Shared by send (a new message) and edit
      * (replacement content for an existing handle). Requires a keyring.
      */
-    private async sealMessage(payload: unknown, channel?: string, contentType?: string): Promise<string> {
+    private async sealMessage(payload: unknown, channel?: string, contentType?: string, clientId?: string): Promise<string> {
         const cipher = this.requireCipher(contentType);
         const message = new Message(payload);
         const headers = await cipher.seal(message.serialize());
         const source = this.deps.myId();
         const subject = channel ?? "default";
+        // Cleartext dedupe hint — lets the sender match its optimistic entry to
+        // the server echo. Not part of the signed canonical form (it carries no
+        // authority); worst case a stale hint just shows a transient duplicate.
+        if (clientId) headers.cid = clientId;
         // Sign with our identity ECDSA key so receivers can verify authorship
         // end-to-end (independent of the relay's `source` stamp).
         const authPriv = KeyStore.getInstance().getAuthKeyPair(source)?.privateKey;
@@ -524,6 +748,7 @@ export class Space {
         cipher: SpacePacketCipher,
         isRawFrame = false,
         serverTs = 0,
+        skipVerify = false,
     ): Promise<SpaceMessageEvent | null> {
         try {
             let packetJson = input;
@@ -541,8 +766,9 @@ export class Space {
             // by `source`'s identity ECDSA key (looked up in the member
             // directory). Drop anything unsigned, signed by an unknown member,
             // or whose signature doesn't match — this defeats both member
-            // impersonation and a relay rewriting `source`.
-            if (!(await this.verifySender(packet))) return null;
+            // impersonation and a relay rewriting `source`. Skipped only when
+            // re-reading from the local cache (already verified before caching).
+            if (!skipVerify && !(await this.verifySender(packet))) return null;
 
             const serialized = await cipher.open(packet.headers);
             if (serialized === null) return null; // epoch key we don't hold
@@ -553,6 +779,7 @@ export class Space {
                 epoch: Number(packet.headers?.epoch ?? 0),
                 contentType: packet.headers?.contentType as string | undefined,
                 handle,
+                clientId: packet.headers?.cid as string | undefined,
                 message,
             };
         } catch (err) {
@@ -593,6 +820,58 @@ export class Space {
         return verifySpaceMessage(canonical, sig, key);
     }
 
+    /** Persist a decoded live/history/edit frame to the offline cache. */
+    private async cacheFrame(packet: string, decoded: SpaceMessageEvent, op: "msg" | "edit"): Promise<void> {
+        const offline = this.deps.offline;
+        if (!offline?.enabled) return;
+        // An incoming real message supersedes any optimistic pending entry.
+        if (decoded.clientId) await offline.dropPending(this.id, decoded.clientId);
+        await offline.putMessage(this.id, {
+            handle: padSpaceHandle(decoded.handle),
+            packet,
+            op,
+            clientId: decoded.clientId,
+        });
+        await offline.observeHandle(this.id, decoded.handle);
+    }
+
+    /**
+     * Inbound reconciliation run on reconnect: page the server's forward delta
+     * (`?since=<lastSeenHandle>`) to the head, pulling exactly the messages that
+     * landed while we were offline into the cache. Bounded so a long absence
+     * can't page forever. Falls back gracefully if the endpoint is unavailable.
+     */
+    private async catchUp(): Promise<void> {
+        const offline = this.deps.offline;
+        if (!offline?.enabled || !this.cipher) return;
+        const cursor = await offline.getCursor(this.id);
+        let since = String(cursor?.lastSeenHandle ?? 0);
+        // Warm the member directory once so historical senders' signatures verify.
+        await this.deps.keyring?.refreshDirectory({ force: true });
+        for (let page = 0; page < 50; page++) {
+            const url =
+                `${this.deps.httpBaseUrl}/api/spaces/${encodeURIComponent(this.name)}/history` +
+                `?since=${encodeURIComponent(since)}&limit=100`;
+            const res = await this.deps.fetch(url);
+            if (!res.ok) break;
+            const body = (await res.json()) as { messages: string[]; nextCursor: string | null };
+            for (const raw of body.messages ?? []) {
+                const decoded = await this.decodeFrame(raw, this.cipher);
+                if (!decoded) continue;
+                try {
+                    const outer = JSON.parse(raw) as { spaceMessage?: string };
+                    if (typeof outer.spaceMessage === "string") {
+                        await this.cacheFrame(outer.spaceMessage, decoded, "msg");
+                    }
+                } catch {
+                    /* unparseable row — skip */
+                }
+            }
+            if (!body.nextCursor) break;
+            since = body.nextCursor;
+        }
+    }
+
     private emitEvent(type: string, detail: unknown): void {
         this.events.dispatchEvent(new CustomEvent(type, { detail }));
     }
@@ -614,6 +893,20 @@ export class Space {
 
 function delay(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Zero-pad a numeric server handle for use as a cache key, so string-ordered
+ * keys sort in handle order. Must match the offline layer's `padHandle`.
+ */
+function padSpaceHandle(handle: number): string {
+    return String(Math.max(0, Math.floor(handle))).padStart(16, "0");
+}
+
+/** Cache key for an un-acked optimistic send. Must match the offline layer's
+ *  `provisionalHandle` (sorts after every real, zero-padded handle). */
+function provisionalSpaceKey(clientId: string): string {
+    return `~local:${clientId}`;
 }
 
 export default Space;

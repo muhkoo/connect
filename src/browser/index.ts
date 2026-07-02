@@ -42,6 +42,11 @@ export * from "../core/namespaces/FunctionsNamespace";
 // App-describing decorators (@MuhkooAgent/@MuhkooSpace/@MuhkooDB/@MuhkooFunction
 // + ejectAgentPrompt). Cherry-picked like the rest of core for the dts plugin.
 export * from "../core/agents/describe";
+// Offline layer — caching + durable write queue + CRDT sync (`client.offline`).
+// Flat `export *` for the same dts-plugin reason as the Client exports above.
+export * from "../offline";
+// P2P layer — private Space-scoped peer block exchange over WebRTC. Opt-in.
+export * from "../p2p";
 // Fan-out group-encryption layer (Space, keyring, cipher). Flat `export *`
 // for the same dts-plugin reason as the Client exports above.
 export * from "../spaces/Space";

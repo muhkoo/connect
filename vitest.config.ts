@@ -26,6 +26,8 @@ export default defineConfig({
       "**/tests/core/agentDescribe.test.ts",
       // HTTP credential plumbing + session recovery, WebSocket transport
       "**/tests/core/HttpClient.test.ts",
+      // SDK-owned ratchet-keypair vault (stable keypair across reloads)
+      "**/tests/core/ChatKeyVault.test.ts",
       "**/tests/transport/WSTransport.test.ts",
       // "**/ecdh.test.ts",
       "**/tests/crypto/ratchet.test.ts",
@@ -52,6 +54,10 @@ export default defineConfig({
       "**/tests/storage/FileStorage.test.ts",
       // Space fan-out group-encryption layer
       "**/tests/spaces/**/*.test.ts",
+      // Offline layer — HLC clock, CRDT primitives, IndexedDB store, sync
+      "**/tests/offline/**/*.test.ts",
+      // P2P layer — block-exchange protocol, engine, ShardClient peer hook
+      "**/tests/p2p/**/*.test.ts",
       // "**/session-manager.test.ts",
       // "**/api-client.test.ts",
       // Salvaged tests

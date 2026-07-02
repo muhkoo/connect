@@ -22,18 +22,22 @@
  * small structured values. `query()` is intentionally deferred.
  */
 
-import type { HttpClient } from "../HttpClient";
+import { HttpClient, HttpError } from "../HttpClient";
 import type { SessionState } from "../Session";
 import type { ZkIdentity } from "../../auth/identity";
 import { StorageCipher } from "../../crypto/StorageCipher";
 import { WSTransport } from "../../transport/WSTransport";
 import { EventCoreEvents } from "../../events";
+import type { KvCache } from "../../offline/KvCache";
+import type { QueueEntry } from "../../offline/store/OfflineStore";
 
 export interface KvNamespaceDeps {
     http: HttpClient;
     session: SessionState;
     /** WebSocket base (ws/wss) for the change feed; derived from baseUrl. */
     wsBaseUrl: string;
+    /** Offline cache + queue. Undefined ⇒ no offline behavior (network-only). */
+    offline?: KvCache;
 }
 
 export interface SetOptions {
@@ -55,46 +59,123 @@ interface ChangeFrame {
     key: string;
     op: "set" | "delete";
     value?: unknown;
+    /** HLC stamp (present once the accelerator's LWW support is deployed). */
+    hlc?: string;
 }
 
 export class KvNamespace {
     private cipher: StorageCipher | null = null;
     private cipherIdentity: ZkIdentity | null = null;
 
-    constructor(private readonly deps: KvNamespaceDeps) {}
+    constructor(private readonly deps: KvNamespaceDeps) {
+        // Replay queued kv writes on reconnect by re-issuing the original request.
+        if (deps.offline?.enabled) {
+            // Registration is on the manager via the cache's manager handle; the
+            // Client wires the replayer (it owns the manager) — see Client.ts.
+        }
+    }
+
+    /** Replay one queued kv mutation (called by the sync engine). */
+    async replay(entry: QueueEntry): Promise<void> {
+        const a = entry.args as { collection: string; id: string; stored?: unknown; hlc: string };
+        if (entry.method === "set") {
+            await this.deps.http.post(this.kvPath(a.collection, a.id), { value: a.stored, hlc: a.hlc });
+        } else {
+            await this.deps.http.del(this.kvPath(a.collection, a.id), { hlc: a.hlc });
+        }
+    }
 
     /** Store `value` under `collection`/`id` (encrypted at rest by default). */
     async set<T = unknown>(collection: string, id: string, value: T, opts?: SetOptions): Promise<void> {
         const encrypt = opts?.encrypt !== false;
         const stored = encrypt ? await this.getCipher().encrypt(value) : value;
-        await this.deps.http.post(this.kvPath(collection, id), { value: stored });
+        const offline = this.deps.offline;
+        if (!offline?.enabled) {
+            await this.deps.http.post(this.kvPath(collection, id), { value: stored });
+            return;
+        }
+        const fullKey = `${collection}/${id}`;
+        const hlc = await offline.nextHlc();
+        await offline.writeLocal(this.commitment(), fullKey, stored, hlc);
+        try {
+            await this.deps.http.post(this.kvPath(collection, id), { value: stored, hlc });
+        } catch (err) {
+            if (err instanceof HttpError) throw err; // server reachable + refused
+            await offline.enqueue("set", { collection, id, stored, hlc }, hlc, offline.newClientId());
+        }
     }
 
     /** Fetch the value at `collection`/`id`, or `null` if absent. */
     async get<T = unknown>(collection: string, id: string): Promise<T | null> {
-        const res = await this.deps.http.post<{ value: unknown }>(
-            `${this.kvPath(collection, id)}/get`,
-            {},
-        );
-        return this.decode<T>(res.value);
+        const offline = this.deps.offline;
+        if (!offline?.enabled) {
+            const res = await this.deps.http.post<{ value: unknown }>(`${this.kvPath(collection, id)}/get`, {});
+            return this.decode<T>(res.value);
+        }
+        const fullKey = `${collection}/${id}`;
+        try {
+            const res = await this.deps.http.post<{ value: unknown; hlc?: string }>(
+                `${this.kvPath(collection, id)}/get`,
+                {},
+            );
+            // Refresh the cache from the authoritative read (merge by HLC).
+            await offline.mergeRemote(
+                this.commitment(),
+                fullKey,
+                res.value ?? null,
+                res.value == null ? "delete" : "set",
+                res.hlc,
+            );
+            return this.decode<T>(res.value);
+        } catch (err) {
+            if (err instanceof HttpError) throw err; // a real server error, not offline
+            const entry = await offline.read(this.commitment(), fullKey);
+            if (!entry || entry.deleted) return null;
+            return this.decode<T>(entry.value);
+        }
     }
 
     /** Delete `collection`/`id`. Returns whether the key existed. */
     async delete(collection: string, id: string): Promise<boolean> {
-        const res = await this.deps.http.del<{ ok: boolean; existed: boolean }>(
-            this.kvPath(collection, id),
-            {},
-        );
-        return Boolean(res.existed);
+        const offline = this.deps.offline;
+        if (!offline?.enabled) {
+            const res = await this.deps.http.del<{ ok: boolean; existed: boolean }>(this.kvPath(collection, id), {});
+            return Boolean(res.existed);
+        }
+        const fullKey = `${collection}/${id}`;
+        const hlc = await offline.nextHlc();
+        await offline.deleteLocal(this.commitment(), fullKey, hlc);
+        try {
+            const res = await this.deps.http.del<{ ok: boolean; existed: boolean }>(this.kvPath(collection, id), { hlc });
+            return Boolean(res.existed);
+        } catch (err) {
+            if (err instanceof HttpError) throw err;
+            await offline.enqueue("delete", { collection, id, hlc }, hlc, offline.newClientId());
+            return true; // optimistic
+        }
     }
 
     /** List the ids present in `collection`. */
     async list(collection: string): Promise<string[]> {
-        const res = await this.deps.http.post<{ keys: string[] }>(this.spacePath("/list"), {});
         const prefix = `${collection}/`;
-        return (res.keys ?? [])
-            .filter((k) => k.startsWith(prefix))
-            .map((k) => k.slice(prefix.length));
+        const offline = this.deps.offline;
+        const fromKeys = (keys: string[]) =>
+            keys.filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+        if (!offline?.enabled) {
+            const res = await this.deps.http.post<{ keys: string[] }>(this.spacePath("/list"), {});
+            return fromKeys(res.keys ?? []);
+        }
+        try {
+            const res = await this.deps.http.post<{ keys: string[] }>(this.spacePath("/list"), {});
+            // Union with cached live keys so un-synced offline creates still show.
+            const cached = await offline.liveKeys(this.commitment());
+            return [...new Set([...(res.keys ?? []), ...cached].filter((k) => k.startsWith(prefix)))].map((k) =>
+                k.slice(prefix.length),
+            );
+        } catch (err) {
+            if (err instanceof HttpError) throw err;
+            return fromKeys(await offline.liveKeys(this.commitment()));
+        }
     }
 
     /** Reserved — server-side query is deferred (see the overhaul plan). */
@@ -160,6 +241,17 @@ export class KvNamespace {
         if (slash < 0) return;
         const collection = frame.key.slice(0, slash);
         const id = frame.key.slice(slash + 1);
+
+        // Keep the offline cache warm from the realtime feed (merge by HLC).
+        if (this.deps.offline?.enabled) {
+            await this.deps.offline.mergeRemote(
+                this.commitment(),
+                frame.key,
+                frame.op === "set" ? frame.value ?? null : null,
+                frame.op,
+                frame.hlc,
+            );
+        }
 
         const data = frame.op === "set" ? await this.decode<T>(frame.value) : null;
         handler({ collection, id, type: frame.op, data });

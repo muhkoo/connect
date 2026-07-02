@@ -4,6 +4,88 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.10.1-alpha.0 — CLI cross-origin isolation support (2026-07-01)
+
+### Added
+
+- **Per-app cross-origin isolation** is now a self-serve hosting setting. Apps
+  that need `SharedArrayBuffer` (multi-threaded WebAssembly — e.g. `ffmpeg.wasm`)
+  can opt in without any platform changes: set `crossOriginIsolation: true` in
+  the provision spec (`muhkoo provision`) or toggle it in the portal Hosting
+  card. The platform then serves the app's document with `Cross-Origin-Opener-Policy:
+  same-origin` + `Cross-Origin-Embedder-Policy: credentialless`, so the runtime's
+  `crossOriginIsolated` check passes and threaded wasm cores load automatically.
+  No SDK API change — this is a version-lockstep bump carrying the CLI feature.
+
+## 0.10.0-alpha.0 — Stable member keypair across reloads + `resume()` (2026-07-01)
+
+### Added
+
+- **`client.auth.zk.resume()`** — one boot call that restores the session and,
+  when a passkey is enrolled, silently unlocks the identity via WebAuthn (the
+  master seed is recovered, never persisted). Returns `{ user, unlocked }` so the
+  app prompts for a password only when there's no passkey. Replaces the manual
+  `restore()` + key-hydration scaffolding apps used to hand-roll.
+- **SDK-owned ratchet-keypair vault.** The member's long-lived ratchet/space
+  keypair is now provisioned + seed-wrapped + rehydrated by the SDK itself
+  (`SpaceNamespace` rehydrates it from the personal-space `chat-keys` blob before
+  opening a Space). Every app gets a **stable member keypair across page
+  reloads** with no per-app code — so members stop re-admitting to Spaces on
+  every load and the server-blind group-key cache round-trips.
+
+### Fixed
+
+- A reloaded, unlocked client no longer regenerates a fresh keypair each session
+  (which forced a full keyring re-admit and defeated the group-key cache).
+
+## 0.9.0-alpha.0 — P2P file transfer (`client` `p2p` option) (2026-06-26)
+
+### Added
+
+- **Peer-to-peer file-shard exchange among Space members (opt-in).** With
+  `new Client({ p2p: { enabled: true } })`, a Space's file reads/writes try the
+  other members first over **WebRTC data channels** before spending origin
+  bandwidth — a private, Space-scoped swarm. Best-effort: a miss or unreachable
+  peer falls back to origin (R2), so it never blocks a read.
+  - **Private + authenticated**: signaling rides the Space's existing ephemeral
+    relay (no new server channel); the sender is server-stamped, so peers can't
+    spoof identity. Blocks are AES-GCM ciphertext addressed by SHA-256 — a peer
+    can serve them but can't read them, and an inbound block is hash-verified
+    before use (a tampered block is dropped and origin is used instead).
+  - **Bitswap-lite protocol** (`WANT`/`HAVE`/`BLOCK`/`CANCEL`) with a
+    pluggable `PeerTransport` so a libp2p/Helia transport can slot in later
+    without touching the engine.
+  - **Off-thread by default**: the block engine (hashing, blockstore, protocol)
+    runs in a **Web Worker** — shipped as a separate chunk and exposed via the
+    `@muhkoo/connect/p2p-worker` export (keys never enter the worker; only
+    encrypted blocks cross, as transferables). `PeerNetwork` builds it
+    automatically (or accepts `p2p.workerFactory`), falling back to an
+    in-process engine where a worker can't be constructed.
+  - New exports: `PeerNetwork`, `PeerExchange`, `WebRtcTransport`,
+    `SpaceSignaler`, `BlockEngine`, `isP2pCapable`, and the `protocol` codec.
+- **Peer data channel (`space.gossipToPeers` / `space.onPeerGossip`).** A direct,
+  **server-bypassing** broadcast to connected Space peers over the same mesh
+  (multiplexed alongside block exchange) — for CRDT ops and high-frequency state
+  (live cursors, presence, collaborative edits) you don't want to push through
+  the relay. Fragments large payloads; single-hop (no re-forwarding).
+- **Directed ephemerals**: `space.sendEphemeral(subject, data, to?)` — with a
+  `to` member id the accelerator unicasts to that member instead of
+  broadcasting (used for WebRTC signaling; backward-compatible).
+
+## 0.8.0-alpha.0 — Offline support (`client.offline`) (2026-06-24)
+
+### Added
+
+- **Transparent offline support, on by default in browsers.** A new layer caches every data domain locally, lets the app keep reading and writing with no connection, and reconciles automatically on reconnect — all behind the scenes. It's a no-op in Node/Workers/SSR (a `NoopStore`), so existing non-browser consumers are unaffected. Disable or customize via `new Client({ offline: { enabled, store, cacheShards, maxQueueBytes } })`.
+  - **`client.offline.status`** (`online | offline | syncing`) and **`client.offline.onStatusChange(cb)`** — connectivity fused from `navigator.onLine`, real fetch outcomes, and the websocket lifecycle. Also emitted on `EventCore` (`ONLINE`/`OFFLINE`/`SYNCING`/`SYNC_PROGRESS`/`SYNC_COMPLETE`/`SYNC_ERROR`).
+  - **`client.offline.snapshot`** — encrypted, local app-state cache (`save`/`load`/`delete`/`list`) for repainting instantly on a cold offline boot (last route, open space, drafts). Encrypted at rest with the identity-derived key; `load` returns `null` while locked.
+- **Spaces messages offline.** Inbound + `history()` messages are cached (sealed ciphertext at rest); **`space.cachedMessages()`** decodes them for instant offline hydrate. Sends made while disconnected are applied optimistically and durably queued, then replayed on reconnect; a forward catch-up pulls anything missed while away. Messages converge with no server change (server-assigned monotonic handle).
+- **File storage offline.** Shard bytes are cached in the Cache API (content-addressed → self-validating); reads serve cache-first and Reed–Solomon recovers from cached shards, and uploads made offline are queued and replayed. Convergent by construction (content addressing + idempotent PUT).
+- **`client.kv` offline.** Cache-first reads, optimistic writes, a durable replay queue, and a realtime-feed merge. Conflicts resolve as a **CRDT LWW-Register** keyed by a Hybrid Logical Clock; deletes are causal tombstones. Cross-device convergence is honored server-side (the accelerator selects by HLC and tombstones deletes, server-blind to the encrypted value).
+- **`client.db` offline.** `get`/`query` are cached (offline reads), writes are optimistic + queued + replayed, and each write carries per-column HLC stamps (`_hlc`). The accelerator now merges **per-column LWW** (a private `_muhkoo_crdt` sidecar): two devices editing different columns of the same row both keep their edits, same-column conflicts resolve by HLC, and deletes are causal tombstones (a stale write can't resurrect a removed row). Legacy clients (no `_hlc`) keep last-writer-by-arrival.
+- **Faster reconnect catch-up.** Spaces pull a forward delta (`GET …/history?since=<handle>`) from the last-seen handle to the head, instead of re-reading the tail backwards.
+- Conflict-resolution primitives are exported for advanced use: `HLC`, `compareHlc`, `mergeRegister`, `mergeMap`, `materializeRow`, `IndexedDbStore`, `NoopStore`, `OfflineManager`, and friends.
+
 ## 0.7.0-alpha.5 — Security hardening (2026-06-18)
 
 ### Security

@@ -66,6 +66,13 @@ export type {
     FunctionsNamespaceDeps,
 } from "./namespaces/FunctionsNamespace";
 
+// Offline layer — transparent caching + durable write queue + CRDT sync
+// (`client.offline`). On by default in browsers, a no-op in Node/Workers.
+export * from "../offline";
+
+// P2P layer — private Space-scoped peer block exchange over WebRTC. Opt-in.
+export * from "../p2p";
+
 // App-describing decorators — declare your agent-facing surface in code and
 // eject a system prompt for a Programmable Agent.
 export {

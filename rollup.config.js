@@ -75,6 +75,28 @@ const jsConfig = {
   ].filter(Boolean),
 };
 
+// P2P block-engine Web Worker — emitted (browser build only) as a SEPARATE
+// chunk so `PeerNetwork` can spin it up via `new Worker(new URL(...))`. Kept out
+// of the main bundle (nothing imports it directly); ships alongside index.js.
+const workerConfig = isBrowser && {
+  input: "src/p2p/worker/blockEngine.worker.ts",
+  external: externalFn,
+  output: {
+    file: "dist/browser/blockEngine.worker.js",
+    format: "es",
+    sourcemap: true,
+    inlineDynamicImports: true,
+  },
+  plugins: [
+    wasm({ targetEnv: "auto-inline" }),
+    replace({
+      "process.env.npm_package_version": JSON.stringify(packageJson.version),
+      preventAssignment: true,
+    }),
+    typescript({ clean: true }),
+  ],
+};
+
 // Complete DTS build config.
 // Build types from the browser entry point (not `src/index.ts`) so the
 // declared shape matches what consumers actually see at runtime — the
@@ -91,4 +113,4 @@ const dtsComplete = {
   plugins: [dts()],
 };
 
-export default [jsConfig, dtsComplete];
+export default [jsConfig, workerConfig, dtsComplete].filter(Boolean);
