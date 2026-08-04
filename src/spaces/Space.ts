@@ -606,16 +606,75 @@ export class Space {
     async putFile(
         file: File | Blob | Uint8Array,
         metadata: SpaceFileMetadata,
-        opts: { onProgress?: (completed: number, total: number) => void } = {},
+        opts: {
+            onProgress?: (completed: number, total: number) => void;
+            /**
+             * Return the manifest as soon as shards are cached + announced to the
+             * mesh, uploading to origin in the background. Lets a peer/worker start
+             * pulling the file over P2P immediately instead of waiting out the full
+             * origin upload. Requires an offline cache (browser); ignored without.
+             */
+            backgroundUpload?: boolean;
+        } = {},
     ): Promise<{ manifest: FileManifest; stat: FileStat }> {
-        return this.fileStorage().writeFileToShards({ data: file, metadata, onProgress: opts.onProgress });
+        const result = await this.fileStorage(opts.backgroundUpload)
+            .writeFileToShards({ data: file, metadata, onProgress: opts.onProgress });
+        // Declare this manifest's shards to the accelerator: attributes the stored
+        // bytes to the owning app (so storage is never unmetered) and reference-
+        // counts the shards for GC. Public shard hashes only — the per-chunk keys
+        // stay inside the manifest, which the caller keeps in a vault/Space.
+        await this.commitShards(result.manifest, "commit");
+        return result;
     }
 
     async getFile(manifest: FileManifest): Promise<{ data: Uint8Array; stat: FileStat }> {
         return this.fileStorage().readFileFromShards(manifest);
     }
 
-    private fileStorage(): FileStorage {
+    /** Streaming read: async-iterate a stored file's decrypted chunks in order,
+     *  never holding the whole file in memory. Use for multi-GB files (a single
+     *  `Uint8Array` can't hold them) — e.g. a transcoder piping the raw to a temp
+     *  file. Same peer/origin shard sourcing as {@link getFile}. */
+    getFileStream(manifest: FileManifest): AsyncGenerator<Uint8Array> {
+        return this.fileStorage().readChunksFromShards(manifest);
+    }
+
+    /** Declare a file's shards (ref++ + meter) for a manifest already stored —
+     *  used to back-fill accounting for files written before commit existed, or to
+     *  register a manifest received via sharing. `putFile` already commits new
+     *  writes automatically; this is the explicit form. */
+    async commitFile(manifest: FileManifest): Promise<void> {
+        await this.commitShards(manifest, "commit");
+    }
+
+    /** Release a file's shards (ref--) when the owner deletes or unshares it. At
+     *  zero references a shard enters a retention window, then is GC'd. Idempotent-
+     *  ish: safe to call once per manifest the owner drops. */
+    async releaseFile(manifest: FileManifest): Promise<void> {
+        await this.commitShards(manifest, "release");
+    }
+
+    /** Commit/release a manifest's shards with the accelerator (metering + refcount). */
+    private async commitShards(manifest: FileManifest, action: "commit" | "release"): Promise<void> {
+        const hashes = manifest.chunks.flatMap((c) => c.shardHashes);
+        if (hashes.length === 0) return;
+        const body = JSON.stringify({ hashes, bytes: manifest.size });
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const res = await this.deps.fetch(`${this.deps.httpBaseUrl}/api/storage/${action}`, {
+                    method: "POST", headers: { "Content-Type": "application/json" }, body,
+                });
+                if (res.ok) return;
+            } catch { /* retry */ }
+            await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        }
+        // Best-effort: a missed commit leaves the shards to orphan-GC (still not
+        // durable-unmetered long-term); a missed release just delays GC. Reconciled
+        // by the platform sweep. Don't fail the caller's write on a metering hiccup.
+        console.warn(`[muhkoo] storage ${action} did not confirm for ${hashes.length} shard(s)`);
+    }
+
+    private fileStorage(backgroundUpload = false): FileStorage {
         // Global, content-addressed shard store — same store `client.storage`
         // uses, so a file shared into a channel resolves from anywhere by
         // manifest. (Shards are encrypted ciphertext; the manifest is the
@@ -627,6 +686,7 @@ export class Space {
             cache: this.deps.shardCache,
             deferUpload: this.deps.deferShardUpload,
             peers: this.peerNet?.exchange,
+            backgroundUpload,
         });
         return new FileStorage({ shards });
     }

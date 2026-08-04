@@ -31,6 +31,14 @@ export interface HttpClientOptions {
      * shared-space (messaging) websockets.
      */
     apiKey?: string;
+    /**
+     * A scoped, expiring **access token** (`mk_<env>_at_…`) — the non-ZK
+     * machine-to-machine credential. It resolves through the SAME accelerator
+     * path as an app key and rides the same `X-Muhkoo-Key` header; when present
+     * it takes precedence over {@link apiKey}. Use it for server-side / CI
+     * callers that shouldn't carry the app's publishable key.
+     */
+    accessToken?: string;
     /** Returns the current user session token, or `null` when logged out. */
     getSessionToken?: () => string | null;
     /** Custom fetch — defaults to `globalThis.fetch`. */
@@ -87,6 +95,8 @@ export class HttpClient {
     /** Origin of {@link baseUrl} — credentials are only attached same-origin. */
     private readonly baseOrigin: string;
     private readonly apiKey: string | null;
+    /** Scoped machine access token — takes precedence over {@link apiKey} on `X-Muhkoo-Key`. */
+    private readonly accessToken: string | null;
     private readonly getSessionToken: () => string | null;
     private readonly onUnauthorized: (() => Promise<boolean>) | null;
     private readonly fetchFn: typeof fetch;
@@ -96,6 +106,7 @@ export class HttpClient {
         this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
         try { this.baseOrigin = new URL(this.baseUrl).origin; } catch { this.baseOrigin = ""; }
         this.apiKey = opts.apiKey ?? null;
+        this.accessToken = opts.accessToken ?? null;
         this.getSessionToken = opts.getSessionToken ?? (() => null);
         this.onUnauthorized = opts.onUnauthorized ?? null;
 
@@ -120,7 +131,10 @@ export class HttpClient {
         // server-reflected path that escapes `baseUrl`) must NOT receive the app
         // key or session token, or it becomes a token-exfiltration vector.
         if (this.isSameOrigin(input)) {
-            if (this.apiKey) headers.set("X-Muhkoo-Key", this.apiKey);
+            // Access token and app key resolve through the same accelerator path
+            // and ride the same header; the access token takes precedence.
+            const key = this.accessToken ?? this.apiKey;
+            if (key) headers.set("X-Muhkoo-Key", key);
             const token = this.getSessionToken();
             if (token) headers.set("X-Muhkoo-Session", token);
         }

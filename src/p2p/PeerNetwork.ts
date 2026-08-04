@@ -92,6 +92,7 @@ export class PeerNetwork {
             new WebRtcTransport(this.signaler, opts.myId, {
                 iceServers: opts.iceServers,
                 maxPeers: opts.maxPeers,
+                debug: opts.debug,
             });
         this.host = buildEngineHost(opts);
 

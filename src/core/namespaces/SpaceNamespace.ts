@@ -73,6 +73,11 @@ export class SpaceNamespace {
     private spaceCache?: SpaceCache;
     /** Spaces built this session, by id — used to route offline send replays. */
     private readonly openSpaces = new Map<string, Space>();
+    /** Unique id for THIS device/session — the P2P peer identity. A user's own
+     *  devices share a member id, so the mesh MUST distinguish them by this or a
+     *  device treats its siblings' signals as its own echo and never connects. */
+    private readonly deviceId =
+        `peer-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)}`;
 
     constructor(private readonly deps: SpaceNamespaceDeps) {
         if (deps.offline?.enabled) {
@@ -290,7 +295,7 @@ export class SpaceNamespace {
             space.attachPeerNetwork(
                 new PeerNetwork({
                     space,
-                    myId: memberId,
+                    myId: this.deviceId, // per-device peer id, NOT the shared member id
                     workerFactory: this.deps.p2p.workerFactory,
                     iceServers: this.deps.p2p.iceServers,
                     maxPeers: this.deps.p2p.maxPeers,

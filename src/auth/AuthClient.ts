@@ -72,6 +72,10 @@ export interface VaultFactor {
     createdAt?: number;
     /** Display hint for gated factors ("m•••@gmail.com") — list responses only. */
     masked?: string;
+    /** Passkey's origin (RP id) — list responses only. A passkey only unlocks
+     *  from this host or a subdomain of it, so apps on several hosts enroll one
+     *  per origin. */
+    rpId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,8 +214,12 @@ export class AuthClient {
         username: string,
         factorType: VaultFactor["type"],
         verifyToken?: string,
+        /** Passkeys are per-origin: naming the caller's host returns THAT origin's
+         *  passkey instead of whichever was enrolled first (which WebAuthn would
+         *  refuse). Ignored for other factor types. */
+        rpId?: string,
     ): Promise<{ factor: VaultFactor | null }> {
-        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault`, this.json("POST", { username, factorType, verifyToken }));
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault`, this.json("POST", { username, factorType, verifyToken, rpId }));
         return await this.parse<{ factor: VaultFactor | null }>("vaultRead", res);
     }
 

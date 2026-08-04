@@ -39,6 +39,11 @@ export * from "../core/namespaces/MessageNamespace";
 export * from "../core/namespaces/SpaceNamespace";
 export * from "../core/namespaces/AgentsNamespace";
 export * from "../core/namespaces/FunctionsNamespace";
+export * from "../core/namespaces/AccessTokensNamespace";
+// WebAuthn helpers — notably `PasskeyOriginError` / `rpIdUsableForOrigin`, so an
+// app can tell "this passkey belongs to another origin" from a cancelled prompt.
+// Flat `export *` so the dts plugin keeps the TYPES (named re-exports get dropped).
+export * from "../auth/passkey";
 // App-describing decorators (@MuhkooAgent/@MuhkooSpace/@MuhkooDB/@MuhkooFunction
 // + ejectAgentPrompt). Cherry-picked like the rest of core for the dts plugin.
 export * from "../core/agents/describe";

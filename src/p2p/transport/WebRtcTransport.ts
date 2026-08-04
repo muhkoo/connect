@@ -37,12 +37,18 @@ interface PeerConn {
     pc: RTCPeerConnection;
     dc?: RTCDataChannel;
     reasm: Map<number, Reassembly>;
+    /** Has setRemoteDescription completed? ICE can't be added before it. */
+    remoteSet: boolean;
+    /** ICE candidates that arrived before SRD — flushed once remoteSet. */
+    pendingIce: RTCIceCandidateInit[];
 }
 
 export interface WebRtcTransportOptions {
     iceServers?: RTCIceServer[];
     /** Cap on simultaneous peer connections (mesh size). Default 8. */
     maxPeers?: number;
+    /** Log ICE/connection state transitions for diagnosing peer connectivity. */
+    debug?: boolean;
 }
 
 export class WebRtcTransport implements PeerTransport {
@@ -52,6 +58,7 @@ export class WebRtcTransport implements PeerTransport {
     private readonly offSignal: () => void;
     private readonly iceServers: RTCIceServer[];
     private readonly maxPeers: number;
+    private readonly debug: boolean;
     private nextMsgId = 1;
 
     constructor(
@@ -61,7 +68,12 @@ export class WebRtcTransport implements PeerTransport {
     ) {
         this.iceServers = opts.iceServers ?? DEFAULT_ICE;
         this.maxPeers = opts.maxPeers ?? 8;
+        this.debug = opts.debug ?? false;
         this.offSignal = this.signaler.onSignal((from, kind, data) => this.onSignal(from, kind, data));
+    }
+
+    private log(...a: unknown[]): void {
+        if (this.debug) console.info("[muhkoo:p2p]", ...a);
     }
 
     peers(): PeerId[] {
@@ -111,16 +123,37 @@ export class WebRtcTransport implements PeerTransport {
 
     private newPc(peerId: PeerId): PeerConn {
         const pc = new RTCPeerConnection({ iceServers: this.iceServers });
-        const conn: PeerConn = { pc, reasm: new Map() };
+        const conn: PeerConn = { pc, reasm: new Map(), remoteSet: false, pendingIce: [] };
         this.conns.set(peerId, conn);
+        const short = String(peerId).slice(0, 8);
         pc.onicecandidate = (e) => {
-            if (e.candidate) this.signaler.send(peerId, "ice", e.candidate.toJSON());
+            if (e.candidate) {
+                this.log(`${short} local candidate ${e.candidate.type ?? "?"} ${(e.candidate.address ?? e.candidate.candidate).toString().slice(0, 40)}`);
+                this.signaler.send(peerId, "ice", e.candidate.toJSON());
+            }
         };
         pc.onconnectionstatechange = () => {
+            this.log(`${short} connection=${pc.connectionState}`);
             if (["failed", "closed", "disconnected"].includes(pc.connectionState)) this.drop(peerId);
         };
+        if (this.debug) {
+            pc.oniceconnectionstatechange = () => this.log(`${short} ice=${pc.iceConnectionState}`);
+            pc.onicegatheringstatechange = () => this.log(`${short} gathering=${pc.iceGatheringState}`);
+        }
         pc.ondatachannel = (e) => this.bindChannel(peerId, conn, e.channel);
         return conn;
+    }
+
+    /** Mark a peer's remote description as set and apply any ICE candidates that
+     *  arrived before it (dropping them, the old behavior, breaks LAN dials). */
+    private async markRemoteSet(conn: PeerConn): Promise<void> {
+        conn.remoteSet = true;
+        const pending = conn.pendingIce;
+        conn.pendingIce = [];
+        for (const cand of pending) {
+            try { await conn.pc.addIceCandidate(cand); } catch { /* stale/duplicate */ }
+        }
+        if (pending.length) this.log(`flushed ${pending.length} queued ICE candidate(s)`);
     }
 
     private async initiate(peerId: PeerId): Promise<void> {
@@ -145,16 +178,24 @@ export class WebRtcTransport implements PeerTransport {
             if (!this.conns.has(from) && this.conns.size >= this.maxPeers) return; // mesh cap
             const conn = this.conns.get(from) ?? this.newPc(from);
             await conn.pc.setRemoteDescription(data as RTCSessionDescriptionInit);
+            await this.markRemoteSet(conn);
             const answer = await conn.pc.createAnswer();
             await conn.pc.setLocalDescription(answer);
             this.signaler.send(from, "answer", answer);
         } else if (kind === "answer") {
             const conn = this.conns.get(from);
-            if (conn) await conn.pc.setRemoteDescription(data as RTCSessionDescriptionInit);
+            if (conn) {
+                await conn.pc.setRemoteDescription(data as RTCSessionDescriptionInit);
+                await this.markRemoteSet(conn);
+            }
         } else if (kind === "ice") {
             const conn = this.conns.get(from);
             if (conn && data) {
-                try { await conn.pc.addIceCandidate(data as RTCIceCandidateInit); } catch { /* pre-SRD race */ }
+                // Queue candidates that arrive before setRemoteDescription — adding
+                // them early throws and (previously) dropped them, which killed the
+                // connection on fast LANs where ICE beats the SDP answer.
+                if (!conn.remoteSet) { conn.pendingIce.push(data as RTCIceCandidateInit); return; }
+                try { await conn.pc.addIceCandidate(data as RTCIceCandidateInit); } catch { /* stale */ }
             }
         } else if (kind === "bye") {
             this.drop(from);

@@ -59,6 +59,36 @@ export function defaultRpId(): string {
   return typeof location !== "undefined" ? location.hostname : "";
 }
 
+/**
+ * Can a passkey enrolled under `rpId` be used from the CURRENT origin?
+ *
+ * WebAuthn only accepts an RP id that is the origin's own host or a registrable
+ * *parent* of it — so a passkey enrolled on `app.example.com` is unusable on
+ * `app.example.net`, and one enrolled on a full host is unusable from a sibling
+ * host. An app served on BOTH a custom domain and the platform host therefore
+ * needs one passkey per origin.
+ *
+ * Call this BEFORE `navigator.credentials.get()`: passing a foreign rpId throws
+ * a raw "The requested RPID did not match the origin or related origins", which
+ * is a dead end for the user. Checking first lets the caller fall back to normal
+ * sign-in (and offer to enroll a passkey for this origin) instead.
+ */
+export function rpIdUsableForOrigin(rpId: string | undefined | null, host?: string): boolean {
+  const h = host ?? (typeof location !== "undefined" ? location.hostname : "");
+  if (!rpId || !h) return false;
+  return h === rpId || h.endsWith(`.${rpId}`);
+}
+
+/** Thrown when the account's passkey belongs to a different origin. Callers
+ *  should treat this as "no passkey here" and fall back to another factor. */
+export class PasskeyOriginError extends Error {
+  readonly code = "passkey_wrong_origin";
+  constructor(message = "No passkey is enrolled for this site. Sign in another way, then add one for this device.") {
+    super(message);
+    this.name = "PasskeyOriginError";
+  }
+}
+
 export interface PasskeyEnrollment {
   credentialId: Uint8Array;
   prfSalt: Uint8Array;
@@ -77,7 +107,13 @@ export async function createPasskeyWithPrf(opts: { rpId: string; rpName: string;
       user: { id: rand(16) as BufferSource, name: opts.username, displayName: opts.username },
       challenge: rand(32) as BufferSource,
       pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
-      authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
+      // Force the PLATFORM authenticator (Touch ID / Windows Hello / iCloud
+      // Keychain). Our factor needs the PRF extension to wrap the seed, and
+      // third-party browser password-manager extensions register as cross-platform
+      // authenticators that often DON'T implement PRF — letting one handle the
+      // request is the main cause of "didn't return a PRF result" failures. Pinning
+      // to platform routes it to the OS authenticator, which supports PRF.
+      authenticatorSelection: { authenticatorAttachment: "platform", residentKey: "preferred", userVerification: "preferred" },
       extensions: { prf: {} } as AuthenticationExtensionsClientInputs,
     },
   })) as PublicKeyCredential | null;

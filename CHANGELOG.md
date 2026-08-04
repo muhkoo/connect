@@ -4,6 +4,36 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.10.11-alpha.0 — Access tokens + per-origin passkeys (2026-07-29)
+
+### Fixed
+
+- **Passkey unlock on apps served from more than one host.** A passkey is bound to the origin it was enrolled on, but the vault handed back whichever passkey was enrolled *first* regardless of origin — so an app reachable at both a custom domain and the platform host (e.g. `theater.muhkoo.com` and `muhkoo-theater.apps.muhkoo.dev`) failed to unlock on one of them with a raw *"The requested RPID did not match the origin or related origins"*. The vault read is now origin-aware (the platform also infers the origin from the request, so already-deployed clients are fixed), and `loginWithPasskey` refuses a foreign RP id **before** prompting instead of triggering a biometric prompt that cannot succeed. Enroll one passkey per origin; each unlocks its own.
+
+### Added
+
+- **`client.auth.zk.hasPasskeyForThisOrigin()`** — whether a passkey enrolled for the CURRENT origin can unlock here, so an app can offer "Unlock with passkey" only when it will work. `listFactors()` now also returns each passkey's `rpId`, and a wrong-origin unlock throws the typed `PasskeyOriginError` (`code: "passkey_wrong_origin"`).
+
+- **`new Client({ accessToken })`** — authenticate as a machine with a scoped, expiring [access token](https://docs.muhkoo.dev/concepts/access-tokens/) (`mk_<env>_at_…`) instead of a ZK identity. Rides the same `X-Muhkoo-Key` header as an app key and takes precedence over `apiKey` when both are set — for headless/server/CI clients.
+- **`client.accessTokens`** namespace — `create(appId, { scopes, env, expiresInDays, label })` (returns the plaintext once), `list(appId)`, and `revoke(appId, keyId)`. Scopes are resource-level (`db:read`/`db:write`, `kv:*`, `storage:*`, `messages:*`, `functions:invoke`, `ai:infer`); see the exported `ACCESS_TOKEN_SCOPES`.
+- **`@MuhkooDB({ backend: true })`** — mark a table backend-only in an agent app descriptor. Backend tables are omitted from `ejectAgentPrompt` output, matching the platform gate that rejects publishable keys from backend-only tables.
+
+## 0.10.10-alpha.0 — Streaming large-file storage (2026-07-06)
+
+### Fixed
+
+- **`writeFileToShards` now truly streams.** It previously read the ENTIRE source into one `Uint8Array` before chunking (despite a comment claiming per-chunk memory), so multi-GB files (e.g. a 4K movie) threw "the file could not be read" — a `Blob`/`File` overflows the browser's ~2GB `ArrayBuffer` cap. It now slices the source per chunk; peak memory stays at ~`chunkSize`.
+
+### Added
+
+- **`Space.getFileStream(manifest)`** / **`FileStorage.readChunksFromShards(manifest)`** — async-iterate a stored file's decrypted chunks in order without holding the whole file in memory. For multi-GB reads (a single `Uint8Array` can't hold them) — e.g. a transcoder piping the raw straight to a temp file. Same peer/origin shard sourcing and per-chunk auth as `getFile`.
+
+## 0.10.9-alpha.0 — Passkey platform-authenticator fix (2026-07-06)
+
+### Fixed
+
+- **Passkey enrollment now pins the platform authenticator** (`authenticatorAttachment: "platform"`). Previously the browser could route WebAuthn to a third-party password-manager extension that doesn't implement the PRF extension our seed-wrapping factor requires, causing "didn't return a PRF result" failures. Enrollment now goes to the OS authenticator (Touch ID / Windows Hello / iCloud Keychain), which supports PRF.
+
 ## 0.10.1-alpha.0 — CLI cross-origin isolation support (2026-07-01)
 
 ### Added

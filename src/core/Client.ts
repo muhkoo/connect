@@ -35,6 +35,7 @@ import { MessageNamespace } from "./namespaces/MessageNamespace";
 import { SpaceNamespace } from "./namespaces/SpaceNamespace";
 import { AgentsNamespace } from "./namespaces/AgentsNamespace";
 import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
+import { AccessTokensNamespace } from "./namespaces/AccessTokensNamespace";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 import { ChatKeyVault, type ChatKeyStore } from "./ChatKeyVault";
 import type { WrappedPayload } from "../crypto/PassphraseWrap";
@@ -64,6 +65,15 @@ export interface ClientOptions {
      * New integrations should always pass one.
      */
     apiKey?: string;
+    /**
+     * A scoped, expiring **access token** (`mk_<env>_at_…`) — the non-ZK
+     * machine-to-machine credential. It resolves through the SAME accelerator
+     * path as {@link apiKey} (both ride the `X-Muhkoo-Key` header) and, when
+     * set, takes precedence over it. Use it for server-side / CI callers that
+     * shouldn't carry the app's publishable key. Mint one with
+     * `client.accessTokens.create(...)`.
+     */
+    accessToken?: string;
     /**
      * Absolute URL of the accelerator (trailing slash optional). Defaults to
      * the hosted Muhkoo Accelerator ({@link DEFAULT_BASE_URL}); override to
@@ -155,6 +165,8 @@ export class Client {
     readonly agents: AgentsNamespace;
     /** Serverless functions — `client.functions.deploy(appId, …)`, etc. */
     readonly functions: FunctionsNamespace;
+    /** Access tokens — `client.accessTokens.create(appId, …)`, etc. */
+    readonly accessTokens: AccessTokensNamespace;
     /** Offline cache + sync — `client.offline.status`, `client.offline.snapshot`, etc. */
     readonly offline: OfflineManager;
 
@@ -215,6 +227,7 @@ export class Client {
         this.http = new HttpClient({
             baseUrl: this.baseUrl,
             apiKey: options.apiKey,
+            accessToken: options.accessToken,
             getSessionToken: () => this.session.token,
             fetch: reportingFetch,
             // Self-heal stale sessions: on a 401, try a silent re-auth (only
@@ -295,6 +308,7 @@ export class Client {
         });
         this.agents = new AgentsNamespace({ http: this.http });
         this.functions = new FunctionsNamespace({ http: this.http, fnHostSuffix: options.functionsHostSuffix });
+        this.accessTokens = new AccessTokensNamespace({ http: this.http });
 
         // Replay deferred shard uploads on reconnect. The bytes live in the
         // Cache API keyed by hash; re-PUT them through a (defer-free) shard

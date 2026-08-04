@@ -153,32 +153,41 @@ export class FileStorage {
     ): Promise<{ manifest: FileManifest; stat: FileStat }> {
         await this.codec.ready(this.rsWasmModule);
 
-        const data = await toUint8Array(input.data);
         const fileId = input.fileId ?? generateId();
         const createdAt = Date.now();
         const chunks: ChunkManifest[] = [];
-        const totalChunks = Math.max(1, Math.ceil(data.length / this.chunkSize));
+
+        // Read the source per-chunk so the peak memory footprint stays at
+        // ~chunkSize even for multi-GB files. A Blob/File is sliced lazily (only
+        // the current chunk's bytes are materialized) — reading the whole thing
+        // up front would blow past the browser's ~2GB ArrayBuffer cap and throw
+        // "the file could not be read". A caller that already has the bytes in a
+        // Uint8Array just gets zero-copy subarray views.
+        const asBytes = input.data instanceof Uint8Array ? input.data : null;
+        const size = asBytes ? asBytes.length : (input.data as Blob).size;
+        const readChunk = async (start: number, end: number): Promise<Uint8Array> =>
+            asBytes ? asBytes.subarray(start, end)
+                : new Uint8Array(await (input.data as Blob).slice(start, end).arrayBuffer());
+
+        const totalChunks = Math.max(1, Math.ceil(size / this.chunkSize));
         input.onProgress?.(0, totalChunks);
 
-        // Slicing + encrypting + encoding + uploading is done per-chunk so
-        // the peak memory footprint stays at ~chunkSize even for huge files.
-        // Within a chunk, the shard uploads are parallelized up to
-        // `this.concurrency`.
-        for (let chunkIndex = 0; chunkIndex * this.chunkSize < Math.max(1, data.length); chunkIndex++) {
+        // Within a chunk, the shard uploads are parallelized up to `this.concurrency`.
+        for (let chunkIndex = 0; chunkIndex * this.chunkSize < Math.max(1, size); chunkIndex++) {
             const start = chunkIndex * this.chunkSize;
-            const end = Math.min(start + this.chunkSize, data.length);
-            const plaintext = data.subarray(start, end);
+            const end = Math.min(start + this.chunkSize, size);
+            const plaintext = await readChunk(start, end);
             chunks.push(await this.writeChunk(plaintext, chunkIndex));
             input.onProgress?.(chunks.length, totalChunks);
             // Stop after one iteration if the file is empty — we still emit a
             // single zero-length chunk so the manifest has a stable shape.
-            if (data.length === 0) break;
+            if (size === 0) break;
         }
 
         const manifest: FileManifest = {
             id: fileId,
             name: input.metadata.name,
-            size: data.length,
+            size,
             type: input.metadata.type,
             path: input.metadata.path,
             lastModified: input.metadata.lastModified ?? createdAt,
@@ -217,6 +226,20 @@ export class FileStorage {
             offset += c.length;
         }
         return { data: out, stat: manifestToStat(manifest) };
+    }
+
+    /**
+     * Streaming inverse of {@link writeFileToShards}: yields each chunk's
+     * decrypted plaintext in order WITHOUT concatenating. Peak memory stays at
+     * ~one chunk, so multi-GB files (which overflow a single `Uint8Array`) can be
+     * piped straight to a file/socket. Same shard sourcing (cache → peers →
+     * origin) and per-chunk auth as {@link readFileFromShards}.
+     */
+    async *readChunksFromShards(manifest: FileManifest): AsyncGenerator<Uint8Array> {
+        await this.codec.ready(this.rsWasmModule);
+        for (const chunkManifest of [...manifest.chunks].sort((a, b) => a.chunkIndex - b.chunkIndex)) {
+            yield await this.readChunk(chunkManifest);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -384,14 +407,6 @@ export class FileStorage {
             .map(() => nextWorker());
         await Promise.all(workers);
     }
-}
-
-/** Normalize `data` to a flat `Uint8Array`. */
-async function toUint8Array(data: Uint8Array | Blob | File): Promise<Uint8Array> {
-    if (data instanceof Uint8Array) return data;
-    // Blob covers File too (File extends Blob in every runtime we target).
-    const ab = await data.arrayBuffer();
-    return new Uint8Array(ab);
 }
 
 export default FileStorage;

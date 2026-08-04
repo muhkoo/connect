@@ -25,7 +25,7 @@ import {
 } from "../../auth/vault";
 import { oprfBlind, oprfFinalize } from "../../auth/oprf";
 import { emailFactorInput, googleFactorInput, gatedBlind, gatedWrapKey } from "../../auth/gatedFactor";
-import { passkeySupported, passkeyPrfCapable, createPasskeyWithPrf, evaluatePasskeyPrf, defaultRpId } from "../../auth/passkey";
+import { passkeySupported, passkeyPrfCapable, createPasskeyWithPrf, evaluatePasskeyPrf, defaultRpId, rpIdUsableForOrigin, PasskeyOriginError } from "../../auth/passkey";
 import type { SessionState } from "../Session";
 import { HostedAuth } from "./HostedAuth";
 
@@ -538,13 +538,22 @@ export class ZkAuth {
      * its PRF, unwraps the master seed → identity → session.
      */
     async loginWithPasskey(username: string, opts: LoginOptions = {}): Promise<AuthUser> {
-        const { factor } = await this.deps.auth.vaultRead(username, "passkey");
+        // Ask for THIS origin's passkey — they're enrolled per-origin, so the
+        // account's first passkey may belong to a different host entirely.
+        const host = defaultRpId();
+        const { factor } = await this.deps.auth.vaultRead(username, "passkey", undefined, host);
         const params = factor?.params as { credentialId?: string; prfSalt?: string; rpId?: string } | undefined;
         if (!factor?.wrap || !factor?.iv || !params?.credentialId || !params?.prfSalt) {
             throw new Error("No passkey is set up for this account.");
         }
+        const rpId = params.rpId ?? host;
+        // Refuse a foreign rpId up front: WebAuthn would throw a raw "requested
+        // RPID did not match the origin", which reads as a hard failure to the
+        // user. A typed error lets the app fall back to another factor and offer
+        // to enroll a passkey for this origin.
+        if (!rpIdUsableForOrigin(rpId, host)) throw new PasskeyOriginError();
         const prfOutput = await evaluatePasskeyPrf(
-            params.rpId ?? defaultRpId(),
+            rpId,
             fromBase64(params.credentialId),
             fromBase64(params.prfSalt),
         );
@@ -561,11 +570,31 @@ export class ZkAuth {
      * Gated factors (email/google) carry a `masked` display hint
      * ("m•••@gmail.com"); the full value is never returned.
      */
-    async listFactors(): Promise<Array<{ id: string; type: string; label?: string; createdAt?: number; masked?: string }>> {
+    async listFactors(): Promise<Array<{ id: string; type: string; label?: string; createdAt?: number; masked?: string; rpId?: string }>> {
         const token = this.deps.session.token;
         if (!token) throw new Error("Sign in first to view your login methods.");
         const { factors } = await this.deps.auth.vaultFactors(token);
         return factors;
+    }
+
+    /**
+     * Is a passkey enrolled that can unlock from THIS origin?
+     *
+     * Passkeys are origin-bound, so an app served on both a custom domain and the
+     * platform host needs one per host. Use this to decide whether to offer
+     * "Unlock with passkey" or go straight to sign-in — prompting with another
+     * origin's passkey fails with a raw WebAuthn error. Requires a session
+     * (metadata read); returns false when signed out or unsupported.
+     */
+    async hasPasskeyForThisOrigin(): Promise<boolean> {
+        if (!passkeySupported()) return false;
+        try {
+            const host = defaultRpId();
+            const factors = await this.listFactors();
+            return factors.some((f) => f.type === "passkey" && rpIdUsableForOrigin(f.rpId, host));
+        } catch {
+            return false;
+        }
     }
 
     /** Remove a login method by id (can't remove your only one). Session-authed. */

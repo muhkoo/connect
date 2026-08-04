@@ -65,6 +65,11 @@ export interface MuhkooDBMeta {
   table?: string;
   /** Read-only by default. */
   access?: MuhkooDBAccess;
+  /**
+   * Backend-only table — omitted from {@link ejectAgentPrompt}. Use for tables
+   * an agent should never be told about (server-managed / internal state).
+   */
+  backend?: boolean;
   description: string;
 }
 
@@ -76,7 +81,7 @@ export interface MuhkooFunctionMeta {
 }
 
 interface SpaceEntry { name: string; description: string; }
-interface TableEntry { table: string; access: MuhkooDBAccess; description: string; }
+interface TableEntry { table: string; access: MuhkooDBAccess; description: string; backend: boolean; }
 interface FunctionEntry { name: string; description: string; }
 
 /** The full annotated surface gathered from one decorated class. */
@@ -134,6 +139,7 @@ export function MuhkooDB(meta: MuhkooDBMeta): PropertyDecorator & MethodDecorato
       table: meta.table ?? String(propertyKey),
       access: meta.access ?? "read",
       description: meta.description,
+      backend: meta.backend ?? false,
     });
   }) as PropertyDecorator & MethodDecorator;
 }
@@ -177,9 +183,12 @@ export function ejectAgentPrompt(appClass: Function): string {
     for (const s of d.spaces) lines.push(`- ${s.name}: ${s.description}`);
   }
 
-  if (d.tables.length) {
+  // Backend-only tables are deliberately withheld — the agent should never be
+  // told about server-managed / internal state it can't (and shouldn't) touch.
+  const promptTables = d.tables.filter((t) => !t.backend);
+  if (promptTables.length) {
     lines.push("", "App database tables:");
-    for (const t of d.tables) {
+    for (const t of promptTables) {
       const verbs = t.access === "write"
         ? "read & write — db_query/db_get/db_insert/db_update/db_delete"
         : "read-only — db_query/db_get";
@@ -199,7 +208,7 @@ export function ejectAgentPrompt(appClass: Function): string {
   // How to respond — the load-bearing behavioral contract. Without this, models
   // (especially gpt-oss) tend to run tool calls and then end their turn with no
   // user-facing message, so the user sees the work happen but gets no reply.
-  const hasTools = d.tables.length > 0 || d.functions.length > 0;
+  const hasTools = promptTables.length > 0 || d.functions.length > 0;
   lines.push("", "How to respond:");
   if (hasTools) {
     lines.push(

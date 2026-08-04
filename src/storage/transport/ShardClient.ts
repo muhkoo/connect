@@ -83,6 +83,17 @@ export interface ShardClientOptions {
      * block to peers. Best-effort — any failure falls through to origin.
      */
     peers?: PeerBlockSource;
+    /**
+     * When true, {@link ShardClient.putShard} returns as soon as the shard is
+     * written to {@link cache} and announced to {@link peers} — the origin PUT is
+     * fired in the BACKGROUND rather than awaited. This makes a large write's
+     * manifest available immediately (so a peer/worker can start pulling the
+     * shards over P2P right away) while origin catches up as a durable fallback.
+     * On a background-PUT failure the shard is handed to {@link deferUpload} (if
+     * present) for replay. Requires a {@link cache} so the bytes survive locally
+     * until the background upload lands. No-op without a cache.
+     */
+    backgroundUpload?: boolean;
 }
 
 /**
@@ -105,6 +116,7 @@ export class ShardClient {
     private readonly cache?: ShardByteCache;
     private readonly deferUpload?: (hash: string) => Promise<void>;
     private readonly peers?: PeerBlockSource;
+    private readonly backgroundUpload: boolean;
 
     constructor(opts: ShardClientOptions) {
         if (!opts?.baseUrl) throw new Error("ShardClient: `baseUrl` is required");
@@ -123,6 +135,10 @@ export class ShardClient {
         this.cache = opts.cache;
         this.deferUpload = opts.deferUpload;
         this.peers = opts.peers;
+        // Background upload needs a local cache to hold the bytes until the PUT
+        // lands; without one it would race the reader against a not-yet-uploaded
+        // origin, so we quietly ignore the flag when there's no cache.
+        this.backgroundUpload = Boolean(opts.backgroundUpload && opts.cache);
     }
 
     /** Build the URL for a given shard hash — exposed for callers that want to log or pre-resolve. */
@@ -144,6 +160,14 @@ export class ShardClient {
         if (this.cache) await this.cache.put(hash, bytes);
         // Tell the swarm we now hold this block, so peers can pull it from us.
         if (this.peers) this.peers.announce(hash);
+        // Background mode: the bytes are cached + announced, so return now and let
+        // origin catch up asynchronously (a peer can already pull this block). The
+        // PUT is enqueued through a bounded worker pool so a big file doesn't fire
+        // hundreds of concurrent uploads at once.
+        if (this.backgroundUpload) {
+            this.enqueueBackgroundUpload(url, hash);
+            return { dedup: false };
+        }
         let response: Response;
         try {
             response = await this.fetchFn(url, {
@@ -173,6 +197,48 @@ export class ShardClient {
             // Server returned 200 with no body — treat as fresh upload.
         }
         return { dedup };
+    }
+
+    // ── bounded background-upload pool (backgroundUpload mode) ──
+    private bgActive = 0;
+    private readonly bgQueue: Array<() => void> = [];
+    private static readonly BG_CONCURRENCY = 6;
+
+    /** Queue a shard's origin PUT to run in the background under a concurrency
+     *  cap. Bytes are re-read from {@link cache} at upload time (not held in the
+     *  queue) so a large file's backlog doesn't pin a second copy in memory. */
+    private enqueueBackgroundUpload(url: string, hash: string): void {
+        const run = async () => {
+            this.bgActive++;
+            try {
+                const bytes = this.cache ? await this.cache.get(hash) : null;
+                if (bytes) await this.uploadToOrigin(url, hash, bytes);
+            } catch {
+                // Origin unreachable/failed — queue for replay if we can; otherwise
+                // the block is still cached + peer-served, so a later re-PUT covers it.
+                if (this.deferUpload) { try { await this.deferUpload(hash); } catch { /* best-effort */ } }
+            } finally {
+                this.bgActive--;
+                const next = this.bgQueue.shift();
+                if (next) next();
+            }
+        };
+        if (this.bgActive < ShardClient.BG_CONCURRENCY) void run();
+        else this.bgQueue.push(() => void run());
+    }
+
+    /** PUT the shard bytes to origin, verifying the server accepted them.
+     *  Used by the background-upload path; throws on network/HTTP failure. */
+    private async uploadToOrigin(url: string, hash: string, bytes: Uint8Array): Promise<void> {
+        const response = await this.fetchFn(url, {
+            method: "PUT",
+            headers: { "content-type": "application/octet-stream" },
+            body: bytes as BodyInit,
+        });
+        if (!response.ok) {
+            const text = await safeText(response);
+            throw new Error(`ShardClient.putShard(${hash}) failed (${response.status}): ${text}`);
+        }
     }
 
     /**

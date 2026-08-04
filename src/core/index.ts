@@ -65,6 +65,18 @@ export type {
     FunctionInvokeOptions,
     FunctionsNamespaceDeps,
 } from "./namespaces/FunctionsNamespace";
+// Passkeys are origin-bound: `PasskeyOriginError` lets an app tell "this passkey
+// belongs to another host" apart from a cancelled prompt, and
+// `rpIdUsableForOrigin` answers the same question before prompting.
+export { PasskeyOriginError, rpIdUsableForOrigin } from "../auth/passkey";
+export { AccessTokensNamespace, ACCESS_TOKEN_SCOPES } from "./namespaces/AccessTokensNamespace";
+export type {
+    Scope,
+    AccessTokenInfo,
+    CreateAccessTokenInput,
+    CreatedAccessToken,
+    AccessTokensNamespaceDeps,
+} from "./namespaces/AccessTokensNamespace";
 
 // Offline layer — transparent caching + durable write queue + CRDT sync
 // (`client.offline`). On by default in browsers, a no-op in Node/Workers.
