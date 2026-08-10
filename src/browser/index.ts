@@ -33,6 +33,16 @@ export * from "../core/HttpClient";
 export * from "../core/Session";
 export * from "../core/Room";
 export * from "../core/namespaces/AuthNamespace";
+// Hosted auth (`client.auth.hosted`): the redirect flow + TV device pairing
+// (startDevicePairing / waitForDevicePairing / approveDevicePairing / …).
+// `HostedAuth` no longer declares its own `AuthUser` — it reuses the one from
+// AuthNamespace above — so these two `export *`s can't produce an ambiguous
+// (and therefore silently dropped) star export.
+export * from "../core/namespaces/HostedAuth";
+// The paired device's at-rest identity store (encrypted localStorage blob +
+// non-extractable IndexedDB key). Read the module docs before relying on it:
+// it is obfuscation, not protection.
+export * from "../auth/deviceStore";
 export * from "../core/namespaces/KvNamespace";
 export * from "../core/namespaces/FileNamespace";
 export * from "../core/namespaces/MessageNamespace";

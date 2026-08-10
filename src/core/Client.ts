@@ -241,7 +241,11 @@ export class Client {
 
         const wsBaseUrl = toWsBase(this.baseUrl);
         const authBaseUrl = (options.authBaseUrl ?? DEFAULT_AUTH_BASE_URL).replace(/\/+$/, "");
-        this.auth = new AuthNamespace({ auth: authClient, circuits, session: this.session, authBaseUrl });
+        this.auth = new AuthNamespace({
+            auth: authClient, circuits, session: this.session, authBaseUrl,
+            // The accelerator origin, for `auth.hosted`'s device-pairing endpoints.
+            apiBaseUrl: this.baseUrl,
+        });
         const deferShardUpload = offlineEnabled
             ? (hash: string) => this.offline.deferShardUpload(hash)
             : undefined;

@@ -28,6 +28,35 @@ export { Space } from "../spaces/Space";
 export type { SpaceDeps, SpaceFileMetadata, SpaceMessageEvent, EphemeralEvent, MessageDeletedEvent } from "../spaces/Space";
 export { AuthNamespace, ZkAuth, VaultUnavailableError } from "./namespaces/AuthNamespace";
 export type { AuthUser, RegisterParams, LoginOptions } from "./namespaces/AuthNamespace";
+// Hosted auth (`client.auth.hosted`) — the redirect flow plus TV device pairing.
+export { HostedAuth, DevicePairingError, ReauthRequiredError, canonicalUserCode, formatUserCode } from "./namespaces/HostedAuth";
+export type {
+    HostedAuthDeps,
+    DevicePairingSession,
+    DevicePairingPoll,
+    DevicePairingRequest,
+    DevicePairingErrorReason,
+    StartDevicePairingOptions,
+    WaitForDevicePairingOptions,
+    PairedDevice,
+} from "./namespaces/HostedAuth";
+// Paired-device persistence on the device itself (encrypted localStorage +
+// non-extractable IndexedDB key). See the module docs for what that is and
+// is NOT worth.
+export {
+    persistDeviceIdentity,
+    loadDeviceIdentity,
+    clearDeviceIdentity,
+    hasDeviceIdentity,
+    deviceIdentityKey,
+    deviceFingerprint,
+    deviceIdentityIsEphemeral,
+    configureDeviceStore,
+    DeviceStoreUnavailableError,
+    DEVICE_IDENTITY_STORAGE_KEY,
+    DEVICE_KEY_DB_NAME,
+} from "../auth/deviceStore";
+export type { PersistedDeviceIdentity, DeviceKeyVault, DeviceBlobStore, MuhkooKeystoreBridge } from "../auth/deviceStore";
 export { KvNamespace } from "./namespaces/KvNamespace";
 export type { SetOptions, StorageChangeEvent } from "./namespaces/KvNamespace";
 export { DbNamespace, DbTable } from "./namespaces/DbNamespace";

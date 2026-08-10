@@ -1,6 +1,6 @@
 {
   "name": "@muhkoo/connect",
-  "version": "0.10.11-alpha.0",
+  "version": "0.10.13-alpha.0",
   "description": "Simple client SDK for building distributed edge based applications",
   "main": "dist/server/index.js",
   "module": "dist/server/index.js",

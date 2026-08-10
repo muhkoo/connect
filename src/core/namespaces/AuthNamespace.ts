@@ -731,9 +731,20 @@ export class AuthNamespace {
     readonly zk: ZkAuth;
     /** Centralized hosted auth (auth.muhkoo.dev) — `client.auth.hosted.login(...)`. */
     readonly hosted: HostedAuth;
-    constructor(deps: ZkAuthDeps & { authBaseUrl: string }) {
+    constructor(deps: ZkAuthDeps & { authBaseUrl: string; apiBaseUrl?: string }) {
         this.zk = new ZkAuth(deps);
-        this.hosted = new HostedAuth({ auth: deps.auth, session: deps.session, authBaseUrl: deps.authBaseUrl });
+        this.hosted = new HostedAuth({
+            auth: deps.auth,
+            session: deps.session,
+            authBaseUrl: deps.authBaseUrl,
+            // Forwarded explicitly so device pairing resolves the accelerator
+            // origin and the circuit assets the SAME way the rest of the client
+            // does. Without these, `HostedAuth` falls back to reading
+            // `AuthClient.baseUrl` reflectively and to `defaultCircuitUrls`,
+            // which silently ignores an app's `ClientOptions.circuits` override.
+            apiBaseUrl: deps.apiBaseUrl,
+            circuits: deps.circuits,
+        });
     }
 
     /** Convenience pass-through: the currently signed-in user, or `null`. */

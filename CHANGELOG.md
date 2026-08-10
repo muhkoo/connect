@@ -4,6 +4,30 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.10.13-alpha.0 — TV device pairing, client surface (2026-08-07)
+
+### Added
+
+- **`client.auth.hosted` device pairing** — sign a keyboard-less device in without typing on it. The device shows a short code; the user approves from a browser that is already signed in, and the master seed is delivered sealed to that device alone. Built for an Android TV WebView, which has neither a keyboard nor WebAuthn.
+  - Device: `startDevicePairing()`, `pollDevicePairing()`, `waitForDevicePairing()` (handles the interval/backoff and `slow_down` for you), `cancelDevicePairing()`, plus `resumeDeviceSession()` / `hasDeviceSession()` / `forgetDeviceSession()` across restarts.
+  - Approver: `lookupDevicePairing()`, `approveDevicePairing()`, `denyDevicePairing()`, `listPairedDevices()`, `revokePairedDevice()`.
+  - `DevicePairingError` / `ReauthRequiredError` carry the machine-readable reason, so a UI can tell "expired" from "denied" from "confirm it's you first".
+- **`deviceStore`** — at-rest persistence for a paired device: the identity blob is encrypted in `localStorage` under a **non-extractable** IndexedDB key. Read the module docs before relying on it: against an attacker with device, ADB, or root access this is **obfuscation, not protection**. A native-Keystore bridge (`MuhkooKeystoreBridge`) is supported for hosts that can provide one.
+
+Requires an accelerator with the `/api/auth/device/*` endpoints (shipped 2026-08-06). Protocol spec: `muhkoo/auth/docs/tv-device-pairing-spec.md`.
+
+## 0.10.12-alpha.0 — TV device-pairing seal (2026-08-06)
+
+### Added
+
+- **v2 device-pairing handoff** — `generateDevicePairingKeypair()`, `sealSeedToDevice()`, `unsealSeedFromDevice()` and `pairingVerificationCode()`. Lets a keyboard-less device (an Android TV WebView, which has no WebAuthn) receive the master seed without the server ever reading it. Same sealed envelope the hosted-auth handoff already uses, so it rides the existing `sealedKeys` field — but the key is ECDH-derived to the device's ephemeral P-256 key instead of arriving in a redirect fragment, because a TV has no redirect to receive one. P-256 ECDH → HKDF-SHA256 → AES-256-GCM, fresh ephemeral key and IV per seal.
+- Both public keys are bound into the KDF. This is load-bearing, not belt-and-braces: P-256 ECDH returns only the shared x-coordinate, so a seal addressed to the *negation* of a device key (on-curve, derivable by anyone from the published key, and showing a different verification code) would otherwise still decrypt under the honest private key.
+- `pairingVerificationCode()` is shown on both screens so a human can confirm the keys match — PBKDF2-SHA256 (200k iterations, to blunt precomputation) rendered in a 30-symbol alphabet with every confusable pair removed (`0/O`, `1/I/L`, `U`).
+
+The v1 fragment-key handoff (`sealSeed`/`unsealSeed`) is unchanged and still rejects non-v1 envelopes.
+
+Protocol spec: `muhkoo/auth/docs/tv-device-pairing-spec.md`. The server endpoints it describes are not built yet — these are the client primitives to code against.
+
 ## 0.10.11-alpha.0 — Access tokens + per-origin passkeys (2026-07-29)
 
 ### Fixed
