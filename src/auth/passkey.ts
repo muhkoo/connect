@@ -79,6 +79,29 @@ export function rpIdUsableForOrigin(rpId: string | undefined | null, host?: stri
   return h === rpId || h.endsWith(`.${rpId}`);
 }
 
+/**
+ * Would {@link AuthNamespace.loginWithPasskey} accept a factor recorded with
+ * this `rpId`, from `host`?
+ *
+ * This is deliberately NOT the same as {@link rpIdUsableForOrigin}. That answers
+ * a raw WebAuthn question and is `false` for a missing rpId. But a factor with
+ * NO recorded rpId predates per-origin enrolment, and `loginWithPasskey`
+ * resolves it as `params.rpId ?? host` — so it IS usable, from anywhere.
+ *
+ * Callers deciding "should I even try a passkey here?" must use this one.
+ * Reaching for `rpIdUsableForOrigin` instead silently excludes every legacy
+ * passkey holder, which has locked real users out of production twice.
+ *
+ * The `?? host` fallback applies to nullish only, matching `loginWithPasskey`:
+ * an empty-string rpId stays unusable rather than resolving to the host.
+ */
+export function passkeyUsableFromOrigin(rpId: string | undefined | null, host?: string): boolean {
+  const h = host ?? defaultRpId();
+  if (!h) return false;
+  if (rpId == null) return true;
+  return rpIdUsableForOrigin(rpId, h);
+}
+
 /** Thrown when the account's passkey belongs to a different origin. Callers
  *  should treat this as "no passkey here" and fall back to another factor. */
 export class PasskeyOriginError extends Error {

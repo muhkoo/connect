@@ -4,6 +4,13 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.10.14-alpha.0 — don't prompt for a passkey that can't work here (2026-08-12)
+
+### Fixed
+
+- **`auth.zk.resume()` no longer attempts a passkey unlock when the account has no passkey usable from the current origin.** Passkeys are per-origin, and enrolling through hosted auth records `auth.muhkoo.dev` — so a user who added a passkey there is mismatched on every app host. `resume()` previously attempted anyway; the attempt failed harmlessly only because the server returns a shapeless decoy that trips an internal guard before WebAuthn is reached. That silence was incidental, not designed: once the decoy is made indistinguishable (needed to close an account-enumeration oracle), the same call would fire a modal `navigator.credentials.get()` at page load — on the splash screen, since `resume()` is awaited inside every app's readiness gate. This ships first so that server-side change is safe to make.
+  - New `passkeyUsableFromOrigin(rpId, host)`, exported from the auth surface. Use it — not `rpIdUsableForOrigin` — when deciding whether to *offer or attempt* a passkey. It mirrors `loginWithPasskey`'s own resolution, so a factor with **no recorded rpId** (enrolled before per-origin support) counts as usable; the raw predicate reports `false` for those and excluding them has locked real users out of production before.
+
 ## 0.10.13-alpha.0 — TV device pairing, client surface (2026-08-07)
 
 ### Added

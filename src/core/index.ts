@@ -97,7 +97,13 @@ export type {
 // Passkeys are origin-bound: `PasskeyOriginError` lets an app tell "this passkey
 // belongs to another host" apart from a cancelled prompt, and
 // `rpIdUsableForOrigin` answers the same question before prompting.
-export { PasskeyOriginError, rpIdUsableForOrigin } from "../auth/passkey";
+//
+// Deciding whether to OFFER or ATTEMPT a passkey? Use `passkeyUsableFromOrigin`
+// instead. It mirrors `loginWithPasskey`'s own resolution, so a factor with no
+// recorded rpId (enrolled before per-origin support) counts as usable —
+// `rpIdUsableForOrigin` reports false for those, and excluding them has locked
+// real users out of production.
+export { PasskeyOriginError, rpIdUsableForOrigin, passkeyUsableFromOrigin } from "../auth/passkey";
 export { AccessTokensNamespace, ACCESS_TOKEN_SCOPES } from "./namespaces/AccessTokensNamespace";
 export type {
     Scope,

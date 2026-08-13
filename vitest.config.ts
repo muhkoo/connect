@@ -35,6 +35,7 @@ export default defineConfig({
       // Identity vault crypto (M1.0): OPRF, seed↔identity split, seed wrap/unwrap
       "**/tests/auth/vault.test.ts",
       "**/tests/auth/passkey-origin.test.ts",
+      "**/tests/auth/passkey-auto-unlock.test.ts",
       // SDK-level vault auth e2e (opt-in: E2E_STAGING=1 + MUHKOO_BASE_URL)
       "**/tests/auth/vault-sdk.e2e.test.ts",
       "**/tests/auth/recovery-phrase.e2e.test.ts",

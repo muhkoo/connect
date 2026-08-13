@@ -25,7 +25,7 @@ import {
 } from "../../auth/vault";
 import { oprfBlind, oprfFinalize } from "../../auth/oprf";
 import { emailFactorInput, googleFactorInput, gatedBlind, gatedWrapKey } from "../../auth/gatedFactor";
-import { passkeySupported, passkeyPrfCapable, createPasskeyWithPrf, evaluatePasskeyPrf, defaultRpId, rpIdUsableForOrigin, PasskeyOriginError } from "../../auth/passkey";
+import { passkeySupported, passkeyPrfCapable, createPasskeyWithPrf, evaluatePasskeyPrf, defaultRpId, rpIdUsableForOrigin, passkeyUsableFromOrigin, PasskeyOriginError } from "../../auth/passkey";
 import type { SessionState } from "../Session";
 import { HostedAuth } from "./HostedAuth";
 
@@ -264,7 +264,34 @@ export class ZkAuth {
         if (this.deps.session.isUnlocked) return { user, unlocked: true };
         try {
             const factors = await this.listFactors();
-            if (factors.some((f) => f.type === "passkey")) {
+            // Only auto-attempt when a passkey is usable from THIS origin.
+            //
+            // Passkeys are per-origin, and an account's passkey may belong to a
+            // different host entirely (hosted-auth enrolment records
+            // `auth.muhkoo.dev`, so a user who added a passkey there is
+            // mismatched on every app host). Attempting anyway means
+            // `loginWithPasskey` does an unauthenticated vault read for a
+            // passkey this origin doesn't have. Today that returns a decoy with
+            // no `prfSalt`, so it fails the guard before touching WebAuthn — the
+            // silence is incidental. Once the decoy is reshaped to be
+            // indistinguishable (it must carry `prfSalt` to stop being an
+            // account-enumeration oracle) that same call would sail through and
+            // fire a modal `navigator.credentials.get()` at page load, on every
+            // boot, for a credential that does not exist. `resume()` is awaited
+            // inside every app's readiness gate, so that dialog lands on the
+            // splash screen before the user has asked for anything.
+            //
+            // `listFactors` is session-authenticated and returns real records,
+            // so decoys never appear here — this reads true rpIds.
+            //
+            // `passkeyUsableFromOrigin`, NOT `rpIdUsableForOrigin`: a factor
+            // with no recorded rpId predates per-origin enrolment and is still
+            // usable (`loginWithPasskey` resolves it as `params.rpId ?? host`).
+            // The raw predicate is false for undefined, so using it here would
+            // skip exactly those users — the regression that locked legacy
+            // passkey holders out of production twice.
+            const host = defaultRpId();
+            if (factors.some((f) => f.type === "passkey" && passkeyUsableFromOrigin(f.rpId, host))) {
                 await this.loginWithPasskey(user.username);
             }
         } catch {
