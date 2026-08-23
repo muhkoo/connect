@@ -64,7 +64,7 @@ export interface AuthSuccess {
 /** A vault factor record (M1.0 + M2 gated types). Wrap/iv are base64 AES-GCM; absent for phrase. */
 export interface VaultFactor {
     id: string;
-    type: "password" | "passkey" | "phrase-marker" | "email" | "google";
+    type: "password" | "passkey" | "phrase-marker" | "email" | "google" | "device";
     wrap?: string;
     iv?: string;
     params?: Record<string, unknown>;
@@ -218,8 +218,13 @@ export class AuthClient {
          *  passkey instead of whichever was enrolled first (which WebAuthn would
          *  refuse). Ignored for other factor types. */
         rpId?: string,
+        /** Device factors are selected by id — a user may have many machines. */
+        factorId?: string,
     ): Promise<{ factor: VaultFactor | null }> {
-        const res = await this.fetchFn(`${this.baseUrl}/api/auth/vault`, this.json("POST", { username, factorType, verifyToken, rpId }));
+        const res = await this.fetchFn(
+            `${this.baseUrl}/api/auth/vault`,
+            this.json("POST", { username, factorType, verifyToken, rpId, factorId }),
+        );
         return await this.parse<{ factor: VaultFactor | null }>("vaultRead", res);
     }
 

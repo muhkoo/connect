@@ -4,6 +4,26 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.11.0-alpha.0 — `client.vfs`, a real filesystem (2026-08-22)
+
+### Added
+
+- **`client.vfs` — directories, paths, versions, and binary files over the primitives you already have.** File bytes still go through `client.storage.writeFile` into a real Space, unchanged; what is new is the *metadata*. Instead of the flat `{spaceId, manifest}` mirror keyed by file id that `writeFile` already keeps in your personal space, the VFS arranges the same information as a tree you can navigate: one AES-256-GCM-sealed record per directory, so the server never sees a filename, a directory shape, or a file size.
+  - **A working directory, POSIX-style.** `vfs.cd(path)` and `vfs.cwd`; every method resolves relative paths against it, `..` climbs and stops at the root, and absolute paths pass through untouched. `cd` verifies the target is a real directory, so a typo fails where the message can name it rather than turning every later relative path into "does not exist". It lives in the SDK rather than the CLI so that a CLI, a script and an app all agree on what "here" means.
+  - Reads: `stat`, `list`, `walk`, `exists`, `readFile`, `readText`, `glob`.
+  - Writes: `writeFile`, `mkdir`, `delete`, `rename` (which is also move), `copy`.
+  - Versions: `history`, `restore`. Every write keeps the previous manifest, so there is cross-session undo; unchanged chunks dedupe in the content-addressed shard store, so keeping versions costs almost nothing. Capped per file (default 20).
+  - **`vfs.watch(handler)` — live changes.** Fires when this filesystem is written somewhere else: another tab, another machine, a CLI. It rides the personal space's existing websocket, shared with `client.kv` via the new `kv.onRaw()` rather than opening a second socket to the same Durable Object. Deliberately a notification, not a diff — the frame names a record id, and a record id is not a path, so the cache is dropped and the caller re-reads what it is actually showing. A runtime with no `WebSocket` gets a harmless no-op, because watching is an optimisation and never required for correctness.
+  - Maintenance: `sweep()` reclaims records orphaned by a lost write race.
+  - **Directories have stable random ids, not content hashes.** A git-style tree rewrites every ancestor to the root on each write; here a file write touches exactly one record — its parent — and moving a directory is O(1) no matter how large the subtree, because nothing inside it records its own path.
+  - **A directory's key lives in its parent.** Only the root key derives from the master seed (`muhkoo-vfs-v1`), so capabilities chain downward: handing over `{id, key}` for a subtree grants that subtree and nothing above it. That is the seam sharing will hang off without re-encrypting the filesystem.
+  - `copy` of a file moves no bytes — content is immutable and content-addressed, so the new entry points at the same manifest. It does get a fresh file id, so the two do not share version history.
+  - Binary files round-trip. Anything holding files as `Record<string, string>` will corrupt a PNG; this does not.
+  - **Machine access without storing the seed.** `auth.zk.enrollDevice(label)` wraps the master seed under a fresh random key, stores only the ciphertext as a vault `device` factor, and hands back the key for the caller to keep. `unlockWithDevice(username, factorId, deviceKey)` opens it again; `listDevices()` / `revokeDevice(id)` manage them. Revoking a factor makes that machine's stored key inert immediately — which a stored seed can never be, since nothing can reach out and un-store it. Device factors are read by **id**, not type: you have one password but may pair many machines.
+  - `auth.zk.unlockWithSeed(seedBase64)` — the inverse of `seedBase64`, for hosts that hold the seed themselves (a CLI, a server-side tool, a test). Without it, anything outside a browser runs a full ZK login on every invocation.
+  - `space.createSpace({ messaging: false })` registers a space without bootstrapping a group keyring or opening a WebSocket. For a space that only holds FILES — chunks carry their own keys — the keyring buys nothing, and the socket makes writes depend on a live connection. The VFS uses this.
+  - Locked (no master seed in memory) throws `VfsLockedError`, and a wrong key throws, rather than presenting an empty filesystem — the dangerous outcome is a "successful" write over a tree you could not decrypt.
+
 ## 0.10.14-alpha.0 — don't prompt for a passkey that can't work here (2026-08-12)
 
 ### Fixed

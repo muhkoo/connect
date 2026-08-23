@@ -64,6 +64,13 @@ interface ChangeFrame {
 }
 
 export class KvNamespace {
+    /** One personal-space socket, shared by every subscriber. */
+    private feed: {
+        transport: WSTransport;
+        handlers: Set<(frame: unknown) => void>;
+        onMessage: (e: CustomEvent) => void;
+    } | null = null;
+
     private cipher: StorageCipher | null = null;
     private cipherIdentity: ZkIdentity | null = null;
 
@@ -206,18 +213,60 @@ export class KvNamespace {
         // idle) personal-space feed warm with heartbeat pings, auto-reconnects
         // if it drops, and namespaces its events by `id` so this feed never
         // crosses wires with chat/space transports on the shared EventCore bus.
-        const transport = new WSTransport({ url, id: `personal:${commitment}` });
-        const onMessage = (e: CustomEvent) => {
-            void this.dispatchChange<T>(e.detail, handler);
-        };
-        transport.on(EventCoreEvents.MESSAGE, onMessage);
-        // Fire-and-forget: the realtime feed is best-effort, and the transport
-        // queues nothing it needs before CONNECTED (server→client only).
-        void transport.connect();
+        return this.onRaw((raw) => {
+            void this.dispatchChange<T>(raw, handler);
+        });
+    }
 
+    /**
+     * Subscribe to the personal space's raw change feed.
+     *
+     * Every key this user owns crosses this socket, not only `client.kv`
+     * collections — the VFS keeps its directory records here too. Consumers get
+     * the frame untouched: no decryption, no offline-cache merge, because the
+     * value's meaning depends on which subsystem wrote it.
+     *
+     * The transport is SHARED and reference-counted. `WSTransport` namespaces
+     * its events by `id`, so two transports with the same id would cross wires
+     * on the shared event bus — and a second socket to the same Durable Object
+     * would be pure waste besides.
+     */
+    onRaw(handler: (frame: unknown) => void): () => void {
+        if (typeof (globalThis as { WebSocket?: typeof WebSocket }).WebSocket !== "function") {
+            throw new Error("client.kv.onRaw: no `WebSocket` global available in this runtime.");
+        }
+        const token = this.deps.session.token;
+        if (!token) throw new Error("client.kv.onRaw: not signed in.");
+        const commitment = this.commitment();
+
+        if (!this.feed) {
+            const url = `${this.deps.wsBaseUrl}/api/personal/${encodeURIComponent(commitment)}/websocket?session=${encodeURIComponent(token)}`;
+            // Ride a WSTransport rather than a bare socket: it keeps the
+            // (otherwise idle) feed warm with heartbeat pings, auto-reconnects
+            // if it drops, and namespaces its events by `id`.
+            const transport = new WSTransport({ url, id: `personal:${commitment}` });
+            const handlers = new Set<(frame: unknown) => void>();
+            const onMessage = (e: CustomEvent) => {
+                for (const fn of handlers) fn(e.detail);
+            };
+            transport.on(EventCoreEvents.MESSAGE, onMessage);
+            // Fire-and-forget: the feed is best-effort, and the transport queues
+            // nothing it needs before CONNECTED (server→client only).
+            void transport.connect();
+            this.feed = { transport, handlers, onMessage };
+        }
+
+        const feed = this.feed;
+        feed.handlers.add(handler);
         return () => {
-            transport.off(EventCoreEvents.MESSAGE, onMessage);
-            transport.disconnect();
+            feed.handlers.delete(handler);
+            // Last subscriber out closes the socket, so an app that unsubscribes
+            // everything is not left holding an open connection.
+            if (feed.handlers.size === 0 && this.feed === feed) {
+                feed.transport.off(EventCoreEvents.MESSAGE, feed.onMessage);
+                feed.transport.disconnect();
+                this.feed = null;
+            }
         };
     }
 

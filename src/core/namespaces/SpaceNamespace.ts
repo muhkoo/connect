@@ -99,7 +99,19 @@ export class SpaceNamespace {
      * Create a new space: generate its keypair (public key = id), register
      * metadata, mint the initial group key, and connect. Returns the open Space.
      */
-    async createSpace(opts: { historyPolicy?: HistoryPolicy; private?: boolean } = {}): Promise<Space> {
+    /**
+     * Create a space.
+     *
+     * `messaging: false` registers the space and stops there — no group-key
+     * bootstrap and no WebSocket. Use it for a space that only ever holds
+     * FILES: each chunk carries its own key inside its manifest, so the group
+     * keyring buys nothing, and opening a socket makes the write path depend on
+     * a live connection. That dependency is wrong for a CLI, and it is what made
+     * the first VFS write hang forever instead of failing.
+     */
+    async createSpace(
+        opts: { historyPolicy?: HistoryPolicy; private?: boolean; messaging?: boolean } = {},
+    ): Promise<Space> {
         const historyPolicy = opts.historyPolicy ?? "static";
         const identity = await generateSpaceIdentity();
         // Register the space (server records pubkey + policy; the DO is lazy).
@@ -110,7 +122,7 @@ export class SpaceNamespace {
             { spacePubKey: identity.id, historyPolicy, visibility: opts.private ? "private" : "public" },
         );
         const space = await this.build(identity.id, historyPolicy);
-        await space.create();
+        if (opts.messaging !== false) await space.create();
         return space;
     }
 

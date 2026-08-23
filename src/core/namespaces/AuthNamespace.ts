@@ -80,6 +80,9 @@ export interface ZkAuthDeps {
  * ZK identity auth. One instance per {@link Client}; reads/writes the shared
  * {@link SessionState}.
  */
+/** HKDF label separating a device wrap key from every other use of the seed. */
+const DEVICE_WRAP_INFO = "muhkoo-device-key-v1";
+
 export class ZkAuth {
     constructor(private readonly deps: ZkAuthDeps) {}
 
@@ -667,6 +670,109 @@ export class ZkAuth {
     get seedBase64(): string | null {
         const seed = this.deps.session.seed;
         return seed ? toBase64(seed) : null;
+    }
+
+    /**
+     * Pair this machine, so it can unlock the account later without a password.
+     *
+     * Generates a random 32-byte key, wraps the master seed under it, and stores
+     * only the CIPHERTEXT in the vault as a `device` factor. The key is returned
+     * for the caller to persist locally and is never sent anywhere.
+     *
+     * The split is the point: the seed itself never lands on disk, and the
+     * server holds a blob it cannot open. Revoking the factor
+     * ({@link revokeDevice}) makes the local key inert immediately — which a
+     * stored master seed can never be, because nothing can reach out and
+     * un-store it.
+     *
+     * Returns the factor id and the key, both base64. Losing the key just means
+     * re-pairing; leaking it is equivalent to leaking the seed for as long as
+     * the factor exists, so store it with the tightest permissions available.
+     */
+    async enrollDevice(label: string): Promise<{ factorId: string; deviceKey: string }> {
+        const seed = this.deps.session.seed;
+        const token = this.deps.session.token;
+        if (!seed || !token) throw new Error("Sign in first to pair this device.");
+
+        const keyBytes = randomSeed();                       // 32 bytes of CSPRNG
+        const key = await wrapKeyFromBytes(keyBytes, DEVICE_WRAP_INFO);
+        const wrapped = await wrapSeed(seed, key);
+        // 128 bits of id, so reading a factor by id is not an enumeration surface.
+        const factorId = `device:${toBase64(randomSeed()).replace(/[+/=]/g, "").slice(0, 22)}`;
+
+        await this.deps.auth.vaultPutFactor(token, {
+            id: factorId,
+            type: "device",
+            wrap: wrapped.ct,
+            iv: wrapped.iv,
+            label,
+            createdAt: Date.now(),
+        });
+        return { factorId, deviceKey: toBase64(keyBytes) };
+    }
+
+    /**
+     * Unlock using a key stored by {@link enrollDevice}.
+     *
+     * Fetches the wrapped seed and opens it locally. Establishes the encryption
+     * identity only — pair it with a session for calls that need one.
+     *
+     * Throws distinguishably: a REVOKED factor is gone from the vault and says
+     * so, where a wrong key fails to decrypt. A machine that has had its access
+     * withdrawn should be able to tell you that, not just "decryption failed".
+     */
+    async unlockWithDevice(username: string, factorId: string, deviceKey: string): Promise<void> {
+        const { factor } = await this.deps.auth.vaultRead(username, "device", undefined, undefined, factorId);
+        if (!factor) {
+            throw new Error("This device is no longer paired — its access was revoked. Sign in again to re-pair.");
+        }
+        if (!factor.wrap || !factor.iv) throw new Error("The stored device factor is incomplete; re-pair this device.");
+        const key = await wrapKeyFromBytes(fromBase64(deviceKey), DEVICE_WRAP_INFO);
+        const seed = await unwrapSeed({ iv: factor.iv, ct: factor.wrap }, key);
+        this.deps.session.setSeed(seed);
+    }
+
+    /** Paired machines, newest first. Metadata only — never the ciphertext. */
+    async listDevices(): Promise<Array<{ id: string; label?: string; createdAt?: number }>> {
+        const token = this.deps.session.token;
+        if (!token) throw new Error("Sign in first to list paired devices.");
+        const { factors } = await this.deps.auth.vaultFactors(token);
+        return factors
+            .filter((f) => f.type === "device")
+            .map((f) => ({ id: f.id, label: f.label, createdAt: f.createdAt }))
+            .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+    }
+
+    /** Withdraw a machine's access. Its stored key stops working immediately. */
+    async revokeDevice(factorId: string): Promise<boolean> {
+        const token = this.deps.session.token;
+        if (!token) throw new Error("Sign in first to revoke a device.");
+        const { deleted } = await this.deps.auth.vaultDeleteFactor(token, factorId);
+        return deleted;
+    }
+
+    /**
+     * Restore an unlocked identity from a seed you already hold.
+     *
+     * The inverse of {@link seedBase64}, for hosts that persist the seed
+     * themselves rather than re-deriving it from a password: a CLI holding it in
+     * a 0600 file, a server-side tool, a test. Without this the seed is a
+     * one-way export and anything outside a browser has to run a full ZK login —
+     * circuits download and proof — on every single invocation.
+     *
+     * Establishes the ENCRYPTION identity only. It does not authenticate: pair
+     * it with a session token (`sessionStore`) for calls that need one.
+     *
+     * Treat a persisted seed as the master credential it is. It is not scoped
+     * and cannot be revoked server-side the way a session token can — rotating
+     * it means moving the identity.
+     */
+    unlockWithSeed(seedBase64: string): void {
+        const seed = fromBase64(seedBase64);
+        if (seed.length !== 32) {
+            throw new Error(`auth.zk.unlockWithSeed: expected a 32-byte seed, got ${seed.length}`);
+        }
+        this.deps.session.setSeed(seed);
     }
 
     // -------------------------------------------------------------------------

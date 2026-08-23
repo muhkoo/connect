@@ -37,6 +37,12 @@ import { AgentsNamespace } from "./namespaces/AgentsNamespace";
 import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
 import { AccessTokensNamespace } from "./namespaces/AccessTokensNamespace";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
+import { VfsNamespace } from "../vfs/VfsNamespace";
+
+/** Personal-space key holding the id of the space VFS content is written to. */
+const VFS_SPACE_KEY = "vfs/space";
+import type { VfsStore } from "../vfs/types";
+import type { Space } from "../spaces/Space";
 import { ChatKeyVault, type ChatKeyStore } from "./ChatKeyVault";
 import type { WrappedPayload } from "../crypto/PassphraseWrap";
 import { OfflineManager } from "../offline/OfflineManager";
@@ -157,6 +163,9 @@ export class Client {
     readonly db: DbNamespace;
     /** File storage — `client.storage.writeFile(...)`, etc. */
     readonly storage: StorageNamespace;
+
+    /** Filesystem over the personal space: directories, versions, real paths. */
+    readonly vfs: VfsNamespace;
     /** Realtime messaging — `client.message.subscribe(...)`, etc. */
     readonly message: MessageNamespace;
     /** Fan-out group spaces — `client.space.createSpace(...)`, etc. */
@@ -264,6 +273,99 @@ export class Client {
             deferShardUpload,
         });
         this.message = new MessageNamespace({ http: this.http, session: this.session, wsBaseUrl });
+
+        // The VFS stores its metadata in the personal space — the same place
+        // `storage.writeFile` already mirrors `{spaceId, manifest}` to, only
+        // arranged as a navigable tree instead of a flat index keyed by file id.
+        //
+        // Content still goes through `storage.writeFile` untouched, into a real
+        // Space with a real gated manifest. The space is created once, lazily,
+        // and its id recorded in the personal space: a filesystem that has never
+        // been written to should not cost a space.
+        const personalStore: VfsStore = {
+            get: async (key) => {
+                const c = this.session.commitment;
+                if (!c) throw new Error("client.vfs: no session — sign in first.");
+                const res = await this.http.post<{ value: unknown }>(
+                    `/api/personal/${encodeURIComponent(c)}/kv/${encodeURIComponent(key)}/get`,
+                    {},
+                );
+                return res?.value ?? null;
+            },
+            put: async (key, value) => {
+                const c = this.session.commitment;
+                if (!c) throw new Error("client.vfs: no session — sign in first.");
+                await this.http.post(`/api/personal/${encodeURIComponent(c)}/kv/${encodeURIComponent(key)}`, { value });
+            },
+            delete: async (key) => {
+                const c = this.session.commitment;
+                if (!c) throw new Error("client.vfs: no session — sign in first.");
+                await this.http.del(`/api/personal/${encodeURIComponent(c)}/kv/${encodeURIComponent(key)}`);
+            },
+            list: async () => {
+                const c = this.session.commitment;
+                if (!c) throw new Error("client.vfs: no session — sign in first.");
+                const res = await this.http.post<{ keys: string[] }>(
+                    `/api/personal/${encodeURIComponent(c)}/list`,
+                    {},
+                );
+                return res?.keys ?? [];
+            },
+        };
+
+        let contentSpace: Promise<Space> | null = null;
+        const resolveContentSpace = (): Promise<Space> => {
+            // Cached as the PROMISE, not the value: two concurrent first writes
+            // would otherwise each create a space and one would be orphaned.
+            if (!contentSpace) {
+                contentSpace = (async () => {
+                    const existing = await personalStore.get(VFS_SPACE_KEY);
+                    if (typeof existing === "string" && existing) return this.space.get(existing);
+                    // `messaging: false` — this space only ever holds files, and
+                    // file chunks carry their own keys, so it needs no group
+                    // keyring and no socket. Creating it the normal way opens a
+                    // WebSocket, which made the first write hang indefinitely.
+                    const space = await this.space.createSpace({ private: true, messaging: false });
+                    await personalStore.put(VFS_SPACE_KEY, space.id);
+                    return space;
+                })().catch((err) => {
+                    contentSpace = null;   // let the next write retry
+                    throw err;
+                });
+            }
+            return contentSpace;
+        };
+
+        this.vfs = new VfsNamespace({
+            store: personalStore,
+            seed: () => this.session.seed,
+            // Share the personal space's socket with `client.kv` rather than
+            // opening a second one to the same Durable Object.
+            subscribe: (handler) => this.kv.onRaw(handler),
+            content: {
+                // `putFile` needs no WebSocket and commits the shards, so the
+                // bytes are metered to the owning app and reference-counted for
+                // GC. `storage.writeFile` would additionally index the manifest
+                // in the space — a second, diverging source of truth for a file
+                // whose handle the VFS already holds.
+                write: async (data, meta) => {
+                    const space = await resolveContentSpace();
+                    const { manifest, stat } = await space.putFile(data, { name: meta.name, type: meta.type });
+                    return { manifest, size: stat.size };
+                },
+                // Reads go through the manifest alone — no space needed. That is
+                // the capability path, so it keeps working for a file whose
+                // handle was shared from someone else's filesystem.
+                read: async (manifest) => (await this.storage.readByManifest(manifest)).data,
+                release: async (manifest) => {
+                    await (await resolveContentSpace()).releaseFile(manifest);
+                },
+                retain: async (manifest) => {
+                    await (await resolveContentSpace()).commitFile(manifest);
+                },
+            },
+        });
+
 
         // Group keys are cached in the user's PersonalSpace (encrypted at rest
         // by client.kv), so a returning member hydrates without a fresh keyring
