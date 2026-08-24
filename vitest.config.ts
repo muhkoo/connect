@@ -61,6 +61,7 @@ export default defineConfig({
       "**/tests/storage/FileStorage.test.ts",
       // Space fan-out group-encryption layer
       "**/tests/vfs/**/*.test.ts",
+      "**/tests/vcs/**/*.test.ts",
       "**/tests/spaces/**/*.test.ts",
       // Offline layer — HLC clock, CRDT primitives, IndexedDB store, sync
       "**/tests/offline/**/*.test.ts",

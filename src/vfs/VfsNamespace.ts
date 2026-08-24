@@ -250,6 +250,62 @@ export class VfsNamespace {
         return new TextDecoder().decode(await this.readFile(path));
     }
 
+    /**
+     * A file's manifest — the handle itself, without reading the bytes.
+     *
+     * Version control records manifests rather than content, so a commit costs
+     * a hash and a reference, not a copy.
+     */
+    async statManifest(path: string): Promise<{ manifest: FileManifest; size: number }> {
+        const entry = await this.expectFile(path);
+        return { manifest: entry.manifest, size: entry.size };
+    }
+
+    /**
+     * Pin content that something other than the working tree depends on.
+     *
+     * A commit references a manifest, so it is an OWNER of that content — without
+     * a reference of its own, deleting the file from the working tree would free
+     * shards the history still needs, and checking out an older commit would find
+     * the content gone. (It did, in test.)
+     */
+    async retainManifest(manifest: FileManifest): Promise<void> {
+        await this.deps.content.retain(manifest);
+    }
+
+    /**
+     * Point a path at content that already exists.
+     *
+     * This is how a checkout restores a file: the bytes are in the shard store
+     * already, so nothing is uploaded or downloaded — only the directory record
+     * changes. Takes a reference, because a second path now depends on those
+     * shards.
+     */
+    async writeManifest(path: string, manifest: FileManifest, size: number): Promise<VfsStat> {
+        const target = this.resolve(path);
+        const name = basename(target);
+        assertValidName(name);
+        await this.mkdir(dirname(target), { recursive: true });
+
+        const parent = await this.openDir(dirname(target));
+        const prior = parent.node.entries[name];
+        if (prior?.kind === "dir") throw new VfsConflictError(`${target} is a directory`);
+
+        await this.deps.content.retain(manifest);
+        const entry: FileEntry = {
+            kind: "file",
+            id: prior?.id ?? newId(),
+            manifest,
+            size,
+            mtime: Date.now(),
+            versions: prior?.versions ?? 0,
+        };
+        await this.mutate(parent, (node) => {
+            node.entries[name] = entry;
+        });
+        return toStat(target, name, entry);
+    }
+
     // ---- writes -------------------------------------------------------------
 
     /**
@@ -318,8 +374,15 @@ export class VfsNamespace {
         return toStat(target, name, entry);
     }
 
-    /** Delete a file, or a directory when `recursive`. */
-    async delete(path: string, opts: { recursive?: boolean } = {}): Promise<void> {
+    /**
+     * Delete a file, or a directory when `recursive`.
+     *
+     * `keepContent` removes the entry WITHOUT releasing its shards. A checkout
+     * needs that: the file is leaving the working tree, but commits still
+     * reference the same manifest, and releasing would free content history
+     * depends on.
+     */
+    async delete(path: string, opts: { recursive?: boolean; keepContent?: boolean } = {}): Promise<void> {
         const target = this.resolve(path);
         if (target === "/") throw new VfsConflictError("the root directory cannot be deleted");
         const name = basename(target);
@@ -332,6 +395,8 @@ export class VfsNamespace {
             const empty = Object.keys(child.node.entries).length === 0;
             if (!empty && !opts.recursive) throw new VfsConflictError(`${target} is not empty`);
             await this.purge(child);
+        } else if (opts.keepContent) {
+            await this.deps.store.delete(historyKey(entry.id)).catch(() => {});
         } else {
             await this.releaseFile(parent, entry);
         }
