@@ -4,6 +4,12 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.12.2-alpha.0 — retract 0.12.1 (2026-08-24)
+
+### Changed
+
+- **Reverts the `manifestId` field added in 0.12.1, and retracts its claim.** That release said keying the platform's storage-reference ledger on content rather than manifest identity caused two copies of one file to share a reference. Measured against a live account, that is not true: chunks are encrypted with a fresh key per write, so two writes of identical plaintext produce *different* shard hashes and therefore different ledger keys. Both copies take their own reference. The field fixed nothing, so it is gone rather than left as inert protocol surface. 0.12.1 is functionally identical to 0.12.0 against any current server.
+
 ## 0.12.0-alpha.0 — `client.vcs`, and a filesystem that stops re-reading itself (2026-08-24)
 
 ### Added
