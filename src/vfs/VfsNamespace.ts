@@ -107,7 +107,7 @@ export class VfsNamespace {
      * network round trip plus a decrypt. Invalidated precisely on write rather
      * than by TTL — a stale directory listing shows files that are not there.
      */
-    private cache = new Map<string, OpenDir>();
+    private cache = new Map<string, Promise<OpenDir>>();
     private readonly historyLimit: number;
 
     constructor(private readonly deps: VfsNamespaceDeps) {
@@ -195,9 +195,17 @@ export class VfsNamespace {
             }
             if (frame?._t !== "change" || typeof frame.key !== "string") return;
             if (!frame.key.startsWith("vfs/")) return;   // someone else's data on the shared feed
-            // Our own writes echo back. Dropping the cache is cheap and keeping a
-            // stale entry is not, so this does not try to filter them out.
-            this.cache.clear();
+
+            // Drop only the record that changed.
+            //
+            // Clearing everything looked cheap and is not: our own writes echo
+            // back, so a sync that writes a few hundred files emptied the cache
+            // a few hundred times, and every path resolution in flight went back
+            // to the network for the root and every directory below it. The key
+            // names the record, so there is no need to guess.
+            const id = frame.key.startsWith("vfs/d/") ? frame.key.slice("vfs/d/".length) : null;
+            if (id) this.cache.delete(id);
+            else this.cache.clear();   // a shape we do not recognise: be safe
             handler();
         });
     }
@@ -259,6 +267,17 @@ export class VfsNamespace {
     async statManifest(path: string): Promise<{ manifest: FileManifest; size: number }> {
         const entry = await this.expectFile(path);
         return { manifest: entry.manifest, size: entry.size };
+    }
+
+    /**
+     * Read content by its manifest, wherever it came from.
+     *
+     * A merge needs the COMMON ANCESTOR's version of a file, which by definition
+     * is not in the working tree any more. The manifest is the whole capability,
+     * so no path lookup is involved.
+     */
+    async readByManifest(manifest: FileManifest): Promise<Uint8Array> {
+        return this.deps.content.read(manifest);
     }
 
     /**
@@ -629,17 +648,34 @@ export class VfsNamespace {
         return dir;
     }
 
-    private async openDirById(id: string, key: Uint8Array): Promise<OpenDir> {
+    private openDirById(id: string, key: Uint8Array): Promise<OpenDir> {
         const hit = this.cache.get(id);
         if (hit) return hit;
-        const raw = await this.deps.store.get(dirKey(id));
-        // An absent record is an EMPTY directory, not an error: the root exists
-        // before anything has been written to it, and a directory is created by
-        // its parent naming it rather than by its own record appearing.
-        const node = (await unseal<DirNode>(key, raw)) ?? { v: 1, entries: {}, mtime: Date.now() };
-        const open: OpenDir = { id, key, node };
-        this.cache.set(id, open);
-        return open;
+
+        // The PROMISE goes in the cache, not the resolved value.
+        //
+        // Reading a project means resolving hundreds of paths that share the
+        // same handful of directories. Caching only the settled value leaves
+        // every concurrent reader to miss and fire its own request for the same
+        // record — which is how loading one project turned into thousands of
+        // identical `vfs/d/<id>` fetches, most of them in flight at once.
+        const pending = (async () => {
+            const raw = await this.deps.store.get(dirKey(id));
+            // An absent record is an EMPTY directory, not an error: the root
+            // exists before anything has been written to it, and a directory is
+            // created by its parent naming it rather than by its own record
+            // appearing.
+            const node = (await unseal<DirNode>(key, raw)) ?? { v: 1, entries: {}, mtime: Date.now() };
+            return { id, key, node } satisfies OpenDir;
+        })().catch((err) => {
+            // A failed read must not be remembered, or one blip poisons the
+            // directory for the life of the session.
+            if (this.cache.get(id) === pending) this.cache.delete(id);
+            throw err;
+        });
+
+        this.cache.set(id, pending);
+        return pending;
     }
 
     /** Apply an edit to a directory record and persist it. */
@@ -647,7 +683,7 @@ export class VfsNamespace {
         edit(dir.node);
         dir.node.mtime = Date.now();
         await this.deps.store.put(dirKey(dir.id), await seal(dir.key, dir.node));
-        this.cache.set(dir.id, dir);
+        this.cache.set(dir.id, Promise.resolve(dir));
     }
 
     private async createDir(parentPath: string, name: string): Promise<void> {
@@ -692,7 +728,7 @@ export class VfsNamespace {
         }
         const open: OpenDir = { id: clone.id, key: fromBase64(clone.key), node };
         await this.deps.store.put(dirKey(open.id), await seal(open.key, node));
-        this.cache.set(open.id, open);
+        this.cache.set(open.id, Promise.resolve(open));
         return clone;
     }
 

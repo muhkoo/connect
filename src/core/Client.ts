@@ -38,6 +38,7 @@ import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
 import { AccessTokensNamespace } from "./namespaces/AccessTokensNamespace";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 import { VfsNamespace } from "../vfs/VfsNamespace";
+import { VcsNamespace } from "../vcs/VcsNamespace";
 
 /** Personal-space key holding the id of the space VFS content is written to. */
 const VFS_SPACE_KEY = "vfs/space";
@@ -166,6 +167,8 @@ export class Client {
 
     /** Filesystem over the personal space: directories, versions, real paths. */
     readonly vfs: VfsNamespace;
+    /** Version control over the VFS: commits, branches, merges — per project. */
+    readonly vcs: VcsNamespace;
     /** Realtime messaging — `client.message.subscribe(...)`, etc. */
     readonly message: MessageNamespace;
     /** Fan-out group spaces — `client.space.createSpace(...)`, etc. */
@@ -364,6 +367,16 @@ export class Client {
                     await (await resolveContentSpace()).commitFile(manifest);
                 },
             },
+        });
+
+        // Sealed into the SAME personal store as the VFS metadata, so a project
+        // and its history live or die together — there is no way to end up with
+        // commits whose working tree is gone, or the reverse.
+        this.vcs = new VcsNamespace({
+            vfs: this.vfs,
+            store: personalStore,
+            seed: () => this.session.seed,
+            author: () => this.session.commitment ?? "unknown",
         });
 
 

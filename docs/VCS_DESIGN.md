@@ -96,7 +96,40 @@ decrypted**.
 
 ## Phases
 
+All four are built.
+
 1. **Objects + commit/log/checkout/diff** — the foundation everything else needs.
 2. **Branches** — refs, `switch`, and detached HEAD.
 3. **Merge** — base finding, three-way, conflict markers.
 4. **Surfaces** — `muhkoo vcs …` in the CLI, history/branch UI in the IDE.
+
+## Decisions made while building
+
+A few things the design above did not settle, decided against real failures the
+tests caught:
+
+**A commit retains what it records.** Content is reference-counted, and the
+working tree was the only thing holding a reference. Deleting a file after
+committing it therefore freed shards the commit still needed, and the history
+became unreadable. `commit()` takes the repository's own reference, and
+`checkout` deletes with `keepContent` so materialising an old state never frees
+anything history points at.
+
+**Mergeability is judged by content, not by the declared type.** The MIME type is
+a hint the VCS does not own: a content store may omit it, and files with no
+extension to derive one from (`Makefile`, `LICENSE`, `.gitignore`, `.env`) get
+`application/octet-stream`. Trusting the label made every one of those an
+unmergeable false conflict. Obvious binary types are still rejected without
+reading — merging a video is never the answer — but anything else is sniffed:
+a NUL byte or invalid UTF-8 means binary, everything else merges.
+
+**Moving refuses to overwrite uncommitted work.** `switch`, `checkout` and
+`merge` all replace the working tree, and unlike an ordinary write nobody asked
+for it. Each refuses while there are uncommitted changes, naming the files at
+risk, and takes `{ discardChanges: true }` for the case where losing them is the
+point.
+
+**A conflicted merge is finished by the next commit.** The other side is recorded
+under `mergeKey(slug)` when the merge stops, and consumed as the second parent
+when you commit the resolution. Without that the resolving commit would have one
+parent, and the two branches would still read as diverged afterwards.

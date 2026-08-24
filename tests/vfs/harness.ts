@@ -12,12 +12,16 @@ import { VfsNamespace, type VfsContentStore } from "../../src/vfs/VfsNamespace";
 import type { VfsStore } from "../../src/vfs/types";
 import type { FileManifest } from "../../src/storage/types";
 
-export function makeStore(): VfsStore & { records: Map<string, unknown>; puts: number } {
+export function makeStore(): VfsStore & { records: Map<string, unknown>; puts: number; gets: string[] } {
     const records = new Map<string, unknown>();
     return {
         records,
         puts: 0,
+        // Every read, in order — so a test can assert that resolving many paths
+        // does not re-fetch the same directory record over and over.
+        gets: [] as string[],
         async get(key) {
+            (this as { gets: string[] }).gets.push(key);
             return records.get(key) ?? null;
         },
         async put(key, value) {
@@ -50,7 +54,7 @@ export function makeContent(): VfsContentStore & { blobs: Map<string, { bytes: U
             const id = `m${++n}`;
             blobs.set(id, { bytes, refs: 1 });
             return {
-                manifest: { id, name: meta.name, size: bytes.length } as unknown as FileManifest,
+                manifest: { id, name: meta.name, size: bytes.length, type: meta.type } as unknown as FileManifest,
                 size: bytes.length,
             };
         },

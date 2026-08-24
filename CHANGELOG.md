@@ -4,6 +4,25 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.12.0-alpha.0 — `client.vcs`, and a filesystem that stops re-reading itself (2026-08-24)
+
+### Added
+
+- **`client.vcs` — version control over the VFS.** `vcs.open(slug)` returns a repository for one project: `commit`, `log`, `diff`, `status`, `checkout`, `restore`, `branch`, `switchTo`, `merge`. There are no remotes and no `push`/`pull` by design — the repository lives in your account, so every machine you sign in from is already looking at the same objects.
+  - **Two object spaces.** The working tree is the mutable VFS; commits and trees are content-addressed objects sealed under a per-project key (`deriveRepoKey(seed, slug)`). There are no blob objects: a tree points at the `FileManifest` the VFS already holds, so committing moves no bytes.
+  - **A commit takes its own reference to what it records.** Content is reference-counted and the working tree was the only thing holding a reference, so deleting a file after committing it freed shards the commit still needed. `checkout` deletes with `keepContent` for the same reason.
+  - **Three-way merge with conflict markers**, `merge3`/`merge3Text`. A conflicted merge records the other side and the next `commit` consumes it as a second parent — without that, resolving would produce a single-parent commit and the branches would still read as diverged.
+  - **Mergeability is judged by content, not by the declared type.** The MIME type is a hint the VCS does not own: a content store may omit it, and `Makefile`, `LICENSE`, `.gitignore` and `.env` have no extension to derive one from. Obvious binary types are rejected without reading; everything else is sniffed for NUL bytes and invalid UTF-8.
+  - **`switchTo`, `checkout` and `merge` refuse to overwrite uncommitted work**, naming the files at risk. They replace the working tree, and unlike an ordinary write nobody asked for it. `{ discardChanges: true }` opts out.
+  - `resolve(rev)` understands `HEAD`, branch names, abbreviated hashes, and trailing `^` / `~n`.
+- `vfs.readByManifest(manifest)` — read content by its handle, wherever it came from. A merge needs the common ancestor's version of a file, which by definition is no longer in the working tree.
+- `vfs` and `vcs` types are now exported from every build surface.
+
+### Fixed
+
+- **Loading a project no longer re-fetches the same directory records thousands of times.** The record cache stored the resolved value rather than the in-flight promise, so every concurrent path resolution missed and started its own request for the same record — and since every resolution starts at the root, the cost was files × depth. Reading 20 files across 4 directories went from **80 requests to 4**, and the ratio grows with the number of files. A failed read is no longer remembered, so one blip cannot poison a directory for the life of the session.
+- **The change feed invalidates one record instead of the whole cache.** Our own writes echo back, so a sync writing a few hundred files emptied the cache a few hundred times and sent every in-flight resolution back to the network. The frame names the record; only that one is dropped now.
+
 ## 0.11.0-alpha.0 — `client.vfs`, a real filesystem (2026-08-22)
 
 ### Added

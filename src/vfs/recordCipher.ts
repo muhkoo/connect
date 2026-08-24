@@ -46,6 +46,17 @@ export function newId(): string {
 }
 
 /** The root key, derived from the master seed. The only key not stored in a parent. */
+/**
+ * The key a project's repository objects are sealed with.
+ *
+ * Per project, not one key for everything: commits, trees and refs describe a
+ * single project's history, and deriving per slug keeps that blast radius small
+ * if a key is ever shared to collaborate on one project.
+ */
+export async function deriveRepoKey(seed: Uint8Array, slug: string): Promise<Uint8Array> {
+    return deriveBitsHkdf(seed, `${VFS_ROOT_INFO}:vcs:${slug}`, AES_KEY_BYTES);
+}
+
 export async function deriveRootKey(seed: Uint8Array): Promise<Uint8Array> {
     return deriveBitsHkdf(seed, VFS_ROOT_INFO, AES_KEY_BYTES);
 }

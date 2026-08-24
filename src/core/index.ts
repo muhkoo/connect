@@ -81,6 +81,15 @@ export type {
     AgentScopeOpts,
     AgentsNamespaceDeps,
 } from "./namespaces/AgentsNamespace";
+export { VfsNamespace } from "../vfs/VfsNamespace";
+export { VfsLockedError } from "../vfs/types";
+export type { VfsNamespaceDeps, VfsContentStore } from "../vfs/VfsNamespace";
+export type { VfsStat, VfsStore, FileEntry, DirEntry, DirNode } from "../vfs/types";
+export { VcsNamespace, Repo } from "../vcs/VcsNamespace";
+export type { VcsNamespaceOptions, VcsNamespaceDeps } from "../vcs/VcsNamespace";
+export { VcsError, DEFAULT_BRANCH } from "../vcs/types";
+export type { Commit, Tree, TreeEntry, TreeFile, Head, Change, LogEntry, Conflict, MergeResult } from "../vcs/types";
+export { merge3, merge3Text } from "../vcs/merge3";
 export { FunctionsNamespace, DEFAULT_FN_HOST_SUFFIX } from "./namespaces/FunctionsNamespace";
 export type {
     FunctionConfig,

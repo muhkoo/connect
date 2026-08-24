@@ -50,6 +50,14 @@ export * from "../core/namespaces/SpaceNamespace";
 export * from "../core/namespaces/AgentsNamespace";
 export * from "../core/namespaces/FunctionsNamespace";
 export * from "../core/namespaces/AccessTokensNamespace";
+// The filesystem and its history. Flat `export *` for the same dts-plugin
+// reason as the Client exports above — named re-exports are silently dropped,
+// which would leave `client.vfs`/`client.vcs` usable but untypeable.
+export * from "../vfs/VfsNamespace";
+export * from "../vfs/types";
+export * from "../vcs/VcsNamespace";
+export * from "../vcs/types";
+export * from "../vcs/merge3";
 // WebAuthn helpers — notably `PasskeyOriginError` / `rpIdUsableForOrigin`, so an
 // app can tell "this passkey belongs to another origin" from a cancelled prompt.
 // Flat `export *` so the dts plugin keeps the TYPES (named re-exports get dropped).

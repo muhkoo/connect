@@ -58,6 +58,20 @@ export interface Change {
     kind: "added" | "removed" | "modified";
 }
 
+/** A path the merge could not settle on its own. */
+export interface Conflict {
+    path: string;
+    /** `binary` cannot be merged at all — the user picks a side. */
+    reason: "content" | "binary" | "modify-delete";
+}
+
+export interface MergeResult {
+    /** "up-to-date" and "fast-forward" do no three-way work at all. */
+    kind: "up-to-date" | "fast-forward" | "merged" | "conflicted";
+    commit?: string;
+    conflicts: Conflict[];
+}
+
 export interface LogEntry {
     hash: string;
     message: string;
@@ -71,6 +85,8 @@ export const objectKey = (slug: string, hash: string): string => `vcs/${slug}/ob
 export const refKey = (slug: string, name: string): string => `vcs/${slug}/refs/${name}`;
 export const headKey = (slug: string): string => `vcs/${slug}/HEAD`;
 export const refsIndexKey = (slug: string): string => `vcs/${slug}/refs`;
+/** An in-progress merge: what to make the second parent when it is committed. */
+export const mergeKey = (slug: string): string => `vcs/${slug}/MERGE`;
 
 export const DEFAULT_BRANCH = "main";
 
