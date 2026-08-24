@@ -4,6 +4,18 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.13.0-alpha.0 — treat a directory record as untrusted input (2026-08-24)
+
+### Security
+
+A security review of the VFS mount pattern found that **any app a user signs into can write arbitrary files anywhere in that user's VFS** — hosted auth hands the app the master seed, the VFS root key is a pure HKDF of it, and every child directory key lives inside its parent record, so the root key reaches the whole tree. A directory record is therefore not necessarily something this SDK wrote, and the write-side checks are not in that path at all. The root cause is tracked as SEC-3 in `accelerator/SECURITY-FOLLOWUPS.md`; these are the read-side changes.
+
+- **Entry names are validated where they are read.** `list()` now drops (and warns about) any entry whose stored name would become path structure or hide what it is: `/`, backslash, NUL, other control characters, Unicode bidi overrides, `.`/`..`, or over 255 bytes. Dropped rather than thrown on — one bad entry must not make a directory unlistable, and callers walk this output straight into filesystem paths. `isSafeName` is exported.
+- **`assertValidName` is no longer a tautology.** Every call site passed `basename()` of an already-normalized path, which by construction could never contain the three things it checked for. It now shares `isSafeName`.
+- **Cycle guards and a depth cap** in `walk`, `sweep`, `purge` and `cloneEntry`. `walk` recursed on a re-resolved path with no visited set, so a record pointing at an ancestor — or, before names were validated, an entry simply named `..` — looped forever while growing its result unboundedly; `mount` calls it on every sync pass. `cloneEntry` was the worst of the four: it mints a new id, key and stored record per level, so copying a cyclic directory wrote records to the store, and to the user's bill, in an unbounded loop.
+
+Covered by `tests/vfs/hostile-records.test.ts`, which plants sealed records directly rather than going through the SDK — the capability the threat model actually grants.
+
 ## 0.12.2-alpha.0 — retract 0.12.1 (2026-08-24)
 
 ### Changed

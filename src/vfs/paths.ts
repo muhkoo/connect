@@ -71,10 +71,37 @@ export function isUnder(path: string, dir: string): boolean {
  * directory on the next lookup — a file literally named `..` could never be
  * addressed again.
  */
+/** The longest a single entry name may be. Matches the common filesystem limit. */
+export const MAX_NAME_BYTES = 255;
+
+/**
+ * Is this a name we are willing to store, and to hand back as a path segment?
+ *
+ * This is the READ-side check as much as the write-side one, and the read side
+ * is the one that matters: a directory record is sealed with a key that any
+ * holder of the master seed can derive, so its contents are not necessarily
+ * something this SDK wrote. A name arriving from a record is input.
+ *
+ * What each rule is for:
+ *  - `/` and backslash would become path structure. Backslash is a separator on
+ *    Windows, which makes it traversal there and an odd filename elsewhere.
+ *  - `.` and `..` navigate rather than name.
+ *  - NUL terminates a path in every syscall that takes one.
+ *  - Other control characters and bidi overrides let a name print as something
+ *    other than what it is - the classic way a file passes review.
+ *  - A length cap, because nothing else imposes one.
+ */
+export function isSafeName(name: string): boolean {
+    if (!name || name === "." || name === "..") return false;
+    if (name.includes("/") || name.includes(String.fromCharCode(92))) return false;
+    const CONTROL_OR_BIDI = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]");
+    if (CONTROL_OR_BIDI.test(name)) return false;
+    return new TextEncoder().encode(name).length <= MAX_NAME_BYTES;
+}
+
 export function assertValidName(name: string): void {
     if (!name) throw new Error("VFS: name cannot be empty");
-    if (name === "." || name === "..") throw new Error(`VFS: "${name}" is not a usable name`);
-    if (name.includes("/")) throw new Error(`VFS: name cannot contain "/" (got ${JSON.stringify(name)})`);
+    if (!isSafeName(name)) throw new Error(`VFS: ${JSON.stringify(name)} is not a usable name`);
 }
 
 /**

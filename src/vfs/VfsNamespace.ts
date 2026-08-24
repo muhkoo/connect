@@ -36,7 +36,7 @@ import {
 } from "./types";
 import { deriveRootKey, fromBase64, newDirKey, newId, seal, toBase64, unseal } from "./recordCipher";
 import {
-    assertValidName, basename, contentTypeFor, dirname, isUnder, join, normalizePath, resolveFrom, segments,
+    assertValidName, basename, contentTypeFor, dirname, isSafeName, isUnder, join, normalizePath, resolveFrom, segments,
 } from "./paths";
 import { globToRegExp } from "./glob";
 
@@ -95,6 +95,15 @@ interface OpenDir {
     key: Uint8Array;
     node: DirNode;
 }
+
+/**
+ * How deep a tree may be before we stop walking it.
+ *
+ * Well past anything a real project needs, and low enough that a malformed or
+ * hostile record cannot spend the caller's memory before the cycle guard sees a
+ * repeat.
+ */
+const MAX_DEPTH = 64;
 
 const DEFAULT_HISTORY_LIMIT = 20;
 
@@ -227,8 +236,28 @@ export class VfsNamespace {
         const dir = await this.openDir(path);
         const base = this.resolve(path);
         return Object.entries(dir.node.entries)
+            // Validate the name HERE, where it is read.
+            //
+            // A directory record is sealed under a key derivable from the master
+            // seed, so its contents are not necessarily something this SDK
+            // wrote, and the write-side check never sees them. An unusable name
+            // is dropped rather than thrown on: one bad entry must not make the
+            // whole directory unlistable, and callers walk this output straight
+            // into filesystem paths.
+            .filter(([name]) => {
+                if (isSafeName(name)) return true;
+                this.warn(`ignoring entry with an unusable name in ${base}`);
+                return false;
+            })
             .map(([name, entry]) => toStat(join(base, name), name, entry))
             .sort(byDirsThenName);
+    }
+
+    private warn(message: string): void {
+        // Kept quiet by default in a browser console that the user cannot act
+        // on, but never silent: a dropped entry is a real difference between
+        // what is stored and what is shown.
+        console.warn(`[muhkoo/vfs] ${message}`);
     }
 
     /**
@@ -239,13 +268,30 @@ export class VfsNamespace {
      */
     async walk(path = "."): Promise<string[]> {
         const out: string[] = [];
-        const visit = async (dirPath: string): Promise<void> => {
+        // Guard against a tree that is not one.
+        //
+        // `visit` recurses on a PATH, re-resolved from the root each time, so a
+        // record whose entry points back at an ancestor - or, before names were
+        // validated, an entry simply named ".." - recurses forever and grows
+        // `out` without bound. Nothing in the format prevents that, and `mount`
+        // calls this on every sync pass.
+        const seen = new Set<string>();
+        const visit = async (dirPath: string, depth: number): Promise<void> => {
+            if (depth > MAX_DEPTH) {
+                this.warn(`stopping at ${dirPath}: deeper than ${MAX_DEPTH} levels`);
+                return;
+            }
+            if (seen.has(dirPath)) {
+                this.warn(`stopping at ${dirPath}: already visited (the tree contains a cycle)`);
+                return;
+            }
+            seen.add(dirPath);
             for (const entry of await this.list(dirPath)) {
-                if (entry.kind === "dir") await visit(entry.path);
+                if (entry.kind === "dir") await visit(entry.path, depth + 1);
                 else out.push(entry.path);
             }
         };
-        await visit(this.resolve(path));
+        await visit(this.resolve(path), 0);
         return out;
     }
 
@@ -531,6 +577,11 @@ export class VfsNamespace {
         const root = await this.root();
         const reachable = new Set<string>();
         const visit = async (dir: OpenDir): Promise<void> => {
+            // `reachable` was already the visited set - it just was not being
+            // TESTED before recursing, so a cycle looped forever. Here the
+            // consequence would have been worse than a hang: sweep decides what
+            // to delete, and it never got as far as deciding.
+            if (reachable.has(dirKey(dir.id))) return;
             reachable.add(dirKey(dir.id));
             for (const entry of Object.values(dir.node.entries)) {
                 if (entry.kind === "dir") {
@@ -696,10 +747,15 @@ export class VfsNamespace {
     }
 
     /** Recursively remove a subtree's records. Best-effort: unreachable ≠ fatal. */
-    private async purge(dir: OpenDir): Promise<void> {
+    private async purge(dir: OpenDir, seen = new Set<string>()): Promise<void> {
+        // A record that references an ancestor would otherwise recurse forever:
+        // the id is only removed from the cache AFTER the loop, so re-entering
+        // it hits the same cached record every time.
+        if (seen.has(dir.id)) return;
+        seen.add(dir.id);
         for (const entry of Object.values(dir.node.entries)) {
             if (entry.kind === "dir") {
-                await this.purge(await this.openDirById(entry.id, fromBase64(entry.key)));
+                await this.purge(await this.openDirById(entry.id, fromBase64(entry.key)), seen);
             } else {
                 await this.releaseFile(dir, entry);
             }
@@ -713,18 +769,32 @@ export class VfsNamespace {
      * directory gets a fresh id and key, so the copy is independent of the
      * original — writing into one must never appear in the other.
      */
-    private async cloneEntry(entry: Entry): Promise<Entry> {
+    private async cloneEntry(entry: Entry, seen = new Set<string>()): Promise<Entry> {
         if (entry.kind === "file") {
             // Same bytes, second owner: take a reference so deleting either one
             // leaves the other readable.
             await this.deps.content.retain(entry.manifest);
             return { kind: "file", id: newId(), manifest: entry.manifest, size: entry.size, mtime: Date.now(), versions: 0 };
         }
+        // The most expensive walker to leave unguarded: it mints a NEW id, key
+        // and stored record at every level, so a cyclic tree does not merely
+        // hang - it writes records to the store, and to the user's bill, in an
+        // unbounded loop.
+        if (seen.has(entry.id) || seen.size > MAX_DEPTH) {
+            throw new VfsConflictError("VFS: refusing to copy a directory that contains a cycle");
+        }
+        seen.add(entry.id);
         const source = await this.openDirById(entry.id, fromBase64(entry.key));
         const clone: DirEntry = { kind: "dir", id: newId(), key: toBase64(newDirKey()), mtime: Date.now() };
         const node: DirNode = { v: 1, entries: {}, mtime: Date.now() };
         for (const [name, child] of Object.entries(source.node.entries)) {
-            node.entries[name] = await this.cloneEntry(child);
+            // Names are validated on read everywhere else; a copy must not be
+            // the way a bad one is carried into a fresh record.
+            if (!isSafeName(name)) {
+                this.warn(`skipping entry with an unusable name while copying`);
+                continue;
+            }
+            node.entries[name] = await this.cloneEntry(child, seen);
         }
         const open: OpenDir = { id: clone.id, key: fromBase64(clone.key), node };
         await this.deps.store.put(dirKey(open.id), await seal(open.key, node));
