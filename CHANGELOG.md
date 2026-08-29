@@ -4,6 +4,10 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.13.2-alpha.0 — released in lockstep with the CLI (2026-08-29)
+
+No SDK changes. `@muhkoo/cli` is versioned in lockstep with this package (see `cli/scripts/sync-version.mjs`) because it ships against an exact SDK version, so a CLI-only fix — here, `vfs mount` reading files concurrently — needs a matching release on this side.
+
 ## 0.13.1-alpha.0 — walk sibling directories concurrently (2026-08-29)
 
 ### Fixed
