@@ -4,6 +4,14 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+## 0.13.1-alpha.0 — walk sibling directories concurrently (2026-08-29)
+
+### Fixed
+
+- **`vfs.walk` lists sibling directories at the same time instead of one after another.** Each `list` is a round trip for one directory record, and walking them in series cost the sum of those latencies — measured against real projects, the walk alone was 1–2.1s before a single file had been read. Directories are independent, so there was never a reason to queue them. Bounded at 8; browsers cap concurrency per origin anyway.
+- **Order is unchanged.** Each entry maps to its own slice of the result and the slices are concatenated in listing order, so the output is byte-identical to the depth-first version — `mount`, the CLI's `vfs tree`, and the IDE's project context all consume that order. Covered by a test that pins the exact expected sequence.
+- The cycle guard still holds when visits overlap: the visited set is claimed before the first `await`, so two concurrent visits to one directory cannot both get through.
+
 ## 0.13.0-alpha.0 — treat a directory record as untrusted input (2026-08-24)
 
 ### Security

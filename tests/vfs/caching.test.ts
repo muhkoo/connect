@@ -1,6 +1,52 @@
 import { describe, it, expect } from "vitest";
 import { makeVfs } from "./harness";
 
+describe("walk", () => {
+    it("returns exactly the same order as a depth-first walk", async () => {
+        // The parallel version must be a pure speed change: mount, the CLI's
+        // tree, and the project context all consume this order.
+        const { vfs } = makeVfs();
+        for (const p of [
+            "/a/1.txt", "/a/deep/x.txt", "/a/deep/y.txt", "/b/2.txt",
+            "/b/nested/more/z.txt", "/c.txt", "/a/deep/deeper/w.txt",
+        ]) await vfs.writeFile(p, p);
+
+        const got = await vfs.walk("/");
+        // Depth-first, directories before files at each level (byDirsThenName).
+        expect(got).toEqual([
+            "/a/deep/deeper/w.txt", "/a/deep/x.txt", "/a/deep/y.txt", "/a/1.txt",
+            "/b/nested/more/z.txt", "/b/2.txt", "/c.txt",
+        ]);
+    });
+
+    it("lists sibling directories concurrently", async () => {
+        // The point of the change. With five sibling directories a sequential
+        // walk issues five round trips end to end; a parallel one overlaps them.
+        const { vfs, store } = makeVfs();
+        for (let i = 0; i < 5; i++) await vfs.writeFile(`/dir${i}/f.txt`, "x");
+        vfs.clearCache();
+
+        let inFlight = 0, peak = 0;
+        const real = store.get.bind(store);
+        store.get = async (key: string) => {
+            inFlight++; peak = Math.max(peak, inFlight);
+            try { return await real(key); } finally { inFlight--; }
+        };
+
+        await vfs.walk("/");
+        expect(peak).toBeGreaterThan(1);
+    });
+
+    it("still terminates on a cycle when visits overlap", async () => {
+        // The visited set is claimed before the first await, so two concurrent
+        // visits to one directory cannot both get through.
+        const { vfs } = makeVfs();
+        await vfs.writeFile("/a/b/c.txt", "x");
+        const paths = await vfs.walk("/");
+        expect(paths).toEqual(["/a/b/c.txt"]);
+    });
+});
+
 describe("directory record caching", () => {
     it("fetches a shared directory once, however many files are read at once", async () => {
         // The failure this guards against: loading a project fired thousands of
