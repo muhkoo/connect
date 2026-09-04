@@ -280,17 +280,24 @@ export class HostedAuth {
      * (also useful for popup mode / tests). `redirectUri` must be registered for
      * the app in the portal.
      */
-    async login(opts: { appId: string; redirectUri: string; redirect?: boolean }): Promise<string> {
+    async login(opts: { appId: string; redirectUri: string; redirect?: boolean; prompt?: "login" }): Promise<string> {
         const { codeVerifier, codeChallenge } = await generatePkce();
         const state = randomState();
         this.store({ codeVerifier, state, appId: opts.appId, redirectUri: opts.redirectUri });
-        const url = `${this.deps.authBaseUrl}/authorize?` + new URLSearchParams({
+        const params: Record<string, string> = {
             app_id: opts.appId,
             redirect_uri: opts.redirectUri,
             state,
             code_challenge: codeChallenge,
             code_challenge_method: "S256",
-        }).toString();
+        };
+        // `prompt=login` forces the credential screen even when the browser is
+        // remembered. Without it, an app's own "sign out" would be undone on the
+        // very next sign-in click: single sign-on means the hosted page still
+        // knows you, so the app must be able to say "ask anyway". Named after the
+        // OIDC parameter that solves the same problem.
+        if (opts.prompt) params.prompt = opts.prompt;
+        const url = `${this.deps.authBaseUrl}/authorize?` + new URLSearchParams(params).toString();
         if (opts.redirect !== false) this.location().assign(url);
         return url;
     }

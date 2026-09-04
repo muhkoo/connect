@@ -1,6 +1,6 @@
 {
   "name": "@muhkoo/connect",
-  "version": "0.13.2-alpha.0",
+  "version": "0.14.0-alpha.1",
   "description": "Simple client SDK for building distributed edge based applications",
   "main": "dist/server/index.js",
   "module": "dist/server/index.js",
@@ -48,7 +48,7 @@
     "build:typedoc": "rm -rf docs && typedoc",
     "build:docs": "rm -rf docs && typedoc",
     "clean": "rm -rf dist && rm -rf coverage && rm -rf node_modules && rm -rf yarn.lock",
-    "build": "rm -rf dist && yarn rollup:browser && yarn rollup:server && yarn rollup:workers",
+    "build": "yarn sync-version && rm -rf dist && yarn rollup:browser && yarn rollup:server && yarn rollup:workers",
     "rollup:workers": "BUILD_ENV=workers rollup -c",
     "rollup:workers:dev": "BUILD_ENV=workers rollup -c --watch",
     "dev": "concurrently --names \"SERVER,BROWSER,WORKERD\" --prefix-colors \"blue,magenta,yellow\" \"yarn rollup:server:dev\" \"yarn rollup:browser:dev\" \"yarn rollup:workers:dev\" ",
@@ -66,7 +66,8 @@
     "watch:typedoc": "nodemon --watch src --ext ts --exec 'yarn build:typedoc'",
     "watch:docs": "nodemon --watch src --ext ts --exec 'yarn build:docs'",
     "watch:lint": "nodemon --watch src --ext ts --exec 'yarn lint'",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "node scripts/sync-version.mjs --check",
+    "sync-version": "node scripts/sync-version.mjs"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",

@@ -50,6 +50,26 @@ export class VaultUnavailableError extends Error {
     }
 }
 
+/**
+ * A stored device pairing that the account has since revoked.
+ *
+ * Typed rather than a bare Error because the right response is specific and the
+ * wrong one is harmful: the caller must DISCARD its stored key and fall back to
+ * a password. Retrying is futile (the factor is gone from the vault), and
+ * silently re-pairing would undo the revocation that a user performed
+ * deliberately — the whole point of a revocable pairing is that withdrawing it
+ * stays withdrawn.
+ *
+ * Distinct from a wrong key, which fails to decrypt rather than failing to
+ * resolve. A machine whose access was withdrawn should be able to say so.
+ */
+export class DeviceRevokedError extends Error {
+    constructor() {
+        super("This device is no longer paired — its access was revoked. Sign in again to re-pair.");
+        this.name = "DeviceRevokedError";
+    }
+}
+
 /** What the auth methods resolve to — the stable, non-secret user facts. */
 export interface AuthUser {
     username: string;
@@ -722,14 +742,47 @@ export class ZkAuth {
      * withdrawn should be able to tell you that, not just "decryption failed".
      */
     async unlockWithDevice(username: string, factorId: string, deviceKey: string): Promise<void> {
+        const seed = await this.openDeviceFactor(username, factorId, deviceKey);
+        this.deps.session.setSeed(seed);
+    }
+
+    /**
+     * Sign in using a key stored by {@link enrollDevice} — session AND seed.
+     *
+     * {@link unlockWithDevice} recovers only the encryption identity, which suits
+     * a CLI that already holds a session token on disk. A browser generally does
+     * not: its session expires while the device pairing is still perfectly valid,
+     * and at that point it holds the means to decrypt everything but no way to
+     * make an authenticated call. So this derives the ZK identity from the
+     * recovered seed and proves it, exactly as {@link recoverWithPhrase} does —
+     * the seed has always been sufficient to authenticate, and withholding that
+     * here just meant re-typing a password to prove something already known.
+     *
+     * This is what makes single sign-on possible without any credential at rest:
+     * the seed is never stored, only a key that opens a server-held blob, and
+     * revoking the factor ({@link revokeDevice}) severs it immediately.
+     *
+     * Throws distinguishably on a revoked pairing, so a caller can clear its
+     * stored key and fall back to a password rather than retrying forever.
+     */
+    async loginWithDevice(username: string, factorId: string, deviceKey: string, opts: LoginOptions = {}): Promise<AuthUser> {
+        const seed = await this.openDeviceFactor(username, factorId, deviceKey);
+        const identity = await deriveIdentityFromSeed(seed);
+        const user = await this.proveAndStore(username, identity, opts);
+        this.deps.session.setSeed(seed);
+        return user;
+    }
+
+    /** Fetch and open a `device` factor. Shared by the unlock and login paths so
+     *  the two can never disagree about what a revoked pairing looks like. */
+    private async openDeviceFactor(username: string, factorId: string, deviceKey: string): Promise<Uint8Array> {
         const { factor } = await this.deps.auth.vaultRead(username, "device", undefined, undefined, factorId);
         if (!factor) {
-            throw new Error("This device is no longer paired — its access was revoked. Sign in again to re-pair.");
+            throw new DeviceRevokedError();
         }
         if (!factor.wrap || !factor.iv) throw new Error("The stored device factor is incomplete; re-pair this device.");
         const key = await wrapKeyFromBytes(fromBase64(deviceKey), DEVICE_WRAP_INFO);
-        const seed = await unwrapSeed({ iv: factor.iv, ct: factor.wrap }, key);
-        this.deps.session.setSeed(seed);
+        return unwrapSeed({ iv: factor.iv, ct: factor.wrap }, key);
     }
 
     /** Paired machines, newest first. Metadata only — never the ciphertext. */

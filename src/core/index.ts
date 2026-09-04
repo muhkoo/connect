@@ -26,7 +26,7 @@ export { Room } from "./Room";
 export type { RoomDeps, RoomFileMetadata } from "./Room";
 export { Space } from "../spaces/Space";
 export type { SpaceDeps, SpaceFileMetadata, SpaceMessageEvent, EphemeralEvent, MessageDeletedEvent } from "../spaces/Space";
-export { AuthNamespace, ZkAuth, VaultUnavailableError } from "./namespaces/AuthNamespace";
+export { AuthNamespace, ZkAuth, VaultUnavailableError, DeviceRevokedError } from "./namespaces/AuthNamespace";
 export type { AuthUser, RegisterParams, LoginOptions } from "./namespaces/AuthNamespace";
 // Hosted auth (`client.auth.hosted`) — the redirect flow plus TV device pairing.
 export { HostedAuth, DevicePairingError, ReauthRequiredError, canonicalUserCode, formatUserCode } from "./namespaces/HostedAuth";

@@ -55,6 +55,7 @@ export default defineConfig({
       // TV device pairing SDK surface (client.auth.hosted.*) + deviceStore (unit;
       // fake fetch + fake storage + injected sleep, no network/timers/snarkjs)
       "**/tests/auth/device-pairing-sdk.test.ts",
+            "**/tests/auth/device-login.test.ts",
       // Hosted-auth full flow (e2e; opt-in: E2E_STAGING=1 + MUHKOO_BASE_URL)
       "**/tests/auth/hosted-flow.e2e.test.ts",
       // Storage pipeline (cipher + RS codec + FileStorage end-to-end)
