@@ -351,15 +351,43 @@ export class FileStorage {
             return new Uint8Array(0);
         }
 
-        // Fetch shards in parallel. Anything missing becomes a placeholder so
-        // the decoder can fill it in from the parity shards (up to
-        // `parityShards` allowed).
-        const fetched = new Array<Uint8Array | null>(manifest.shardHashes.length);
-        await this.runWithConcurrency(
-            manifest.shardHashes.map((hash, i) => async () => {
-                fetched[i] = await this.shards.getShard(hash);
-            }),
-        );
+        // DATA SHARDS FIRST — parity only if something is actually missing.
+        //
+        // Reed-Solomon needs `dataShards` of the `dataShards + parityShards`
+        // total, and the leading entries are the data ones. Fetching all of them
+        // up front meant every read paid for parity it then threw away: with the
+        // defaults (4 data, 2 parity) that is six round trips where four would
+        // do. It is invisible on one big file and brutal on a project — opening
+        // a 519-file project cost 3,114 shard requests, six per file, most of
+        // them for bytes nobody needed. A file smaller than one shard still
+        // costs its full six, which is why small source modules were the worst
+        // case rather than the best.
+        //
+        // Parity is still fetched, just lazily, so a genuinely damaged chunk
+        // recovers exactly as before — one extra round trip in the rare case
+        // instead of two wasted ones in the common case.
+        const total = manifest.shardHashes.length;
+        const dataCount = Math.max(0, total - manifest.parityShards);
+        const fetched = new Array<Uint8Array | null>(total).fill(null);
+
+        const fetchInto = async (indexes: number[]): Promise<void> => {
+            await this.runWithConcurrency(
+                indexes.map((i) => async () => {
+                    fetched[i] = await this.shards.getShard(manifest.shardHashes[i]);
+                }),
+            );
+        };
+
+        await fetchInto(Array.from({ length: dataCount }, (_, i) => i));
+
+        // Only now, and only if a data shard did not arrive, is parity worth
+        // fetching — and then all of it, since we cannot tell which parity
+        // shards the decoder will pick.
+        const missingData = [];
+        for (let i = 0; i < dataCount; i++) if (fetched[i] === null) missingData.push(i);
+        if (missingData.length > 0 && total > dataCount) {
+            await fetchInto(Array.from({ length: total - dataCount }, (_, i) => dataCount + i));
+        }
 
         const deadIndexes: number[] = [];
         const shards: Uint8Array[] = fetched.map((bytes, i) => {

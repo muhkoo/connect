@@ -372,3 +372,68 @@ describe("FileStorage end-to-end", () => {
         expect(shards.shardCount()).toBeGreaterThan(countAfterA);
     });
 });
+
+/**
+ * How many shards a read actually fetches.
+ *
+ * Reed-Solomon needs `dataShards` of `dataShards + parityShards`, and reads used
+ * to fetch all of them — six round trips where four would do, per chunk, per
+ * file. On one large file that is invisible; on a project it is not. Opening a
+ * 519-file project cost 3,114 shard requests, six per file, a third of them for
+ * parity that was decoded and discarded.
+ */
+describe("read fetches parity only when it is needed", () => {
+    /** A shard store that records every hash it is asked for. */
+    function countingShards(drop = new Set<string>()) {
+        const store = new Map<string, Uint8Array>();
+        const asked: string[] = [];
+        return {
+            asked,
+            store,
+            async putShard(hash: string, bytes: Uint8Array) { store.set(hash, bytes); return hash; },
+            async getShard(hash: string) {
+                asked.push(hash);
+                if (drop.has(hash)) return null;
+                return store.get(hash) ?? null;
+            },
+        };
+    }
+
+    const build = (shards: ReturnType<typeof countingShards>) =>
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        new FileStorage({ shards: shards as any, dataShards: 4, parityShards: 2, rsWasmModule });
+
+    it("fetches only the data shards for an intact file", async () => {
+        const shards = countingShards();
+        const storage = build(shards);
+        const { manifest } = await storage.writeFileToShards({
+            data: new TextEncoder().encode("a small source module"),
+            metadata: { name: "mod.ts", type: "text/plain" },
+        });
+        expect(manifest.chunks[0].shardHashes.length).toBe(6);
+
+        shards.asked.length = 0;
+        const { data } = await storage.readFileFromShards(manifest);
+        expect(new TextDecoder().decode(data)).toBe("a small source module");
+        expect(shards.asked, "an intact read must not pay for parity").toHaveLength(4);
+    });
+
+    it("falls back to parity when a data shard is gone, and still reconstructs", async () => {
+        const shards = countingShards();
+        const storage = build(shards);
+        const payload = "x".repeat(5000);
+        const { manifest } = await storage.writeFileToShards({
+            data: new TextEncoder().encode(payload),
+            metadata: { name: "big.ts", type: "text/plain" },
+        });
+
+        // Lose one data shard, exactly as a missing blob would.
+        const dead = manifest.chunks[0].shardHashes[1];
+        const damaged = countingShards(new Set([dead]));
+        for (const [k, v] of shards.store) damaged.store.set(k, v);
+
+        const { data } = await build(damaged).readFileFromShards(manifest);
+        expect(new TextDecoder().decode(data)).toBe(payload);
+        expect(damaged.asked.length, "4 data shards, then the 2 parity").toBe(6);
+    });
+});
