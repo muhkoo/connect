@@ -7,16 +7,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Muhkoo Connect is a client SDK for building **end-to-end-encrypted apps** on the
 Muhkoo Accelerator (a Cloudflare Workers + Durable Objects backend). The
 headline surface is a single **`Client`** (`src/core/Client.ts`) that exposes
-eight namespaces over one shared session:
+every namespace over one shared session:
 
-- `client.auth` — zero-knowledge identity (`client.auth.zk.{register,login,restore,unlock,logout}`)
+- `client.auth` — zero-knowledge identity (`client.auth.zk.{register,login,restore,unlock,logout}`),
+  the recoverable factors (passkey / phrase / email / Google / `device`), and
+  `client.auth.hosted` (the redirect flow + TV device pairing)
 - `client.kv` — per-user key/value, AES-256-GCM **encrypted at rest**
 - `client.db` — the app's scalable database (table specs in the portal; typed query/insert/update/delete)
 - `client.storage` — encrypted, chunked file storage
+- `client.vfs` / `client.vcs` — the encrypted filesystem and its history
 - `client.message` — pub/sub + end-to-end-encrypted DMs
 - `client.space` — fan-out group channels with persisted history
 - `client.agents` — server-side Programmable Agents (persona, triggers, optional `tools`)
 - `client.functions` — developer-authored serverless functions (HTTP + Space-bound)
+- `client.accessTokens` — scoped, expiring machine credentials
+- `client.offline` — CRDT offline sync (on by default in browsers)
 
 Plus app-describing **decorators** (`src/core/agents/describe.ts`):
 `@MuhkooAgent`/`@MuhkooSpace`/`@MuhkooDB`/`@MuhkooFunction` + `ejectAgentPrompt`/
@@ -33,10 +38,8 @@ remain exported, but the `Client` is the supported surface.
 
 ### Core concepts
 
-1. **One client, eight namespaces** — `client.auth` / `client.kv` / `client.db` /
-   `client.storage` / `client.message` / `client.space` / `client.agents` /
-   `client.functions`, all driven off one session (`src/core/Session.ts`,
-   `src/core/HttpClient.ts`).
+1. **One client, many namespaces** — the list above, all driven off one session
+   (`src/core/Session.ts`, `src/core/HttpClient.ts`).
 2. **Zero-knowledge identity** — derived from `(username, password)` on the
    device; the server stores only a Poseidon commitment. Login proves knowledge
    with a Groth16 proof (`src/auth/`).
@@ -162,13 +165,20 @@ yarn watch:docs
   from the identity via HKDF
 
 ### Storage System
-- `client.storage` = per-user KV over the personal space, AES-256-GCM encrypted
-  at rest by default; the server only sees ciphertext
+- `client.kv` = per-user key/value over the personal space, AES-256-GCM
+  encrypted at rest by default; the server only sees ciphertext
 - No server-side query (encrypted at rest) — `list()` returns ids; filter
-  client-side. `storage.on('change')` is a realtime cross-device feed over the
+  client-side. `kv.on('change')` is a realtime cross-device feed over the
   personal space's websocket
-- File storage (`src/storage/`) is chunked + AES-GCM + Reed-Solomon erasure
-  coded into content-addressed shards; space files ride `Space.putFile/getFile`
+- `client.storage` = files (`src/storage/`): chunked + AES-GCM + Reed-Solomon
+  erasure coded into content-addressed shards; space files ride
+  `Space.putFile/getFile`
+- Shard reads fetch only the DATA shards (RS needs `dataShards` of
+  `dataShards + parityShards`) and coalesce into `POST /api/shards/batch`.
+  `ShardClientOptions.batchShards` turns coalescing off; a server without the
+  route is detected and permanently degraded to one request per shard. Read
+  concurrency and batching are coupled — too few reads in flight makes batching
+  worse than not batching
 
 ### Group messaging (`client.space`)
 - Fan-out group key: a `spaceMessage` is sealed once with the channel's group
@@ -199,7 +209,8 @@ won't run.
 1. Check if the feature belongs in the client SDK or should be part of Accelerator backend
 2. Maintain offline-first principles - all operations should work without network
 3. Use the existing event system for real-time updates
-4. Follow the namespace derivation pattern for multi-tenancy
+4. Multi-tenancy is enforced server-side from the app key, not derived
+   client-side — don't reintroduce the old namespace-derivation design
 
 ### Testing Approach
 - Unit tests for individual components

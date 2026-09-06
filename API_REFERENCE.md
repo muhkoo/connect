@@ -51,7 +51,7 @@ below is exported from it; there are no subpath imports.
 | `Message`, `Packet`, `SerializeMessage`, `decorators` | yes | yes | yes |
 
 The exclusions exist because `snarkjs`/`ffjavascript` use Node-only APIs
-(`os.cpus`, `URL.createObjectURL`) that workerd doesn't expose.
+(`os.cpus`, `URL.createObjectURL`) that edge runtimes don't expose.
 
 ## Sessions
 
@@ -86,8 +86,8 @@ const channel = new BroadcastChannel({
 - `disconnect(): void` — stop reconnecting and close
 - `announce(): Promise<void>` — broadcast our keyExchange. Idempotent
   per-connection, but the `announced` flag **resets on every `CONNECTED`
-  event** so a fresh announce fires on reconnect (CF Workers WSs hit a
-  ~100s idle timeout; without re-announcing, peers who joined after our
+  event** so a fresh announce fires on reconnect (the platform's websockets hit
+  a ~100s idle timeout; without re-announcing, peers who joined after our
   last reconnect would never see our pubkey). If you're driving announce
   manually (`autoAnnounce: false`), wire it to your "server ready"
   signal — the SDK will let it through on every reconnect.
@@ -158,7 +158,7 @@ DoubleRatchet rejects payloads older than 5 minutes as a wallclock-based replay
 defense, and `EncryptedSession.receive` catches that rejection and converts it
 to `ignored` instead of throwing. The real replay defense is the consumed
 message key; the wallclock check is just defense-in-depth, so legacy backlog
-replays and CF WS-idle-reconnect cycles don't spam the channel ERROR stream.
+replays and websocket idle-reconnect cycles don't spam the channel ERROR stream.
 
 Role assignment is deterministic: `isClient = (myId < peerId)` lexicographically.
 Per-pair sessionId is `[myId, peerId].sort().join(":")`.
@@ -328,7 +328,7 @@ const plaintext = await unwrapWithPassphrase("hunter2", wrapped);
 ### initBn128Wasm + verifyGroth16
 
 `src/workers/groth16-verifier.ts`. Universal — works in Node, browsers, and
-CF Workers. bn128.wasm-driven, no snarkjs dependency.
+edge runtimes. bn128.wasm-driven, no snarkjs dependency.
 
 ```typescript
 import {
@@ -339,7 +339,7 @@ import {
 import type { Groth16Proof, VerificationKey } from "@muhkoo/connect";
 
 const { instance, memory, initialPFree } = await initBn128Wasm();
-// Or, in CF Workers, pre-compile the .wasm at deploy time:
+// Or, on an edge runtime, pre-compile the .wasm at deploy time:
 //   import wasmModule from "./bn128.wasm";
 //   await initBn128Wasm(wasmModule);
 

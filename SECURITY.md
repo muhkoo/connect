@@ -14,7 +14,7 @@ Report privately via GitHub's **[Private Vulnerability Reporting](https://github
 
 - a description of the issue and its impact,
 - steps to reproduce (a minimal proof-of-concept if possible),
-- affected version(s) and environment (browser / Node / Cloudflare Workers).
+- affected version(s) and environment (browser / Node / edge runtime).
 
 We aim to acknowledge reports within **3 business days** and to provide a
 remediation timeline after initial assessment. We will credit reporters in the

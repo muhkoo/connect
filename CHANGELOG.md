@@ -4,6 +4,60 @@ All notable changes to `@muhkoo/connect` are documented here. This project
 follows semantic versioning (pre-1.0: new backward-compatible features bump the
 minor, fixes bump the patch/alpha).
 
+**Releasing: `npm run release`, not `npm publish`.** Publishing with `--tag alpha`
+alone does not move `latest`, and pre-1.0 there is no stable line for `latest` to
+protect — it already points at an alpha. Leaving it behind means a plain
+`npm install` keeps handing out an old SDK: `latest` sat on 0.13.2-alpha.0 for the
+whole 0.14 line, so every default install, including the `npx -y @muhkoo/cli` in
+the preview deploy script, ran without shard batching or `loginWithDevice`.
+`npm run release` publishes and moves both tags together.
+
+## 0.14.0-alpha.5 — reads wide enough to fill a batch (2026-09-05)
+
+### Changed
+
+- **Default read concurrency raised — `FileStorage` 8 → 16, and the VFS directory walk 8 → 24.** Once shard reads coalesce (0.14.0-alpha.4), these numbers stop meaning "how many requests are in flight" and start meaning "how many hashes are available to gather into one request". At the old values that made things *worse*: 32 small concurrent requests became one large serial one, and opening a project got slower in Chromium (18.4s → 31.9s) even as the request count fell 28×. A batch window can only collect what callers have already asked for, so the reads have to be wide enough to fill one batch and then keep a second on the wire while the first lands. The walk matters for the same reason at one remove — it is what discovers the files whose shards then batch together, so a narrow walk throttles everything downstream.
+- **Batching and concurrency are one change shipped as two versions.** 0.14.0-alpha.4 is the first half without the second, and measured slower than 0.14.0-alpha.2 in Chromium; install 0.14.0-alpha.5. Together, opening the same 519-file project cold in the Muhkoo IDE: requests 2,086 → 22, Chromium 18.4s → 8.8s, Brave 37.5s → 14.9s. Brave moves furthest because it inspects every request — the cost was round trips, not bytes.
+- Only the defaults moved. A caller constructing `FileStorage` directly can still pass its own `concurrency`; the walk's ceiling is not configurable, and is deliberately a ceiling rather than unbounded, since browsers cap concurrency per origin and a larger number mostly moves the queue.
+
+## 0.14.0-alpha.4 — many shards in one request (2026-09-05)
+
+**Supersedes 0.14.0-alpha.3, which is deprecated on npm: it published with no type declarations at all.** That failure is silent — consumers keep compiling, every SDK type quietly becomes `any`, and the first symptom is an unrelated type error somewhere downstream. Do not install 0.14.0-alpha.3.
+
+### Changed
+
+- **Concurrent shard reads coalesce into a single request.** A shard is not a file: a project is thousands of small modules, each split into shards, and reads were one request per shard — 2,086 of them to open a 519-file project. Reads issued within a few milliseconds of each other now leave as one `POST /api/shards/batch` (up to 256 hashes). **Callers are unchanged** — `getShard` still asks for one shard and gets one shard back; the coalescing is inside `ShardClient`.
+  - A shard the server does not have is reported absent rather than failing the batch, so the caller can still rebuild that chunk from parity and the other hashes in the batch still get their bytes.
+  - New `ShardClient` option **`batchShards?: boolean`** (default `true`) forces one-at-a-time.
+  - Against a deployment without the batch route it degrades once and stays degraded, on a 404/405 **or** on a 200 that is not shaped like a batch reply. The second condition is load-bearing: a catch-all handler or a proxy answering that POST with something else would otherwise resolve every hash to "missing" for shards that are sitting right there.
+
+### Fixed
+
+- **`build` now emits the type bundle, and publishing refuses a missing or stale one.** `dist/connect.d.ts` was in the published file list but nothing built it — `build` emitted JavaScript only, so a release carried whatever happened to be left in `dist`, or nothing. `build` now runs `build:dts`, and `prepublishOnly` fails if the bundle is absent or older than `src/`.
+
+## 0.14.0-alpha.2 — fetch the data shards, and parity only when it is missing (2026-09-04)
+
+### Fixed
+
+- **A read no longer pays for parity it throws away.** Reed–Solomon needs `dataShards` of the `dataShards + parityShards` total and the leading entries are the data ones, but every read fetched all of them and discarded the parity — with the defaults, six round trips where four would do, per chunk, per file. Invisible on one large file and ruinous on a project, where a 60-byte source module costs the same six requests as a megabyte. Opening a 519-file project cold went from 3,124 requests and 37.4s to 2,085 and 22.4s; a ~2,000-file project drops from roughly 12,000 requests to 8,000.
+- **Recovery is unchanged.** Parity is still fetched, just lazily — only when a data shard did not arrive — so a damaged chunk repairs exactly as before, paying one extra round trip in the rare case instead of two wasted ones in the common one.
+
+## 0.14.0-alpha.1 — signing in from a browser that already knows you (2026-09-04)
+
+**Supersedes 0.14.0-alpha.0, which is deprecated on npm: it shipped announcing itself as `0.13.2-alpha.0`.** The code is otherwise identical. Install 0.14.0-alpha.1 or later.
+
+### Added
+
+- **`auth.zk.loginWithDevice(username, factorId, deviceKey, opts?)` — sign in from a paired browser or machine with no password and no credential at rest.** `unlockWithDevice` (0.11.0) recovers the master seed and nothing else, which suits a CLI that already holds a session token in a file on disk and strands a browser, whose session expires while the pairing is still perfectly valid — at that point it holds the means to decrypt everything and no way to make an authenticated call. `loginWithDevice` derives the ZK identity from the recovered seed and proves it, exactly as `recoverWithPhrase` does: the seed has always been sufficient to authenticate, so demanding a password there proved nothing that was not already known. Takes the same `LoginOptions` as `login` and resolves to the `AuthUser`.
+  - The seed still never lands on disk. What is stored locally is a random key that opens a server-held blob, so revoking the factor (`auth.zk.revokeDevice`, or `muhkoo devices rm`) makes that key inert immediately — which a stored seed can never be, since nothing can reach out and un-store it.
+  - This is what "keep me signed in on this browser" is built on. The master seed is memory-only by design, so before this every fresh page load of every app meant retyping a password; sharing a registrable domain does not help, because browser storage is per-origin. The key is generated on, and never leaves, the sign-in origin.
+- **`DeviceRevokedError`**, exported from the package root and thrown by both `loginWithDevice` and `unlockWithDevice` when the pairing has been revoked. Typed rather than a bare `Error` because the correct response is specific and the wrong one is harmful: discard the stored key and fall back to a password. Retrying cannot succeed — the factor is gone from the vault — and silently re-pairing would undo a revocation someone performed deliberately, which is the whole point of a pairing being revocable. Distinct from a wrong key, which fails to *decrypt* rather than to *resolve*; a machine whose access was withdrawn should be able to say so. `unlockWithDevice` threw a bare `Error` carrying the same sentence, so telling the two apart meant matching on message text.
+- **`auth.hosted.login({ appId, redirectUri, redirect?, prompt? })`** — `prompt: "login"` forces the credential screen even when the browser is already remembered. Without it, an app's own sign-out is undone on the very next sign-in click: single sign-on means the hosted page still knows the user, so an app has to be able to say "ask anyway". Named after the OIDC parameter that solves the same problem.
+
+### Fixed
+
+- **The build stamps `VERSION` from `package.json`, and publishing refuses a stale stamp.** That constant is printed to the console when a `Client` is constructed, and its only job is to answer "is this page running the build I just shipped, or a cached one?" — a stale value does not merely go unnoticed, it answers that question wrongly, during exactly the debugging session where someone is relying on it. It was previously kept in step by a comment asking nicely, and 0.14.0-alpha.0 duly shipped mislabelled.
+
 ## 0.13.2-alpha.0 — released in lockstep with the CLI (2026-08-29)
 
 No SDK changes. `@muhkoo/cli` is versioned in lockstep with this package (see `cli/scripts/sync-version.mjs`) because it ships against an exact SDK version, so a CLI-only fix — here, `vfs mount` reading files concurrently — needs a matching release on this side.

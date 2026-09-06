@@ -112,10 +112,13 @@ const MAX_DEPTH = 64;
  * project does not open a request per directory. Browsers cap concurrency per
  * origin anyway, so a larger number mostly moves the queue.
  */
-/** Directory records fetched in parallel while walking. Raised alongside the
- *  shard read concurrency: the walk is what discovers the files whose shards
- *  then batch together, so a narrow walk throttles everything downstream. */
-const WALK_CONCURRENCY = 24;
+/** Directory records fetched in parallel while walking.
+ *
+ *  Kept at 8 alongside the shard read concurrency. Raising both to 24/16 was
+ *  neither better nor worse once enough samples were taken — the spread between
+ *  runs is wider than the difference between the settings — so this stays at the
+ *  simpler value. See FileStorage's note. */
+const WALK_CONCURRENCY = 8;
 
 /**
  * `Promise.all` with a ceiling, preserving input order.

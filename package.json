@@ -1,6 +1,6 @@
 {
   "name": "@muhkoo/connect",
-  "version": "0.14.0-alpha.5",
+  "version": "0.14.0-alpha.7",
   "description": "Simple client SDK for building distributed edge based applications",
   "main": "dist/server/index.js",
   "module": "dist/server/index.js",
@@ -67,7 +67,8 @@
     "watch:docs": "nodemon --watch src --ext ts --exec 'yarn build:docs'",
     "watch:lint": "nodemon --watch src --ext ts --exec 'yarn lint'",
     "prepublishOnly": "node scripts/sync-version.mjs --check && node scripts/check-dts.mjs",
-    "sync-version": "node scripts/sync-version.mjs"
+    "sync-version": "node scripts/sync-version.mjs",
+    "release": "npm publish --tag alpha && npm dist-tag add @muhkoo/connect@$npm_package_version latest"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",

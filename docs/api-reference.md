@@ -274,7 +274,7 @@ passphrase".
 ## Groth16 verifier
 
 `src/workers/groth16-verifier.ts`. The name is historical — this file works
-in Node, browsers, AND CF Workers. Drives bn128.wasm directly; does not
+in Node, browsers, AND edge runtimes. Drives bn128.wasm directly; does not
 pull in snarkjs / ffjavascript / @zk-kit/groth16.
 
 ```typescript
@@ -301,8 +301,8 @@ const ok = await verifyGroth16(
    time by `@rollup/plugin-wasm`). Works in any modern JS runtime that allows
    runtime `WebAssembly.compile()`.
 2. `initBn128Wasm(myWasmModule)` — accepts a pre-compiled
-   `WebAssembly.Module`. Recommended inside CF Workers, where wrangler can
-   precompile `.wasm` imports at deploy time and avoid the runtime compile.
+   `WebAssembly.Module`. Recommended on an edge runtime, where the toolchain
+   can precompile `.wasm` imports at deploy time and avoid the runtime compile.
 
 `verifyGroth16` returns `false` for any structural issue (malformed proof,
 out-of-range field elements, off-curve points, failed pairing); it only
@@ -368,9 +368,10 @@ and `Storage` classes. Useful if you're writing a custom protocol on top of
 - `SerializeMessage` — method decorator
 - `decorators` — namespace of all method decorators
 
-`Network` (`src/network/Network.ts`) and `Storage` (`src/storage/Storage.ts`)
-exist in the source tree but are NOT exported from any build. They're being
-phased out in favor of the new session / channel primitives.
+`Network` (`src/network/Network.ts`) is still in the source tree but is NOT
+exported from any build. `src/storage/` is a different thing entirely and *is*
+exported: `FileStorage` + `ShardClient`, the chunked AES-GCM + Reed-Solomon file
+layer under `client.storage`.
 
 ---
 
@@ -378,9 +379,11 @@ phased out in favor of the new session / channel primitives.
 
 If you saw these in older docs, they're gone (or were never real):
 
-- `MuhkooClient` (planned facade — not implemented)
+- `MuhkooClient` — the facade exists, but it is called `Client`
+- `client.shared` — never real; the namespaces are `auth` / `kv` / `db` /
+  `storage` / `vfs` / `vcs` / `message` / `space` / `agents` / `functions` /
+  `accessTokens` / `offline`
 - `SessionManager`, `ApiClient` (referenced by stale examples/tests)
-- `client.auth`, `client.storage`, `client.message`, `client.shared`
 - `generateEphemeralKeypair`, `deriveSharedSecret`, `dehydratePublicKey`,
   `hydratePublicKey` from `@muhkoo/connect/crypto`
 - `compressDehydratedKeys` / `hydrateFromCompressed` — replaced by

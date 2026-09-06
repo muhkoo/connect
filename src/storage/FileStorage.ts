@@ -130,11 +130,24 @@ export class FileStorage {
         this.chunkSize = opts.chunkSize ?? 4 * 1024 * 1024;
         this.dataShards = opts.dataShards ?? 4;
         this.parityShards = opts.parityShards ?? 2;
-        // Shard reads coalesce into batches, so this is no longer a cap on
-        // requests — it is how many hashes are available to batch together. Too
-        // low and each batch is small and serial, which is strictly worse than
-        // not batching at all.
-        this.concurrency = Math.max(1, opts.concurrency ?? 16);
+        // Shard reads coalesce into batches, so this is not a cap on requests —
+        // it is how many hashes are available to batch together.
+        //
+        // 8 because nothing measurable argues for more.
+        //
+        // Raising it to 16 (walk at 24) looked 23% slower over three runs each,
+        // and reverting looked like it restored the win — until a third set of
+        // three landed on the same numbers as the RAISED setting. Pooled, the
+        // configurations are indistinguishable: the run-to-run spread on a
+        // 519-file project is 13.9-20.9s, far wider than any difference between
+        // them. Three samples could not have resolved it and should not have
+        // been trusted to.
+        //
+        // What IS established is the floor: too low and each batch is small and
+        // serial, which is worse than not batching at all. Above that the setting
+        // stops mattering at this scale, so it stays at the simpler value. Moving
+        // it needs a sample large enough to see past that spread.
+        this.concurrency = Math.max(1, opts.concurrency ?? 8);
         this.rsWasmModule = opts.rsWasmModule;
 
         if (this.chunkSize < 1) throw new Error("FileStorage: chunkSize must be >= 1 byte");

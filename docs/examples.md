@@ -225,7 +225,7 @@ personal-space KV under the user's commitment).
 
 ## 5. verifyGroth16
 
-Verify a Groth16 proof anywhere — Node, browsers, or CF Workers.
+Verify a Groth16 proof anywhere — Node, browsers, or an edge runtime.
 
 ```typescript
 import {
@@ -247,10 +247,10 @@ async function verifyProof(proof: Groth16Proof, publicSignals: string[]) {
 }
 ```
 
-In a CF Worker you'd normally pre-compile the wasm at deploy time:
+On an edge runtime you'd normally pre-compile the wasm at deploy time:
 
 ```typescript
-// wrangler precompiles this at deploy time.
+// The deploy toolchain precompiles this.
 import wasmModule from "./bn128.wasm";
 
 const ctx = await initBn128Wasm(wasmModule);
@@ -336,8 +336,8 @@ identity).
 
 If you came here from an old example and these don't work, they don't exist:
 
-- `MuhkooClient`, `client.auth`, `client.storage`, `client.message`,
-  `client.shared`
+- `MuhkooClient` (the facade is `Client`) and `client.shared` (never real —
+  see the repo-root `README.md` for the namespaces that do exist)
 - `SessionManager`, `ApiClient` from `@muhkoo/connect/api`
 - `generateEphemeralKeypair`, `deriveSharedSecret`,
   `dehydratePublicKey` from `@muhkoo/connect/crypto`

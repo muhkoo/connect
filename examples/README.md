@@ -27,10 +27,10 @@ If you're looking for runnable, current usage examples, see
 | `network-rest-example.ts` | Stale. Legacy `Network`. |
 | `network-unified-example.ts` | Stale. Legacy `Network`. |
 
-Reproducing the chat app flow against the current SDK is best done by
-reading the chat app source under
-`muhkoo/accelerator/public/chat/` and the snippets in
-`docs/examples.md`.
+Reproducing the chat flow against the current SDK is best done by reading the
+`muhkoo/web` SPA (which drives the `Client` directly) alongside the snippets in
+`docs/examples.md`. The `public/*.html` pages in `muhkoo/accelerator` are the
+pre-SPA demos and predate the `Client` entirely.
 
 ## Quick start (using the current public API)
 

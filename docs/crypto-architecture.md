@@ -210,7 +210,7 @@ Instead, ZK proofs are used at two specific points:
 Public signals (in order):
 
 1. `commitment` — Poseidon(secret, salt, ecdsaPubHash)
-2. `nonce` — a fresh BN254 field element (the DO's hex nonce mod BN254 q)
+2. `nonce` — a fresh BN254 field element (the accelerator's hex nonce mod BN254 q)
 3. `ecdsaPubHash` — Poseidon(ecdsaPub field)
 
 Private witnesses:
@@ -239,7 +239,7 @@ End-to-end, from the SDK's point of view:
 
 ```
 +-------+                                            +-----------------+
-| user  |                                            | accelerator DO  |
+| user  |                                            | accelerator     |
 +---+---+                                            +--------+--------+
     |   PersonalSpaceClient.put(key, wrappedValue)            |
     |--------------------------------------------------------->|
@@ -269,24 +269,24 @@ accelerator only ever sees opaque JSON.
 ## Universal Groth16 verifier
 
 `src/workers/groth16-verifier.ts`. Despite the path, it works in Node,
-browsers, AND Cloudflare Workers. Bn128.wasm-driven; does not depend on
-snarkjs or ffjavascript (which both fail under workerd).
+browsers, AND edge runtimes. Bn128.wasm-driven; does not depend on
+snarkjs or ffjavascript (which both fail on the edge).
 
 Two init paths:
 
 1. `await initBn128Wasm()` — uses the bundled bn128.wasm
    (base64-inlined at build time by `@rollup/plugin-wasm`).
 2. `await initBn128Wasm(myWasmModule)` — accepts a pre-compiled
-   `WebAssembly.Module`. Inside CF Workers, wrangler can precompile a
-   `.wasm` import at deploy time and avoid the runtime compile.
+   `WebAssembly.Module`. On an edge runtime the deploy toolchain can
+   precompile a `.wasm` import and avoid the runtime compile.
 
 `verifyGroth16(instance, memory, initialPFree, vk, proof, publicSignals)`
 returns `false` for any structural problem (off-curve points, out-of-range
 field elements, malformed proof, failed pairing) and throws only for
 runtime/WASM faults.
 
-This module is the only Groth16 path that runs in workerd — the accelerator's
-`verifyZkAuthProof` uses it for the personal-space DO.
+This module is the only Groth16 path that runs on an edge runtime — the
+accelerator's `verifyZkAuthProof` uses it for the personal space.
 
 ## Primitives summary
 

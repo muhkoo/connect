@@ -19,6 +19,11 @@
 
 ## What the SDK provides today
 
+- `Client` — the unified, supported entry point. One object over one session,
+  with a namespace per subsystem (`auth`, `kv`, `db`, `storage`, `vfs`, `vcs`,
+  `message`, `space`, `agents`, `functions`, `accessTokens`, `offline`).
+  Everything below it is a building block it composes, still exported for
+  callers that need control the `Client` doesn't expose.
 - `BroadcastChannel` — multi-peer E2EE room over a WebSocket
 - `EncryptedSession` — transport-agnostic per-peer Double Ratchet manager
 - `WSTransport` — pure WebSocket lifecycle (auto-reconnect + offline queue)
@@ -37,7 +42,7 @@
 The `workers` build excludes snarkjs-dependent symbols
 (`PersonalSpaceClient`, wrap helpers, `Authenticator`, `ZeroKnowledge`,
 `DoubleRatchetManager`). The bn128.wasm-driven `verifyGroth16` is in all three
-builds and is the only Groth16 path that works under workerd.
+builds and is the only Groth16 path that works in the `workers` build.
 
 ## Quick start
 
@@ -79,13 +84,13 @@ discussion.
 
 ## What's intentionally NOT here
 
-- There is no single `MuhkooClient` facade. Apps wire up `BroadcastChannel`,
-  `PersonalSpaceClient`, etc. directly.
-- There is no offline-first sync engine, IndexedDB cache, optimistic-update
-  manager, OAuth flow, or "shared namespace" abstraction in this package.
-  Those concerns live in the consumer (the chat app, etc.).
+- There is no class named `MuhkooClient`. The facade is `Client`; there is no
+  `client.shared`.
+- There is no "shared namespace" abstraction, and multi-tenancy is not derived
+  client-side — the server enforces it from the app key.
 - The API-token system documented under `docs/api-token-*.md` is a written
-  design only — there is no implementation in `src/`.
+  design only. `client.accessTokens` is a *different* mechanism (scoped,
+  expiring `mk_*_at_*` credentials) and does not implement those documents.
 
 ## Platform support
 
@@ -93,7 +98,7 @@ discussion.
 | --- | --- |
 | Node ≥ 20 (server bundle) | supported |
 | Modern browsers (browser bundle) | supported |
-| Cloudflare Workers / workerd (workers bundle) | supported (subset; see above) |
+| Edge runtimes (workers bundle) | supported (subset; see above) |
 
 All three rely on globalThis-level WebCrypto (`crypto.subtle`,
 `crypto.getRandomValues`), so the same crypto code runs everywhere.
@@ -113,4 +118,4 @@ historical until they're either deleted or updated. See
 
 ## License
 
-GPL-3.0 — see `LICENSE`.
+MIT — see `LICENSE`.
