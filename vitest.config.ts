@@ -60,6 +60,7 @@ export default defineConfig({
       "**/tests/auth/hosted-flow.e2e.test.ts",
       // Storage pipeline (cipher + RS codec + FileStorage end-to-end)
       "**/tests/storage/FileStorage.test.ts",
+      "**/tests/storage/shard-batching.test.ts",
       // Space fan-out group-encryption layer
       "**/tests/vfs/**/*.test.ts",
       "**/tests/vcs/**/*.test.ts",

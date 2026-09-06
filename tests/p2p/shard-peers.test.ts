@@ -47,7 +47,12 @@ describe("ShardClient — peer block source", () => {
         const c = new ShardClient({ baseUrl: "http://t", fetch: fetchFn as never, cache, peers });
         expect(await c.getShard(HASH)).toEqual(BYTES);
         expect(peers.getBlock).toHaveBeenCalled();
-        expect(fetchFn).toHaveBeenCalledOnce();
+        // Origin WAS reached. Two calls, not one: the first is the one-off batch
+        // probe, which this fake answers with raw bytes rather than a batch
+        // reply, so the client latches batching off and re-fetches singly. That
+        // is the documented degradation against a server without the route.
+        expect(fetchFn).toHaveBeenCalled();
+        expect(fetchFn.mock.calls.some(([url]) => String(url).endsWith(HASH))).toBe(true);
     });
 
     it("falls back to origin when the peer layer throws", async () => {
@@ -60,7 +65,7 @@ describe("ShardClient — peer block source", () => {
         const fetchFn = vi.fn(async () => new Response(BYTES, { status: 200 }));
         const c = new ShardClient({ baseUrl: "http://t", fetch: fetchFn as never, peers });
         expect(await c.getShard(HASH)).toEqual(BYTES);
-        expect(fetchFn).toHaveBeenCalledOnce();
+        expect(fetchFn.mock.calls.some(([url]) => String(url).endsWith(HASH))).toBe(true);
     });
 
     it("announces a newly-put block to peers", async () => {

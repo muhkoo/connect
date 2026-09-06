@@ -112,7 +112,10 @@ const MAX_DEPTH = 64;
  * project does not open a request per directory. Browsers cap concurrency per
  * origin anyway, so a larger number mostly moves the queue.
  */
-const WALK_CONCURRENCY = 8;
+/** Directory records fetched in parallel while walking. Raised alongside the
+ *  shard read concurrency: the walk is what discovers the files whose shards
+ *  then batch together, so a narrow walk throttles everything downstream. */
+const WALK_CONCURRENCY = 24;
 
 /**
  * `Promise.all` with a ceiling, preserving input order.

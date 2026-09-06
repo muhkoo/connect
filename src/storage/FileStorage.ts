@@ -130,7 +130,11 @@ export class FileStorage {
         this.chunkSize = opts.chunkSize ?? 4 * 1024 * 1024;
         this.dataShards = opts.dataShards ?? 4;
         this.parityShards = opts.parityShards ?? 2;
-        this.concurrency = Math.max(1, opts.concurrency ?? 8);
+        // Shard reads coalesce into batches, so this is no longer a cap on
+        // requests — it is how many hashes are available to batch together. Too
+        // low and each batch is small and serial, which is strictly worse than
+        // not batching at all.
+        this.concurrency = Math.max(1, opts.concurrency ?? 16);
         this.rsWasmModule = opts.rsWasmModule;
 
         if (this.chunkSize < 1) throw new Error("FileStorage: chunkSize must be >= 1 byte");
