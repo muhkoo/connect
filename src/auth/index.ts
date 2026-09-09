@@ -19,3 +19,13 @@ export * from "./poseidon";
 export * from "./proof";
 export * from "./keys";
 export * from "./hostedHandoff";
+
+// Circuit-artifact integrity pinning. `CircuitIntegrityError` is worth catching
+// by type: it means the server served a witness generator / proving key this
+// build does not trust, and proving was NOT attempted.
+// `resolveArtifact`, `isRemoteArtifact` and `clearCircuitCache` stay INTERNAL —
+// the first two are plumbing and the third is a test seam. Tests import them
+// from the module path directly rather than widening the public surface.
+export { PINNED_CIRCUIT_DIGESTS, CircuitIntegrityError } from "./circuitIntegrity";
+export type { CircuitIntegrity } from "./circuitIntegrity";
+

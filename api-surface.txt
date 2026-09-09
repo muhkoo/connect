@@ -44,6 +44,7 @@ T CipherFrame
 T CipherMessage
 T CipherMessageHeader
 T CircuitBufferConfig
+T CircuitIntegrity
 T CircuitUrls
 T ClientOptions
 T Commit
@@ -239,6 +240,7 @@ V BroadcastChannelEvents
 V ChannelExistsError
 V ChannelNotFoundError
 V ChunkCipher
+V CircuitIntegrityError
 V Client
 V ConnectivityManager
 V DEFAULT_AUTH_BASE_URL
@@ -293,6 +295,7 @@ V P2P_SUBJECT
 V PAIRING_CODE_ALPHABET
 V PAIRING_CODE_LENGTH
 V PBKDF2_DEFAULT_ITERATIONS
+V PINNED_CIRCUIT_DIGESTS
 V PREIMAGE_POK_VERIFICATION_KEY
 V Packet
 V PasskeyOriginError
