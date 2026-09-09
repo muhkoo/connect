@@ -15,8 +15,31 @@
  *
  * Thin wrapper over `@noble/curves`' vetted `ristretto255_oprf` so the protocol
  * (blind / blindEvaluate / finalize) lives in one named place. CLIENT uses
- * {@link oprfBlind} + {@link oprfFinalize}; SERVER uses {@link oprfDeriveKey} +
- * {@link oprfBlindEvaluate} (imported by the accelerator's VaultDO).
+ * {@link oprfBlind} + {@link oprfFinalize}.
+ *
+ * The `oprfDeriveKey` / `oprfBlindEvaluate` helpers here are the SERVER half,
+ * but note they are used only by this repo's tests. The accelerator does NOT
+ * import them: it has an independent implementation in its own
+ * `src/services/oprf.ts`, also built directly on `@noble/curves`. (An earlier
+ * version of this comment claimed the accelerator's VaultDO imported them; it
+ * does not — it imports `@muhkoo/connect` in exactly two files, both for
+ * Groth16 verification.) Any protocol change therefore has to land in BOTH
+ * repos in lockstep.
+ *
+ * KNOWN WEAKNESS — mode 0x00, tracked as audit finding C4 and NOT fixed here.
+ * This uses RFC 9497 base mode: the server returns a bare evaluation with no
+ * DLEQ proof, and {@link oprfFinalize} verifies nothing. A hostile server can
+ * answer `{evaluated: blinded}` (i.e. k=1); the unblinded point is then just
+ * `H(input)` and the wrap key collapses to a pure function of public strings,
+ * destroying the offline-uncrackability guarantee stated above.
+ *
+ * The fix is `ristretto255_oprf.voprf` (mode 0x01) with the server's public key
+ * pinned as a build-time constant and the proof verified on every finalize.
+ * noble's `voprf` variant is already present and unused. It cannot be done
+ * client-side alone: the wire response (`{evaluated}` / `{evaluated, evaluated2}`)
+ * carries no proof field, and the pinned public keys must correspond to the
+ * accelerator's actual K1/K2 secrets. Changing only this file would break login
+ * against the live server.
  */
 
 import { ristretto255_oprf } from "@noble/curves/ed25519.js";
