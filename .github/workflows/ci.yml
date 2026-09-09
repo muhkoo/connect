@@ -25,11 +25,9 @@ jobs:
         with:
           node-version: 20
 
-      # No lockfile is committed (.gitignore ignores both yarn.lock and
-      # package-lock.json), so this resolves fresh on every run and cannot be
-      # cached by lockfile hash. Committing a lockfile would make CI
-      # reproducible and let this become `--frozen-lockfile`.
-      - run: yarn install
+      # yarn.lock is committed, so CI installs exactly what was resolved locally
+      # and fails loudly if package.json and the lockfile disagree.
+      - run: yarn install --frozen-lockfile
 
       # tsc was silently broken until the snarkjs.d.ts syntax fix: four TS1005
       # errors suppressed every semantic diagnostic repo-wide. Keep it first.

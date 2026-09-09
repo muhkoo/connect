@@ -130,7 +130,9 @@ dist
 .pnp.*
 
 
-yarn.lock
+# yarn.lock IS committed (packageManager: yarn@1.22.22) so builds are
+# reproducible and CI can use --frozen-lockfile. package-lock.json stays
+# ignored: a second lockfile that can disagree is how this went wrong before.
 package-lock.json
 .DS_Store
 .claude/
