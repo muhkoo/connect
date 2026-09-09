@@ -16,11 +16,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const dts = join(root, "dist", "connect.d.ts");
+const dtsFiles = ["connect.d.ts", "connect.workers.d.ts"].map((f) => join(root, "dist", f));
 
-if (!existsSync(dts)) {
-    console.error("check-dts: dist/connect.d.ts is MISSING. Run `yarn build` before publishing.");
-    process.exit(1);
+for (const dts of dtsFiles) {
+    if (!existsSync(dts)) {
+        console.error(`check-dts: ${dts} is MISSING. Run \`yarn build\` before publishing.`);
+        process.exit(1);
+    }
 }
 
 /** Newest mtime under src/, so a d.ts older than the source is caught too. */
@@ -33,13 +35,20 @@ function newest(dir) {
     return latest;
 }
 
-const built = statSync(dts).mtimeMs;
 const source = newest(join(root, "src"));
-if (built < source) {
-    console.error(
-        "check-dts: dist/connect.d.ts is OLDER than src/ — it would ship stale types.\n" +
-        "  Run `yarn build` and publish again.",
-    );
-    process.exit(1);
+for (const dts of dtsFiles) {
+    if (statSync(dts).mtimeMs < source) {
+        console.error(
+            `check-dts: ${dts} is OLDER than src/ — it would ship stale types.\n` +
+            "  Run `yarn build` and publish again.",
+        );
+        process.exit(1);
+    }
 }
-console.log(`check-dts: OK — dist/connect.d.ts is present and newer than src/ (${Math.round(statSync(dts).size / 1024)} KB).`);
+console.log(
+    "check-dts: OK — " +
+        dtsFiles
+            .map((d) => `${d.split("/").pop()} ${Math.round(statSync(d).size / 1024)} KB`)
+            .join(", ") +
+        ", both newer than src/.",
+);

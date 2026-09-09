@@ -2,5 +2,5 @@
   "plugin": ["typedoc-plugin-markdown"],
   "out": "./connect-docs/docs",
   "entryPointStrategy": "resolve",
-  "entryPoints": ["./src/browser/index.ts"]
+  "entryPoints": ["./src/api.ts"]
 }

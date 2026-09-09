@@ -63,7 +63,12 @@ const jsConfig = {
       targetEnv: 'auto-inline',
     }),
     typescript({
-      clean: true
+      clean: true,
+      // The rolled-up bundles in rollup.dts.config.js are the only declarations
+      // we ship. Per-file emit additionally scattered ~427 stray .d.ts through
+      // dist/, including a mislabelled dist/browser/index.d.ts that declared a
+      // DIFFERENT entry than the bundle beside it.
+      tsconfigOverride: { compilerOptions: { declaration: false, declarationMap: false } },
     }),
   ].filter(Boolean),
 };
@@ -82,23 +87,16 @@ const workerConfig = isBrowser && {
   },
   plugins: [
     wasm({ targetEnv: "auto-inline" }),
-    typescript({ clean: true }),
+    typescript({
+      clean: true,
+      tsconfigOverride: { compilerOptions: { declaration: false, declarationMap: false } },
+    }),
   ],
 };
 
-// Complete DTS build config.
-// Types are rolled up from the browser entry so the declared shape matches a
-// real runtime bundle. Server consumers currently see this same shape (their
-// entry is near-identical). NOTE: the workers bundle exports far less, so
-// dist/connect.d.ts overstates what `workerd` consumers actually get — a
-// separate workers .d.ts is the fix, tracked with the export-surface work.
-const dtsComplete = {
-  input: "src/browser/index.ts",
-  output: {
-    file: "dist/connect.d.ts",
-    format: "es",
-  },
-  plugins: [dts()],
-};
+// NOTE: the declaration bundles are NOT built here. They live in
+// rollup.dts.config.js (`yarn build:dts`). This block used to hold a duplicate
+// dts config that ran on EVERY BUILD_ENV, so `yarn build` rolled connect.d.ts
+// four times — three of them thrown away.
 
-export default [jsConfig, workerConfig, dtsComplete].filter(Boolean);
+export default [jsConfig, workerConfig].filter(Boolean);

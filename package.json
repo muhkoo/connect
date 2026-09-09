@@ -31,15 +31,24 @@
     "dist/browser/blockEngine.worker.js",
     "dist/browser/blockEngine.worker.js.map",
     "dist/connect.d.ts",
+    "dist/connect.workers.d.ts",
     "README.md",
     "LICENSE"
   ],
   "exports": {
     ".": {
-      "types": "./dist/connect.d.ts",
-      "workerd": "./dist/workers/index.js",
-      "browser": "./dist/browser/index.js",
-      "default": "./dist/server/index.js"
+      "workerd": {
+        "types": "./dist/connect.workers.d.ts",
+        "default": "./dist/workers/index.js"
+      },
+      "browser": {
+        "types": "./dist/connect.d.ts",
+        "default": "./dist/browser/index.js"
+      },
+      "default": {
+        "types": "./dist/connect.d.ts",
+        "default": "./dist/server/index.js"
+      }
     },
     "./p2p-worker": "./dist/browser/blockEngine.worker.js"
   },

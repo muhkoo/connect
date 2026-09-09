@@ -124,6 +124,15 @@ yarn watch:docs
 ## Project Structure
 
 ### Source Code Organization
+- `/src/api.ts` - **The canonical public surface.** Every public symbol is
+  reachable from exactly this file; the three platform entries re-export it and
+  name zero symbols, so they cannot drift from each other or from the shipped
+  types. `/src/api.universal.ts` is the Workers-safe slice it builds on and is
+  the ONLY declared platform delta — read its header before adding anything to
+  the workers build, and note that `src/personal` is tainted only DYNAMICALLY
+  (it looks clean to a static check but bundles snarkjs).
+- `/src/runtime/appLogger.ts` - The single `globalThis.appLogger` bootstrap,
+  previously duplicated across three entry files.
 - `/src/core/` - The unified `Client`. `Client.ts` (facade), `HttpClient.ts`
   (header-injecting transport), `Session.ts` (session + identity state),
   `Room.ts` (back-compat alias re-exporting `Space`), and `namespaces/` —
@@ -164,8 +173,12 @@ yarn watch:docs
   `./p2p-worker`. The `.` export uses conditional resolution (`workerd` /
   `browser` / `default`) to pick the right bundle; there are no per-module
   subpaths (`@muhkoo/connect/crypto` and friends do not resolve). Types for
-  all conditions come from the single `dist/connect.d.ts`, rolled up from
-  `src/browser/index.ts`
+  each condition come from its OWN declaration bundle: `workerd` resolves to
+  `dist/connect.workers.d.ts` (29 values, matching that bundle exactly),
+  everything else to `dist/connect.d.ts`, rolled up from `src/api.ts`. CAVEAT: a
+  consumer on `moduleResolution: "bundler"` without `customConditions` never sees
+  the `workerd` condition in tsc, so the honest workers types stay inert until
+  that consumer adds `"customConditions": ["workerd"]`
 
 ## Important Technical Details
 
@@ -214,10 +227,16 @@ yarn watch:docs
 ### Known Issues
 1. **Base58 encoding performance**: Currently slow for large payloads (>100KB). Message class tests disabled due to this bottleneck.
 2. **Integration tests**: Require Accelerator infrastructure to be running, not included in default test suite.
-3. **dts roll-up gaps**: `rollup-plugin-dts` drops some subtrees from
-   `dist/connect.d.ts` (storage/sessions/personal/core). Consumers that hit
-   missing types use a local shim (see `muhkoo/web/src/lib/connect.ts`).
-   Worth fixing properly.
+3. ~~**dts roll-up gaps**~~ — RESOLVED (2026-09). This was a misdiagnosis.
+   `rollup-plugin-dts` does NOT drop named cross-module re-exports (verified
+   against the installed 6.2.3; the in-tree proof is that `src/offline/index.ts`
+   and `src/p2p/index.ts` are written entirely as named re-exports and all 39 of
+   their symbols reach `dist/connect.d.ts`). The real cause was that the d.ts was
+   rolled from the NAMESPACED `src/index.ts` (`export * as core from './core'`)
+   while the JS came from the flat `src/browser/index.ts`, so top-level `Client`
+   was absent by ES semantics, not by plugin bug. The surface now has one source
+   of truth (`src/api.ts`) and is asserted by `tests/api/export-surface.test.ts`.
+   Consumer-side shims can be deleted.
 
 ### Test config note
 `vitest.config.ts` uses a curated `include` allowlist (many tests are commented

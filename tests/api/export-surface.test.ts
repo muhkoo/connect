@@ -54,6 +54,7 @@ const DTS = 'dist/connect.d.ts';
 const BROWSER_JS = 'dist/browser/index.js';
 const SERVER_JS = 'dist/server/index.js';
 const WORKERS_JS = 'dist/workers/index.js';
+const WORKERS_DTS = 'dist/connect.workers.d.ts';
 
 const SNAPSHOT = 'api-surface.txt';
 const WORKERS_SNAPSHOT = 'api-surface.workers.txt';
@@ -144,7 +145,11 @@ function artifactSurface(rel: string): Surface {
     return { values, types };
 }
 
-const hasBuild = existsSync(abs(DTS)) && existsSync(abs(BROWSER_JS)) && existsSync(abs(WORKERS_JS));
+const hasBuild =
+    existsSync(abs(DTS)) &&
+    existsSync(abs(BROWSER_JS)) &&
+    existsSync(abs(WORKERS_JS)) &&
+    existsSync(abs(WORKERS_DTS));
 
 // The artifact assertions below are the only ones that check what actually
 // SHIPS. dist/ is gitignored, so without this guard a clean CI checkout would
@@ -222,7 +227,10 @@ const REQUIRED_TYPES = [
  * consistent across the entry and the d.ts — which is precisely why the
  * delta-only checks in this file cannot see it. The consolidation work fixes it.
  */
-const KNOWN_MISSING_FROM_BROWSER = ['VERSION'];
+// EMPTY. VERSION used to be server-only — and missing from connect.d.ts too,
+// so the delta was zero and no delta-based check could see it. src/api.ts now
+// exports it. A name reappearing here is a public-API regression, not a test fix.
+const KNOWN_MISSING_FROM_BROWSER: string[] = [];
 
 describe('required-symbol floor', () => {
     it(`keeps every headline symbol on the surface of ${BROWSER_ENTRY}`, () => {
@@ -299,89 +307,14 @@ describe('required-symbol floor', () => {
  * that is the ratchet.
  */
 const KNOWN_DRIFT = {
-    /** Values exported by the server entry but not the browser entry (33). */
-    serverOnlyValues: [
-        'Logger',
-        'Ready',
-        'Retry',
-        'VERSION',
-        '_accountId',
-        '_formatBytes',
-        '_messageId',
-        '_objectId',
-        '_packetId',
-        '_socketId',
-        '_userId',
-        'appLogger',
-        'assertType',
-        'base58Decode',
-        'base58Encode',
-        'concatBytes',
-        'deserialize',
-        'fromBase64',
-        'fromBase64Url',
-        'fromHex',
-        'generateChecksum',
-        'generateId',
-        'getIPAddress',
-        'getId',
-        'isNumber',
-        'log',
-        'serialize',
-        'toBase64',
-        'toBase64Url',
-        'toHex',
-        'utf8Decode',
-        'utf8Encode',
-        'verifyChecksum',
-    ],
-    /** Values exported by the browser entry but not the server entry (17). */
-    browserOnlyValues: [
-        'DEFAULT_AUTH_BASE_URL',
-        'ROOT_ID',
-        'VFS_ROOT_INFO',
-        'VfsConflictError',
-        'VfsNotFoundError',
-        'createPasskeyWithPrf',
-        'defaultRpId',
-        'dirKey',
-        'evaluatePasskeyPrf',
-        'headKey',
-        'historyKey',
-        'mergeKey',
-        'objectKey',
-        'passkeyPrfCapable',
-        'passkeySupported',
-        'refKey',
-        'refsIndexKey',
-    ],
-    /** Types exported by the server entry but not the browser entry (0). */
+    // EMPTY, and it must stay that way. The browser and server entries are now
+    // byte-identical re-exports of src/api.ts, so any drift between them means
+    // someone reintroduced a hand-maintained platform delta. If you are about to
+    // add a name here, add it to src/api.ts (or src/api.universal.ts) instead.
+    serverOnlyValues: [] as string[],
+    browserOnlyValues: [] as string[],
     serverOnlyTypes: [] as string[],
-    /**
-     * Types exported by the browser entry but not the server entry (18).
-     * Invisible to a runtime `Object.keys()` check — this is why the source
-     * extractor uses the checker.
-     */
-    browserOnlyTypes: [
-        'AttachedPeerNetwork',
-        'CachedSpaceMessage',
-        'ChannelLike',
-        'DbNamespaceDeps',
-        'Entry',
-        'FileNamespaceDeps',
-        'HistoryRecord',
-        'KvNamespaceDeps',
-        'Merge3Result',
-        'MergeRegionConflict',
-        'MessageNamespaceDeps',
-        'MuhkooMessageEvent',
-        'PasskeyEnrollment',
-        'SealedRecord',
-        'SpaceChannelLike',
-        'SpaceOfflineAdapter',
-        'TreeDir',
-        'ZkAuthDeps',
-    ],
+    browserOnlyTypes: [] as string[],
 };
 
 /**
@@ -751,19 +684,30 @@ describe.skipIf(!hasBuild)('built artifacts', () => {
      * When that lands, turn the `it.todo` below into a real assertion that the
      * gap is zero.
      */
-    it('records the workerd typings gap (informational — asserts nothing yet)', () => {
-        const dts = artifactSurface(DTS);
-        const workers = artifactSurface(WORKERS_JS);
-        const gap = only(dts.values, workers.values);
-        // eslint-disable-next-line no-console
-        console.info(
-            `[export-surface] workerd typings gap: ${gap.length} symbols are declared in ${DTS} ` +
-                `but absent from ${WORKERS_JS} (e.g. ${gap.slice(0, 8).join(', ')}…). ` +
-                'Closing this requires dist/connect.workers.d.ts on the `workerd` export condition.',
-        );
-    });
+    // The workerd lie, now closed and gated. Before dist/connect.workers.d.ts
+    // existed, a single connect.d.ts served every export condition and told a
+    // workerd consumer that 175 symbols were available — Client, KvNamespace,
+    // FileStorage, AuthClient among them — while dist/workers/index.js exports
+    // 29, none of which is Client. Compile-time green, runtime
+    // `undefined is not a constructor`.
+    it(`${WORKERS_DTS} matches ${WORKERS_JS} exactly`, () => {
+        const dts = artifactSurface(WORKERS_DTS);
+        const js = artifactSurface(WORKERS_JS);
 
-    it.todo('dist/connect.workers.d.ts closes the workerd typings gap (gap === 0)');
+        const declaredNotShipped = only(dts.values, js.values);
+        const shippedNotDeclared = only(js.values, dts.values);
+
+        expect(
+            { declaredNotShipped, shippedNotDeclared },
+            `${WORKERS_DTS} and ${WORKERS_JS} disagree.\n` +
+                (declaredNotShipped.length
+                    ? `  DECLARED BUT NOT SHIPPED (the workerd lie returning):\n${bullets(declaredNotShipped)}\n`
+                    : '') +
+                (shippedNotDeclared.length
+                    ? `  SHIPPED BUT NOT DECLARED (usable at runtime, untypeable):\n${bullets(shippedNotDeclared)}\n`
+                    : ''),
+        ).toEqual({ declaredNotShipped: [], shippedNotDeclared: [] });
+    });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
