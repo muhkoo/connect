@@ -15,6 +15,33 @@ import tsconfigPaths from 'vite-tsconfig-paths';
  * `include`, so an unlisted file could not be run at all, even explicitly.
  */
 
+/**
+ * Vite cannot handle a bare `.wasm` import ("ESM integration proposal for Wasm
+ * is not supported currently"), which is why no test could import
+ * src/workers/groth16-verifier.ts — the edge Groth16 verifier that IS the
+ * accelerator's login verification path.
+ *
+ * Reproduce @rollup/plugin-wasm's `auto-inline` contract instead: a default
+ * export `(imports) => Promise<WebAssembly.Instance>`. Reading from disk rather
+ * than base64-inlining is fine here; only the shape has to match.
+ */
+const wasmLoader = () => ({
+  name: 'muhkoo:wasm-loader',
+  enforce: 'pre' as const,
+  load(id: string) {
+    const file = id.split('?')[0];
+    if (!file.endsWith('.wasm')) return null;
+    return [
+      "import { readFileSync } from 'node:fs';",
+      `const bytes = readFileSync(${JSON.stringify(file)});`,
+      'export default async function load(imports) {',
+      '  const { instance } = await WebAssembly.instantiate(bytes, imports ?? {});',
+      '  return instance;',
+      '}',
+    ].join('\n');
+  },
+});
+
 const paths = () =>
   tsconfigPaths({
     root: './',
@@ -43,13 +70,13 @@ const CANNOT_RUN = [
 const NEVER = [...defaultExclude, '**/dist/**', 'wip/**', 'connect-docs/**'];
 
 export default defineConfig({
-  plugins: [paths()],
+  plugins: [wasmLoader(), paths()],
   test: {
     coverage: { reporter: ['text', 'json', 'html'] },
     // Project configs don't inherit the root `plugins`, so each repeats paths().
     projects: [
       {
-        plugins: [paths()],
+        plugins: [wasmLoader(), paths()],
         test: {
           ...shared,
           name: 'unit',
@@ -59,7 +86,7 @@ export default defineConfig({
         },
       },
       {
-        plugins: [paths()],
+        plugins: [wasmLoader(), paths()],
         test: {
           ...shared,
           name: 'e2e',

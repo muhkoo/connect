@@ -94,6 +94,14 @@ export async function verifyGroth16(
     const p = unstringifyBigInts(proof);
     const signals: bigint[] = unstringifyBigInts(publicSignals);
 
+    // ARITY. vk_x is computed as IC[0] + sum(IC[i+1] * signals[i]), so the
+    // number of public signals is not free — it must be exactly IC.length - 1.
+    // Without this check a caller can pass FEWER signals than the circuit
+    // declares: the loop below simply computes vk_x from fewer terms, which is a
+    // proof of a DIFFERENT statement, and it can verify as true. Passing more
+    // would read past the end of IC.
+    if (!Array.isArray(vk.IC) || signals.length !== vk.IC.length - 1) return false;
+
     // Validate proof coordinates are within the base field
     if (!validateG1InField(p.pi_a)) return false;
     if (!validateG1InField(p.pi_c)) return false;
