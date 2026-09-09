@@ -37,7 +37,14 @@ jobs:
 
       - run: yarn lint
 
-      - run: yarn test:unit
-
-      # Catches dts/bundle drift and anything that only breaks under rollup.
+      # Build BEFORE testing. dist/ is gitignored, so the export-parity test's
+      # artifact assertions — the only ones that check what actually ships —
+      # would otherwise skip silently on a clean checkout.
       - run: yarn build
+
+      # REQUIRE_BUILD_ARTIFACTS turns a missing dist/ into a failure instead of
+      # an invisible skip, so a rollup/dts-config regression that never touches
+      # src/ cannot go green.
+      - run: yarn test:unit
+        env:
+          REQUIRE_BUILD_ARTIFACTS: '1'
