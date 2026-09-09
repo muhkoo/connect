@@ -25,17 +25,39 @@ export enum EventCoreEvents {
  */
 export class EventCore {
     private static eventTarget: EventTarget = new EventTarget();
-    private static events = new Map<string, EventListener | CallableFunction>();
+    /**
+     * `event -> (caller's handler -> the wrapper actually registered on the
+     * EventTarget)`. Two levels because one event can have many listeners and
+     * {@link off} must remove exactly the wrapper it registered for that caller.
+     */
+    private static events = new Map<string, Map<EventListener | CallableFunction, EventListener>>();
 
     /**
      * @remarks Listen to an event.
      * @example EventCore.on('event', (e) =\> appLogger.debug(e));
      */
     static on(event: EventCoreEvents, handler: EventListener | CallableFunction) {
-        if (!EventCore.events.has(event)) {
-            EventCore.events.set(event, handler);
+        let handlers = EventCore.events.get(event);
+        if (!handlers) {
+            handlers = new Map();
+            EventCore.events.set(event, handlers);
         }
-        EventCore.eventTarget.addEventListener(event, handler as EventListener);
+        // `addEventListener` ignores a duplicate (type, callback) pair; mirror
+        // that here so the bookkeeping can't drift from the EventTarget.
+        if (handlers.has(handler)) return;
+        // A throwing listener must not take down its siblings or escape to the
+        // host: Node's EventTarget surfaces an uncaught listener error as an
+        // `uncaughtException`, which terminates the process by default, and
+        // browsers fire `window.onerror`. Contain it and keep dispatching.
+        const wrapped: EventListener = (e) => {
+            try {
+                (handler as EventListener)(e);
+            } catch (err) {
+                appLogger.error(`EventCore: listener for "${event}" threw`, err);
+            }
+        };
+        handlers.set(handler, wrapped);
+        EventCore.eventTarget.addEventListener(event, wrapped);
     }
 
     /**
@@ -43,10 +65,14 @@ export class EventCore {
      * @example EventCore.off('event', handler);
      */
     static off(event: EventCoreEvents, handler: EventListener | CallableFunction) {
-        if (EventCore.events.has(event)) {
-            EventCore.events.delete(event);
-        }
-        EventCore.eventTarget.removeEventListener(event, handler as EventListener);
+        const handlers = EventCore.events.get(event);
+        const wrapped = handlers?.get(handler);
+        if (!handlers || !wrapped) return;
+        EventCore.eventTarget.removeEventListener(event, wrapped);
+        handlers.delete(handler);
+        // Drop the event only once its LAST listener is gone, so the
+        // "no listeners" warning in `emit` stays truthful.
+        if (handlers.size === 0) EventCore.events.delete(event);
     }
 
     /**
@@ -56,7 +82,6 @@ export class EventCore {
     static emit(event: EventCoreEvents, data: any) {
         if (!EventCore.events.has(event)) {
             appLogger.debug(`Warning: No listeners for event: ${event}`);
-            // appLogger.verbose(`Event data:`, data);
         }
         EventCore.eventTarget.dispatchEvent(new CustomEvent(event, { detail: data }));
     }

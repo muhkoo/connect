@@ -129,7 +129,6 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-tests/**/*.json
 
 yarn.lock
 package-lock.json
@@ -138,3 +137,6 @@ package-lock.json
 # Stray IPFS/Kubo daemon config — never belongs in this repo
 config.json
 CLAUDE.md
+
+# Generated TypeDoc output (yarn build:docs)
+connect-docs

@@ -341,6 +341,7 @@ If you came here from an old example and these don't work, they don't exist:
 - `SessionManager`, `ApiClient` from `@muhkoo/connect/api`
 - `generateEphemeralKeypair`, `deriveSharedSecret`,
   `dehydratePublicKey` from `@muhkoo/connect/crypto`
-- `Network` class (still in `src/network/` but not exported anywhere)
+- `Network` class (deleted; `src/network/` now holds only `PacketCipher` /
+  `DoubleRatchetCipher`, which *are* exported)
 
 Use the primitives in this file instead.

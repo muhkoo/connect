@@ -44,6 +44,9 @@ export * from "../core/namespaces/HostedAuth";
 // it is obfuscation, not protection.
 export * from "../auth/deviceStore";
 export * from "../core/namespaces/KvNamespace";
+// The app database (`client.db`). Peer of kv above; the server build gets
+// these via `../core`, which this entry deliberately doesn't import.
+export * from "../core/namespaces/DbNamespace";
 export * from "../core/namespaces/FileNamespace";
 export * from "../core/namespaces/MessageNamespace";
 export * from "../core/namespaces/SpaceNamespace";

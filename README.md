@@ -95,8 +95,7 @@ and other APIs edge runtimes don't expose):
   etc.
 - `Authenticator.ts`
 - `DoubleRatchetManager.ts`
-- `personal/` — `PersonalSpaceClient`, `wrapWithPassphrase`,
-  `unwrapWithPassphrase`
+- `personal/` — `PersonalSpaceClient`
 
 The `workers` build keeps `KeyStore`, `DoubleRatchet`, `EncryptedSession`,
 `BroadcastChannel`, `WSTransport`, and the bn128.wasm-driven
@@ -545,31 +544,33 @@ src/
   crypto/         KeyStore, DoubleRatchet, DoubleRatchetManager, Authenticator, ZeroKnowledge
   sessions/       EncryptedSession, BroadcastChannel
   transport/      WSTransport
-  personal/       PersonalSpaceClient + wrap.ts (excluded from workers build)
+  personal/       PersonalSpaceClient (excluded from workers build)
   storage/        FileStorage, ShardClient, SharedSpaceClient, Reed-Solomon codec
   vfs/  vcs/      the encrypted filesystem and its history (client.vfs / client.vcs)
   offline/  p2p/  CRDT offline sync; WebRTC peer shard exchange
   events/         EventCore + EventCoreEvents
   messaging/      Message, Packet, decorators
   types/          shared type defs (incl. zk.ts with PREIMAGE_POK_VERIFICATION_KEY)
-  network/        legacy Network class (not exported from any build)
+  network/        PacketCipher + DoubleRatchetCipher (the legacy Network class is gone)
   utilities/      Logger, base58, ID generation, decorators
 ```
 
 ## Scripts
 
 ```bash
-yarn build              # rm -rf dist && yarn rollup:browser && yarn rollup:server && yarn rollup:workers
+yarn build              # typecheck && sync-version && rm -rf dist && rollup browser + server + workers && build:dts
+yarn typecheck          # tsc --noEmit
 yarn dev                # all three targets in watch mode (concurrently)
 yarn rollup:browser     # one-off browser build
 yarn rollup:server      # one-off server build
 yarn rollup:workers     # one-off workers build
 yarn build:dts          # complete .d.ts bundle -> dist/connect.d.ts
-yarn build:docs         # typedoc -> docs/
+yarn build:docs         # typedoc -> connect-docs/docs (see typedoc.json)
 
 yarn test               # vitest
-yarn test:unit          # vitest --run (no integration tests)
-yarn test:integration   # TEST_TYPE=integration vitest --run tests/integration
+yarn test:unit          # vitest --run --project unit
+yarn test:e2e           # vitest --run --project e2e (needs E2E_STAGING=1 + MUHKOO_BASE_URL)
+yarn typecheck          # tsc --noEmit
 yarn lint               # eslint ./src
 ```
 

@@ -18,7 +18,7 @@
  *     {@link MessageNamespace}.
  *
  * The lower-level building blocks (`AuthClient`, `PersonalSpaceClient`,
- * `FileStorage`, `EncryptedSession`, `Network`, …) remain exported and usable
+ * `FileStorage`, `EncryptedSession`, …) remain exported and usable
  * directly, but the client is the supported, ergonomic surface.
  */
 

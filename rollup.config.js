@@ -1,7 +1,5 @@
 import typescript from "rollup-plugin-typescript2";
-import replace from "@rollup/plugin-replace";
 import dts from "rollup-plugin-dts";
-import packageJson from "./package.json" with { type: "json" };
 import nodeResolve from "@rollup/plugin-node-resolve";
 import commonjs from "@rollup/plugin-commonjs";
 import wasm from "@rollup/plugin-wasm";
@@ -64,11 +62,6 @@ const jsConfig = {
     wasm({
       targetEnv: 'auto-inline',
     }),
-    replace({
-      "process.env.npm_package_version": JSON.stringify(packageJson.version),
-      "(process.env.LOG_LEVEL || LOGLEVEL).toUpperCase() as keyof typeof LogLevel": `"${process.env.LOG_LEVEL}"` || "ERROR",
-      preventAssignment: true,
-    }),
     typescript({
       clean: true
     }),
@@ -89,21 +82,16 @@ const workerConfig = isBrowser && {
   },
   plugins: [
     wasm({ targetEnv: "auto-inline" }),
-    replace({
-      "process.env.npm_package_version": JSON.stringify(packageJson.version),
-      preventAssignment: true,
-    }),
     typescript({ clean: true }),
   ],
 };
 
 // Complete DTS build config.
-// Build types from the browser entry point (not `src/index.ts`) so the
-// declared shape matches what consumers actually see at runtime — the
-// browser bundle uses flat `export *` re-exports, while `src/index.ts`
-// uses namespaced `export * as foo` which doesn't survive
-// rollup-plugin-dts cleanly. Server-build consumers also see this same
-// shape (their `dist/server/index.js` is built from a near-identical entry).
+// Types are rolled up from the browser entry so the declared shape matches a
+// real runtime bundle. Server consumers currently see this same shape (their
+// entry is near-identical). NOTE: the workers bundle exports far less, so
+// dist/connect.d.ts overstates what `workerd` consumers actually get — a
+// separate workers .d.ts is the fix, tracked with the export-surface work.
 const dtsComplete = {
   input: "src/browser/index.ts",
   output: {

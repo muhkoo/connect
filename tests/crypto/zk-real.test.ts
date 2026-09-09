@@ -8,10 +8,15 @@ import {
     verifyPreimagePoK,
     verifyHashKnowledge
 } from '../../src/crypto/ZeroKnowledge';
+import { initAllCircuits } from '../helpers/circuits';
 
 describe('Real ZK Circuit Tests', () => {
     beforeAll(async () => {
         console.log('Loading and compiling circuits...');
+
+        // Inject the checked-in circuit artifacts (wasm/zkey/verification key);
+        // ZeroKnowledge.ts no longer loads them itself.
+        await initAllCircuits();
 
         // Load the verification keys
         await HashKnowledge.compile();

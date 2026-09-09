@@ -32,8 +32,9 @@ The `types` condition resolves to a single bundled `dist/connect.d.ts` that
 re-exports everything (so a type referenced in one runtime is still
 declarable in another, even if the runtime impl is absent).
 
-There is a single public entry point — `@muhkoo/connect`. Everything documented
-below is exported from it; there are no subpath imports.
+Everything documented below is exported from the main entry point,
+`@muhkoo/connect`. There is one additional subpath, `@muhkoo/connect/p2p-worker`,
+which resolves to the P2P block-engine Web Worker chunk and exports no API.
 
 ### What's in which build
 
@@ -45,7 +46,8 @@ below is exported from it; there are no subpath imports.
 | `DoubleRatchetManager`, `Authenticator` | yes | yes | NO |
 | `Field`, `Poseidon`, `PreimagePoK`, `HashKnowledge`, `AuthPublicInput` | yes | yes | NO |
 | `verifyPreimagePoK`, `verifyHashKnowledge`, `quickVerify`, `compilePrograms`, `initializeCircuits` | yes | yes | NO |
-| `PersonalSpaceClient`, `wrapWithPassphrase`, `unwrapWithPassphrase` | yes | yes | NO |
+| `PersonalSpaceClient` | yes | yes | NO |
+| `wrapWithPassphrase`, `unwrapWithPassphrase` | yes | yes | yes |
 | `verifyGroth16`, `initBn128Wasm`, `PREIMAGE_POK_VERIFICATION_KEY` | yes | yes | yes |
 | `EventCore`, `EventCoreEvents` | yes | yes | yes |
 | `Message`, `Packet`, `SerializeMessage`, `decorators` | yes | yes | yes |
@@ -310,9 +312,9 @@ Node consumers install it as a peer dep.
 
 ### wrapWithPassphrase / unwrapWithPassphrase
 
-`src/personal/wrap.ts`. PBKDF2-SHA256 (200_000 iterations) → 256-bit
-AES-GCM key → encrypt with random 16-byte salt + 12-byte IV. NOT in the
-workers build.
+`src/crypto/PassphraseWrap.ts`. PBKDF2-SHA256 (200_000 iterations) → 256-bit
+AES-GCM key → encrypt with random 16-byte salt + 12-byte IV. Present in ALL
+three builds — it has no snarkjs dependency (`src/workers/index.ts` exports it).
 
 ```typescript
 const wrapped = await wrapWithPassphrase("hunter2", new TextEncoder().encode("plaintext"));
@@ -361,32 +363,19 @@ verification-key JSON shipped in the accelerator's
 
 ## Types
 
-From `src/index.d.ts`:
+Every published type ships in the single rolled-up `dist/connect.d.ts`
+(generated from `src/browser/index.ts` — see `rollup.dts.config.js`). There is
+no `src/index.d.ts`.
 
-```typescript
-export interface Attribute {
-  dataType: string;
-  attribute: string;
-  value: string | number | boolean | Array<string | boolean | number> | object;
-}
+The shared type modules under `src/types/` (`src/types/index.ts` re-exports all
+of them wholesale) are: `crypto.ts`, `identity.ts`, `permissions.ts`,
+`messaging.ts`, and `zk.ts` — the latter carrying `Groth16Proof`,
+`VerificationKey`, and `PREIMAGE_POK_VERIFICATION_KEY`.
 
-export type Tag = string;
-
-export interface FileOptions {
-  id?: string; name?: string; size?: number; hash?: string;
-  contentType?: string; path?: string; isArchived?: boolean;
-  version?: number; attributes?: Attribute[]; tags?: string[];
-}
-
-export interface FilesInterface {
-  id?: string; name: string; size: number; hash: string;
-  contentType: string; version: number; tags: Tag[]; attributes: Attribute[];
-}
-```
-
-Plus the shared types from `src/types/`: `Groth16Proof`, `VerificationKey`,
-`PREIMAGE_POK_VERIFICATION_KEY`, and the messaging / identity / permissions
-types (re-exported wholesale).
+Earlier revisions of this file listed `Attribute`, `Tag`, `FileOptions`, and
+`FilesInterface` here. None of those exist any more — the file-layer types are
+`WriteFileOptions` (`src/core/namespaces/FileNamespace.ts`) plus `FileStat` /
+`FileManifest` (`src/storage/types.ts`).
 
 ## Events
 
@@ -411,16 +400,22 @@ export enum EventCoreEvents {
 
 ## Messaging
 
-`Message`, `Packet`, `SerializeMessage` decorator, `decorators` namespace.
-Used internally by the legacy `Network` / `Storage` classes that aren't part
-of the public build today. Useful if you're building your own protocol on top
-of `WSTransport`.
+`Message`, `Packet`, `SerializeMessage` decorator, `decorators` namespace
+(`src/messaging/index.ts`). Used by the packet-cipher layer
+(`src/network/PacketCipher.ts`) and the space transport
+(`src/spaces/Space.ts`, `src/spaces/SpaceCipher.ts`). Useful if you're
+building your own protocol on top of `WSTransport`.
 
 ## Things that DO NOT exist (despite older docs)
 
 - `MuhkooClient` — the unified client class is `Client` (with `client.auth`,
   `client.storage`, `client.message`). There is no `client.shared`.
-- `Network` class — still in `src/network/` but NOT exported from any build.
+- `Network` class — deleted. `src/network/` still exists and still exports
+  `PacketCipher` / `DoubleRatchetCipher` (`src/network/PacketCipher.ts`), but
+  there is no `Network` class to import.
+- `Attribute`, `Tag`, `FileOptions`, `FilesInterface` — listed by older
+  revisions of this file; none of them exist in `src/` or in
+  `dist/connect.d.ts`.
 - `SessionManager`, `ApiClient` — referenced by old examples and integration
   tests; do not exist in `src/`.
 

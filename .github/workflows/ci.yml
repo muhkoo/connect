@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # circuits/build/* holds the checked-in Groth16 artifacts the crypto
+        # suites prove against (~4MB). A shallow checkout still fetches them,
+        # but they must not be filtered out.
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # No lockfile is committed (.gitignore ignores both yarn.lock and
+      # package-lock.json), so this resolves fresh on every run and cannot be
+      # cached by lockfile hash. Committing a lockfile would make CI
+      # reproducible and let this become `--frozen-lockfile`.
+      - run: yarn install
+
+      # tsc was silently broken until the snarkjs.d.ts syntax fix: four TS1005
+      # errors suppressed every semantic diagnostic repo-wide. Keep it first.
+      - run: yarn typecheck
+
+      - run: yarn lint
+
+      - run: yarn test:unit
+
+      # Catches dts/bundle drift and anything that only breaks under rollup.
+      - run: yarn build

@@ -3,7 +3,7 @@
  *
  * Hands raw frame strings up (via the `MESSAGE` event) and accepts raw frame
  * strings down (via `send`). Anything frame-shape, encryption, or serialization
- * related belongs in the layer above (e.g. `Network` for client↔server
+ * related belongs in the layer above (e.g. `BroadcastChannel` for client↔server
  * encrypted pipes, `BroadcastChannel` for multi-peer E2E rooms).
  *
  * Responsibilities:

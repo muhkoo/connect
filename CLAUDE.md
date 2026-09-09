@@ -96,8 +96,11 @@ yarn test:watch
 # Run unit tests once
 yarn test:unit
 
-# Run integration tests (requires Accelerator running)
-TEST_TYPE=integration yarn test:integration
+# Run the e2e suites (need a live deployment)
+E2E_STAGING=1 MUHKOO_BASE_URL=... yarn test:e2e
+
+# Typecheck (tsc --noEmit)
+yarn typecheck
 ```
 
 ### Code Quality
@@ -123,8 +126,11 @@ yarn watch:docs
 ### Source Code Organization
 - `/src/core/` - The unified `Client`. `Client.ts` (facade), `HttpClient.ts`
   (header-injecting transport), `Session.ts` (session + identity state),
-  `Room.ts` (back-compat alias re-exporting `Space`), and
-  `namespaces/{Auth,Storage,Message,Space}Namespace.ts`
+  `Room.ts` (back-compat alias re-exporting `Space`), and `namespaces/` —
+  `AuthNamespace`, `KvNamespace`, `DbNamespace`, `FileNamespace` (which is
+  where `StorageNamespace` lives — there is no `StorageNamespace.ts`),
+  `MessageNamespace`, `SpaceNamespace`, `AgentsNamespace`,
+  `FunctionsNamespace`, `AccessTokensNamespace`, `HostedAuth`
 - `/src/spaces/` - Fan-out group-encryption layer: `Space.ts` (the shared-space
   handle, formerly `Room`), `SpaceCipher` (ECIES group-key wrap + message seal),
   `SpaceKeyring` + `KeyringClient` (group-key distribution), `SpacePacketCipher`
@@ -135,10 +141,14 @@ yarn watch:docs
 - `/src/sessions/` - `EncryptedSession` + `BroadcastChannel` (E2E space transport)
 - `/src/storage/` - Chunked/encrypted/erasure-coded file storage (FileStorage,
   ShardClient, SharedSpaceClient, Reed-Solomon)
-- `/src/personal/` - `PersonalSpaceClient` (proof-gated per-user KV; the
-  lower-level building block under `client.storage`)
+- `/src/personal/` - `PersonalSpaceClient` (proof-gated per-user KV). A
+  standalone building block exported from the browser/server builds; nothing
+  in `src/core/` uses it — `client.kv` (`src/core/namespaces/KvNamespace.ts`)
+  talks to `/api/personal/:commitment/*` itself
 - `/src/messaging/`, `/src/network/`, `/src/transport/` - Message/Packet,
-  Network, and WSTransport primitives
+  `PacketCipher`/`DoubleRatchetCipher`, and WSTransport primitives. The legacy
+  `Network` class is gone; `src/network/PacketCipher.ts` survives and is
+  exported from the browser and server builds
 - `/src/events/` - Event emitter and handling
 - `/src/utilities/` - Helper functions, decorators, logging, byte helpers
 - `/src/types/` - TypeScript type definitions (incl. `zk.ts` + `PREIMAGE_POK_VERIFICATION_KEY`)
@@ -150,7 +160,12 @@ yarn watch:docs
 - **TypeScript**: ESNext target with strict mode enabled
 - **Rollup**: Three separate builds — browser (`dist/browser/`), Node.js server (`dist/server/`), and Cloudflare Workers (`dist/workers/`). The build target is selected by `BUILD_ENV={browser,server,workers}`
 - **`@rollup/plugin-wasm`** is enabled in all three builds with `targetEnv: 'auto-inline'` — `.wasm` imports are base64-inlined so the Groth16 verifier's bundled-WASM fallback works in any runtime
-- **Exports**: Multiple entry points for different modules (crypto, types, api, events, messaging, utilities). The `.` export uses conditional resolution (`workerd` / `browser` / `default`) to pick the right bundle
+- **Exports**: `package.json` declares exactly two entry points — `.` and
+  `./p2p-worker`. The `.` export uses conditional resolution (`workerd` /
+  `browser` / `default`) to pick the right bundle; there are no per-module
+  subpaths (`@muhkoo/connect/crypto` and friends do not resolve). Types for
+  all conditions come from the single `dist/connect.d.ts`, rolled up from
+  `src/browser/index.ts`
 
 ## Important Technical Details
 
@@ -158,7 +173,13 @@ yarn watch:docs
 - **Zero-knowledge proofs**: snarkjs (via `@zk-kit/groth16`) for proof generation in the browser/server builds (see `src/crypto/ZeroKnowledge.ts` — `HashKnowledge`, `PreimagePoK`). Proof generation is NOT possible in the CF Workers build because snarkjs/ffjavascript depend on `URL.createObjectURL` and worker_threads, which CF Workers don't expose
 - **Edge ZK verification**: `src/workers/groth16-verifier.ts` drives `bn128.wasm` directly to verify Groth16 proofs. Workers-safe (no snarkjs/ffjavascript). Available from all three builds; under `workerd` consumers get the same code path as Node/browser
 - Implements the Double Ratchet algorithm for end-to-end encryption (DMs/rooms)
-- ECDH (P-256) key exchange for session establishment; P-256 ECDSA for signing
+- Two distinct curves, do not conflate them: the Double Ratchet / session /
+  space stack uses **ECDH P-384** for key agreement and **ECDSA P-384** for
+  signing (`src/crypto/KeyStore.ts`, `src/crypto/DoubleRatchet.ts`,
+  `src/sessions/EncryptedSession.ts`, `src/spaces/SpaceCipher.ts`), while the
+  auth identity layer uses **P-256** (`src/auth/identity.ts` derives the
+  P-256 ECDSA + ECDH identity pairs; `src/auth/hostedHandoff.ts` pairing ECDH
+  and `src/auth/deviceStore.ts` device ECDSA are P-256 too)
 - Identity keypairs are **deterministically derived** from `(username, password)`
   (`src/auth/identity.ts`), not random — that's what makes federated login work
 - `StorageCipher` (`src/crypto/StorageCipher.ts`) derives the at-rest AES key
@@ -214,7 +235,8 @@ won't run.
 
 ### Testing Approach
 - Unit tests for individual components
-- Integration tests require Accelerator running (use `yarn test:integration`)
+- The `*.e2e.test.ts` suites need a live deployment (`yarn test:e2e`); they are a
+  separate vitest project so they are never counted as passing when they only skipped
 - Browser-specific features need Web Crypto API testing
 - Performance benchmarks needed for encryption operations
 

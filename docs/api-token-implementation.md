@@ -7,6 +7,15 @@
 >
 > Keep this file for future reference, but do not write code assuming any of
 > it is in place.
+>
+> **The `Network` class this document is built around no longer exists.** Every
+> `new Network({...})` and `import { Network } from '@muhkoo/connect'` below is
+> historical: the class was deleted from `src/network/`, which now holds only
+> `PacketCipher` / `DoubleRatchetCipher` (`src/network/PacketCipher.ts`). The
+> live entry point is `Client` (`src/core/Client.ts`), and the credential model
+> that actually shipped is the app key (`X-Muhkoo-Key`) plus the session token
+> (`X-Muhkoo-Session`) attached by `src/core/HttpClient.ts` — not the
+> `appToken` / `X-App-Token` scheme sketched here.
 
 ## Overview
 

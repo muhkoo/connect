@@ -1,5 +1,5 @@
 /**
- * PacketCipher tests — verify the two cipher strategies Network can plug in:
+ * PacketCipher tests — verify the two cipher strategies a transport can plug in:
  *   - DoubleRatchetCipher preserves the historical header contract.
  *   - SpacePacketCipher seals/opens with a group key, never exposing the
  *     plaintext (server-blind invariant) and returning null for epochs we lack.

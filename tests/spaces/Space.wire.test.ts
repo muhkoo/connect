@@ -237,7 +237,9 @@ describe("Space — fan-out wire end to end", () => {
         const received: any[] = [];
         bob.onMessage((e) => received.push(e));
         await alice.sendMessage({ text: "hello space" }, { channel: "chat" });
-        await flush();
+        // The receive path is two sequential crypto hops (verify sender, then
+        // decrypt), so poll rather than assuming a fixed number of turns.
+        await until(() => received.length >= 1);
 
         expect(received).toHaveLength(1);
         expect(received[0].from).toBe("alice");
@@ -284,14 +286,21 @@ describe("Space — fan-out wire end to end", () => {
         );
         const forged = new Packet({ subject: "chat", source: "alice", target: spaceId, headers });
 
-        const received: unknown[] = [];
+        const received: any[] = [];
         carol.onMessage((e) => received.push(e));
         mallory.sendRaw({ spaceMessage: forged.serialize() });
-        await flush();
-        await flush();
+        // Barrier instead of a fixed number of turns: a legitimately-signed
+        // message sent AFTER the forgery, down the same (strictly longer:
+        // verify *and* decrypt) receive path. Once it lands, the forged frame
+        // has had its full chance to be delivered.
+        await alice.sendMessage("legit", { channel: "chat" });
+        await until(() => received.length >= 1);
 
-        // Carol drops it: the signature doesn't verify under alice's key.
-        expect(received).toHaveLength(0);
+        // Carol drops the forgery: the signature doesn't verify under alice's
+        // key. Only the genuine message gets through.
+        expect(received).toHaveLength(1);
+        expect(received[0].from).toBe("alice");
+        expect(received[0].message.body).toBe("legit");
     });
 });
 
