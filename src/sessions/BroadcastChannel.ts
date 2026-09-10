@@ -23,7 +23,7 @@
  *             anything else                 — passes through as `raw_frame`
  *                                              (the app decides what to do)
  *
- * **Event scoping.** Unlike `Network`, BroadcastChannel uses a per-instance
+ * **Event scoping.** BroadcastChannel uses a per-instance
  * `EventTarget`, so two channels (e.g. two rooms in the same app) don't
  * cross-contaminate each other's events.
  *

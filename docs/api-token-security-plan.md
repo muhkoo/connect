@@ -5,6 +5,15 @@
 > [`api-token-implementation.md`](./api-token-implementation.md). Treat both
 > as a record of an earlier brainstorm, not a description of the current
 > codebase.
+>
+> **The `Network` class this plan modifies no longer exists.** `src/network/Network.ts`
+> was deleted; `src/network/` now holds only `PacketCipher` /
+> `DoubleRatchetCipher` (`src/network/PacketCipher.ts`). So the
+> "Modifications to `src/network/Network.ts`" step and every `new Network({...})`
+> snippet below are unbuildable as written. The live entry point is `Client`
+> (`src/core/Client.ts`), and the credentials that actually shipped are the app
+> key (`X-Muhkoo-Key`) and session token (`X-Muhkoo-Session`) attached by
+> `src/core/HttpClient.ts`.
 
 ## Overview
 This document outlines a strategy for implementing a secure public API token

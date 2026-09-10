@@ -249,8 +249,9 @@ install it as a peer dependency.
 
 ## Wrap helpers
 
-`src/personal/wrap.ts`. PBKDF2-SHA256 (200_000 iterations) → 256-bit AES-GCM
-key → encrypt with random 16-byte salt + 12-byte IV. NOT in workers build.
+`src/crypto/PassphraseWrap.ts`. PBKDF2-SHA256 (200_000 iterations) → 256-bit AES-GCM
+key → encrypt with random 16-byte salt + 12-byte IV. Present in ALL three
+builds — no snarkjs dependency (`src/workers/index.ts` exports it).
 
 ```typescript
 const wrapped = await wrapWithPassphrase("hunter2", new TextEncoder().encode("hello"));
@@ -359,19 +360,21 @@ events.
 
 ## Messaging
 
-`src/messaging/`. Lower-level building blocks used by the legacy `Network`
-and `Storage` classes. Useful if you're writing a custom protocol on top of
-`WSTransport`.
+`src/messaging/`. Lower-level building blocks used by the packet-cipher layer
+(`src/network/PacketCipher.ts`) and the space transport (`src/spaces/`).
+Useful if you're writing a custom protocol on top of `WSTransport`.
 
 - `Message` — body + status + base58-checked serialization
 - `Packet` — addressing wrapper for routing messages between peers
 - `SerializeMessage` — method decorator
 - `decorators` — namespace of all method decorators
 
-`Network` (`src/network/Network.ts`) is still in the source tree but is NOT
-exported from any build. `src/storage/` is a different thing entirely and *is*
-exported: `FileStorage` + `ShardClient`, the chunked AES-GCM + Reed-Solomon file
-layer under `client.storage`.
+The legacy `Network` class has been deleted. `src/network/` remains, holding
+`PacketCipher.ts` (the `PacketCipher` interface plus `DoubleRatchetCipher`)
+and its barrel `index.ts`; `PacketCipher.ts` is re-exported from the browser
+and server builds. `src/storage/` is a different thing entirely and is also
+exported: `FileStorage` + `ShardClient`, the chunked AES-GCM + Reed-Solomon
+file layer under `client.storage`.
 
 ---
 

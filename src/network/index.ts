@@ -3,7 +3,6 @@
  * Central communication layer for Connect SDK
  */
 
-export { Network, type NetworkOptions, type NetworkEventMap } from './Network';
 export {
     type PacketCipher,
     type PacketHeaders,

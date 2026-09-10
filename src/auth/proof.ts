@@ -23,13 +23,18 @@
 // loader defers that cost until `generateAuthProof` actually runs.
 import type { Groth16Proof } from "../types/zk";
 import { poseidonHash } from "./poseidon";
+import {
+    PINNED_CIRCUIT_DIGESTS,
+    resolveArtifact,
+    type CircuitIntegrity,
+} from "./circuitIntegrity";
 
 type Snarkjs = {
     groth16: {
         fullProve: (
             input: unknown,
-            wasm: string,
-            zkey: string,
+            wasm: string | Uint8Array,
+            zkey: string | Uint8Array,
         ) => Promise<{ proof: unknown; publicSignals: string[] }>;
     };
 };
@@ -42,7 +47,7 @@ async function loadSnarkjs(): Promise<Snarkjs> {
 
 export type { Groth16Proof };
 
-export interface CircuitUrls {
+export interface CircuitUrls extends CircuitIntegrity {
     /** preimagePoK.wasm — the circuit's witness generator. */
     wasmUrl: string;
     /** preimagePoK_0001.zkey — the proving key. */
@@ -62,6 +67,10 @@ export function defaultCircuitUrls(baseUrl: string): CircuitUrls {
     return {
         wasmUrl: `${base}/circuits/build/preimagePoK_js/preimagePoK.wasm`,
         zkeyUrl: `${base}/circuits/build/preimagePoK_0001.zkey`,
+        // Pinned so the artifacts cannot be swapped by the very party the proof
+        // is meant to convince. See ./circuitIntegrity.
+        wasmSha256: PINNED_CIRCUIT_DIGESTS.preimagePoKWasm,
+        zkeySha256: PINNED_CIRCUIT_DIGESTS.preimagePoKZkey,
     };
 }
 
@@ -165,12 +174,22 @@ export async function generateAuthProof(args: {
         ecdsaPub: ecdsaPubField,
     };
 
+    // Verify BEFORE proving. `circuitInput` above already contains the user's
+    // secret and salt as private witnesses, so handing them to an unverified
+    // witness generator is exactly the exfiltration path this guards.
+    const [wasm, zkey] = await Promise.all([
+        resolveArtifact(args.circuits.wasmUrl, args.circuits.wasmSha256, {
+            allowUnpinned: args.circuits.allowUnpinned,
+            label: "generateAuthProof(wasm)",
+        }),
+        resolveArtifact(args.circuits.zkeyUrl, args.circuits.zkeySha256, {
+            allowUnpinned: args.circuits.allowUnpinned,
+            label: "generateAuthProof(zkey)",
+        }),
+    ]);
+
     const snarkjs = await loadSnarkjs();
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-        circuitInput,
-        args.circuits.wasmUrl,
-        args.circuits.zkeyUrl,
-    );
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(circuitInput, wasm, zkey);
 
     return {
         proof: proof as Groth16Proof,

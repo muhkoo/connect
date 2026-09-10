@@ -96,8 +96,11 @@ yarn test:watch
 # Run unit tests once
 yarn test:unit
 
-# Run integration tests (requires Accelerator running)
-TEST_TYPE=integration yarn test:integration
+# Run the e2e suites (need a live deployment)
+E2E_STAGING=1 MUHKOO_BASE_URL=... yarn test:e2e
+
+# Typecheck (tsc --noEmit)
+yarn typecheck
 ```
 
 ### Code Quality
@@ -121,10 +124,22 @@ yarn watch:docs
 ## Project Structure
 
 ### Source Code Organization
+- `/src/api.ts` - **The canonical public surface.** Every public symbol is
+  reachable from exactly this file; the three platform entries re-export it and
+  name zero symbols, so they cannot drift from each other or from the shipped
+  types. `/src/api.universal.ts` is the Workers-safe slice it builds on and is
+  the ONLY declared platform delta — read its header before adding anything to
+  the workers build, and note that `src/personal` is tainted only DYNAMICALLY
+  (it looks clean to a static check but bundles snarkjs).
+- `/src/runtime/appLogger.ts` - The single `globalThis.appLogger` bootstrap,
+  previously duplicated across three entry files.
 - `/src/core/` - The unified `Client`. `Client.ts` (facade), `HttpClient.ts`
   (header-injecting transport), `Session.ts` (session + identity state),
-  `Room.ts` (back-compat alias re-exporting `Space`), and
-  `namespaces/{Auth,Storage,Message,Space}Namespace.ts`
+  `Room.ts` (back-compat alias re-exporting `Space`), and `namespaces/` —
+  `AuthNamespace`, `KvNamespace`, `DbNamespace`, `FileNamespace` (which is
+  where `StorageNamespace` lives — there is no `StorageNamespace.ts`),
+  `MessageNamespace`, `SpaceNamespace`, `AgentsNamespace`,
+  `FunctionsNamespace`, `AccessTokensNamespace`, `HostedAuth`
 - `/src/spaces/` - Fan-out group-encryption layer: `Space.ts` (the shared-space
   handle, formerly `Room`), `SpaceCipher` (ECIES group-key wrap + message seal),
   `SpaceKeyring` + `KeyringClient` (group-key distribution), `SpacePacketCipher`
@@ -135,10 +150,14 @@ yarn watch:docs
 - `/src/sessions/` - `EncryptedSession` + `BroadcastChannel` (E2E space transport)
 - `/src/storage/` - Chunked/encrypted/erasure-coded file storage (FileStorage,
   ShardClient, SharedSpaceClient, Reed-Solomon)
-- `/src/personal/` - `PersonalSpaceClient` (proof-gated per-user KV; the
-  lower-level building block under `client.storage`)
+- `/src/personal/` - `PersonalSpaceClient` (proof-gated per-user KV). A
+  standalone building block exported from the browser/server builds; nothing
+  in `src/core/` uses it — `client.kv` (`src/core/namespaces/KvNamespace.ts`)
+  talks to `/api/personal/:commitment/*` itself
 - `/src/messaging/`, `/src/network/`, `/src/transport/` - Message/Packet,
-  Network, and WSTransport primitives
+  `PacketCipher`/`DoubleRatchetCipher`, and WSTransport primitives. The legacy
+  `Network` class is gone; `src/network/PacketCipher.ts` survives and is
+  exported from the browser and server builds
 - `/src/events/` - Event emitter and handling
 - `/src/utilities/` - Helper functions, decorators, logging, byte helpers
 - `/src/types/` - TypeScript type definitions (incl. `zk.ts` + `PREIMAGE_POK_VERIFICATION_KEY`)
@@ -150,7 +169,26 @@ yarn watch:docs
 - **TypeScript**: ESNext target with strict mode enabled
 - **Rollup**: Three separate builds — browser (`dist/browser/`), Node.js server (`dist/server/`), and Cloudflare Workers (`dist/workers/`). The build target is selected by `BUILD_ENV={browser,server,workers}`
 - **`@rollup/plugin-wasm`** is enabled in all three builds with `targetEnv: 'auto-inline'` — `.wasm` imports are base64-inlined so the Groth16 verifier's bundled-WASM fallback works in any runtime
-- **Exports**: Multiple entry points for different modules (crypto, types, api, events, messaging, utilities). The `.` export uses conditional resolution (`workerd` / `browser` / `default`) to pick the right bundle
+- **Exports**: `package.json` declares three entry points — `.`, `./workers` and
+  `./p2p-worker`. There are no per-module subpaths (`@muhkoo/connect/crypto` and
+  friends do not resolve). The `.` export uses conditional resolution (`workerd` /
+  `browser` / `default`) to pick the right bundle, and each condition carries its
+  OWN types: `workerd` → `dist/connect.workers.d.ts` (29 values, matching that
+  bundle exactly), everything else → `dist/connect.d.ts`, rolled from `src/api.ts`.
+
+  **Workers consumers should import from `@muhkoo/connect/workers`, not `.`.**
+  The `workerd` CONDITION alone is not enough: a consumer on
+  `moduleResolution: "bundler"` without `customConditions` resolves with
+  `["import","types"]`, never sees `workerd`, and falls through to `default` —
+  getting types that promise 175 symbols the workers bundle does not export,
+  `Client` among them. The explicit `./workers` subpath resolves correctly under
+  every configuration with no consumer-side opt-in. Verified: importing `Client`
+  from `@muhkoo/connect/workers` fails with TS2305, while the root specifier
+  still gives the full surface.
+
+  `tests/api/export-surface.test.ts` asserts the exports map stays coherent —
+  every target exists AND is matched by `files`. A target `files` omits fails
+  resolution hard once published, which is worse than the stale types it replaces.
 
 ## Important Technical Details
 
@@ -158,7 +196,13 @@ yarn watch:docs
 - **Zero-knowledge proofs**: snarkjs (via `@zk-kit/groth16`) for proof generation in the browser/server builds (see `src/crypto/ZeroKnowledge.ts` — `HashKnowledge`, `PreimagePoK`). Proof generation is NOT possible in the CF Workers build because snarkjs/ffjavascript depend on `URL.createObjectURL` and worker_threads, which CF Workers don't expose
 - **Edge ZK verification**: `src/workers/groth16-verifier.ts` drives `bn128.wasm` directly to verify Groth16 proofs. Workers-safe (no snarkjs/ffjavascript). Available from all three builds; under `workerd` consumers get the same code path as Node/browser
 - Implements the Double Ratchet algorithm for end-to-end encryption (DMs/rooms)
-- ECDH (P-256) key exchange for session establishment; P-256 ECDSA for signing
+- Two distinct curves, do not conflate them: the Double Ratchet / session /
+  space stack uses **ECDH P-384** for key agreement and **ECDSA P-384** for
+  signing (`src/crypto/KeyStore.ts`, `src/crypto/DoubleRatchet.ts`,
+  `src/sessions/EncryptedSession.ts`, `src/spaces/SpaceCipher.ts`), while the
+  auth identity layer uses **P-256** (`src/auth/identity.ts` derives the
+  P-256 ECDSA + ECDH identity pairs; `src/auth/hostedHandoff.ts` pairing ECDH
+  and `src/auth/deviceStore.ts` device ECDSA are P-256 too)
 - Identity keypairs are **deterministically derived** from `(username, password)`
   (`src/auth/identity.ts`), not random — that's what makes federated login work
 - `StorageCipher` (`src/crypto/StorageCipher.ts`) derives the at-rest AES key
@@ -193,15 +237,28 @@ yarn watch:docs
 ### Known Issues
 1. **Base58 encoding performance**: Currently slow for large payloads (>100KB). Message class tests disabled due to this bottleneck.
 2. **Integration tests**: Require Accelerator infrastructure to be running, not included in default test suite.
-3. **dts roll-up gaps**: `rollup-plugin-dts` drops some subtrees from
-   `dist/connect.d.ts` (storage/sessions/personal/core). Consumers that hit
-   missing types use a local shim (see `muhkoo/web/src/lib/connect.ts`).
-   Worth fixing properly.
+3. ~~**dts roll-up gaps**~~ — RESOLVED (2026-09). This was a misdiagnosis.
+   `rollup-plugin-dts` does NOT drop named cross-module re-exports (verified
+   against the installed 6.2.3; the in-tree proof is that `src/offline/index.ts`
+   and `src/p2p/index.ts` are written entirely as named re-exports and all 39 of
+   their symbols reach `dist/connect.d.ts`). The real cause was that the d.ts was
+   rolled from the NAMESPACED `src/index.ts` (`export * as core from './core'`)
+   while the JS came from the flat `src/browser/index.ts`, so top-level `Client`
+   was absent by ES semantics, not by plugin bug. The surface now has one source
+   of truth (`src/api.ts`) and is asserted by `tests/api/export-surface.test.ts`.
+   Consumer-side shims can be deleted.
 
 ### Test config note
-`vitest.config.ts` uses a curated `include` allowlist (many tests are commented
-out for perf/flakiness). When adding a test, add its path to that list or it
-won't run.
+`vitest.config.ts` has TWO projects and no allowlist: `unit` (every
+`tests/**/*.test.ts` that isn't e2e — the default run) and `e2e`
+(`tests/**/*.e2e.test.ts`, opt-in via `yarn test:e2e`, so those suites are never
+counted as passing when they only skipped). A new test file runs the moment it
+lands; no config edit. The only exclusion is `CANNOT_RUN` in that file, which
+today holds one entry with its reason.
+
+CI builds BEFORE testing and sets `REQUIRE_BUILD_ARTIFACTS=1`, because `dist/` is
+gitignored and `tests/api/export-surface.test.ts`'s artifact assertions — the only
+ones that check what actually ships — would otherwise skip silently.
 
 ## Development Guidelines
 
@@ -214,7 +271,8 @@ won't run.
 
 ### Testing Approach
 - Unit tests for individual components
-- Integration tests require Accelerator running (use `yarn test:integration`)
+- The `*.e2e.test.ts` suites need a live deployment (`yarn test:e2e`); they are a
+  separate vitest project so they are never counted as passing when they only skipped
 - Browser-specific features need Web Crypto API testing
 - Performance benchmarks needed for encryption operations
 

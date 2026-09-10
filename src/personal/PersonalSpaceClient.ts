@@ -24,13 +24,15 @@
  */
 
 import type { Groth16Proof } from "../types/zk";
+import { resolveArtifact, type CircuitIntegrity } from "../auth/circuitIntegrity";
 
 type Snarkjs = {
     groth16: {
         fullProve: (
+            // Verified bytes, or a local path snarkjs reads itself.
             input: unknown,
-            wasm: string,
-            zkey: string,
+            wasm: string | Uint8Array,
+            zkey: string | Uint8Array,
         ) => Promise<{ proof: unknown; publicSignals: string[] }>;
     };
 };
@@ -71,8 +73,14 @@ export interface PersonalSpaceClientOptions {
     ecdsaPub: string;
     /** Poseidon hash of `ecdsaPub`, used as a public signal. Decimal BigInt string. */
     ecdsaPubHash: string;
-    /** Where the runtime can fetch the compiled circuit assets. */
-    circuits: {
+    /**
+     * Where the runtime can fetch the compiled circuit assets, and the digests
+     * to verify them against. Prefer `defaultCircuitUrls(baseUrl)`, which pins
+     * them — this client passes `secret` and `salt` to the witness generator as
+     * private witnesses, so an unverified one can exfiltrate them. See
+     * `src/auth/circuitIntegrity.ts`.
+     */
+    circuits: CircuitIntegrity & {
         /** URL of the `preimagePoK.wasm` witness generator. */
         wasmUrl: string;
         /** URL of the `preimagePoK_0001.zkey` proving key. */
@@ -130,8 +138,7 @@ export class PersonalSpaceClient {
     private readonly salt: string;
     private readonly ecdsaPub: string;
     private readonly ecdsaPubHash: string;
-    private readonly wasmUrl: string;
-    private readonly zkeyUrl: string;
+    private readonly circuits: PersonalSpaceClientOptions["circuits"];
 
     constructor(opts: PersonalSpaceClientOptions) {
         if (!opts.baseUrl) throw new Error("PersonalSpaceClient: `baseUrl` is required");
@@ -152,8 +159,7 @@ export class PersonalSpaceClient {
         this.salt = opts.salt;
         this.ecdsaPub = opts.ecdsaPub;
         this.ecdsaPubHash = opts.ecdsaPubHash;
-        this.wasmUrl = opts.circuits.wasmUrl;
-        this.zkeyUrl = opts.circuits.zkeyUrl;
+        this.circuits = opts.circuits;
     }
 
     /** Store `value` under `key`, replacing any prior value. */
@@ -223,12 +229,22 @@ export class PersonalSpaceClient {
             ecdsaPub: this.ecdsaPub,
         };
 
+        // Verify the artifacts before proving — `input` above carries `secret`
+        // and `salt` as private witnesses, and an unpinned witness generator
+        // fetched from the server can copy them into a public signal.
+        const [wasm, zkey] = await Promise.all([
+            resolveArtifact(this.circuits.wasmUrl, this.circuits.wasmSha256, {
+                allowUnpinned: this.circuits.allowUnpinned,
+                label: "PersonalSpaceClient(wasm)",
+            }),
+            resolveArtifact(this.circuits.zkeyUrl, this.circuits.zkeySha256, {
+                allowUnpinned: this.circuits.allowUnpinned,
+                label: "PersonalSpaceClient(zkey)",
+            }),
+        ]);
+
         const snarkjs = await loadSnarkjs();
-        const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-            input,
-            this.wasmUrl,
-            this.zkeyUrl,
-        );
+        const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasm, zkey);
 
         return {
             challengeId: challenge.challengeId,

@@ -1,0 +1,82 @@
+# Public export surface of src/browser/index.ts — GENERATED, do not hand-edit.
+#
+# Regenerate:  UPDATE_API_SURFACE=1 npx vitest --run tests/api/export-surface.test.ts
+#
+# READ THE DIFF, DO NOT RUBBER-STAMP IT. Every line here is a name a consumer
+# can import from `@muhkoo/connect`. An added line is new public API you are
+# committing to support; a removed line is a breaking change for someone.
+#
+#   V <name>   value  — exists at runtime
+#   T <name>   type   — erased at runtime, importable only as a type
+
+T ACL
+T ACLEntry
+T AuthKeyPair
+T AuthType
+T Bn128WasmInstance
+T BroadcastChannelEvent
+T BroadcastChannelOptions
+T ChunkKeyMaterial
+T CipherFrame
+T CipherMessage
+T CipherMessageHeader
+T DehydratedKeypair
+T DehydratedKeys
+T ECDHCurve
+T Groth16Proof
+T IncomingFrame
+T KeyExchangeFrame
+T KeyPair
+T Keypair
+T MessageBody
+T MessageEvent
+T MessageHeaders
+T MessageOptions
+T OAuthProvider
+T PacketOptions
+T Participant
+T Permission
+T PermissionCheckRequest
+T PermissionCheckResult
+T PublicKeyJWK
+T RatchetState
+T ReceiveResult
+T Role
+T Session
+T SessionOptions
+T Subscription
+T UserIdentity
+T VerificationKey
+T WSMessage
+T WSMessageType
+T WSTransportOptions
+T WrappedPayload
+V AES_GCM_IV_BYTES
+V AES_GCM_KEY_BYTES
+V AES_GCM_TAG_BYTES
+V BroadcastChannel
+V BroadcastChannelEvents
+V ChunkCipher
+V DoubleRatchet
+V EncryptedSession
+V EventCore
+V EventCoreEvents
+V KeyStore
+V Message
+V MessageDefault
+V PBKDF2_DEFAULT_ITERATIONS
+V PREIMAGE_POK_VERIFICATION_KEY
+V Packet
+V SerializeMessage
+V WSTransport
+V decorators
+V decryptAesGcm
+V deriveAesKeyFromPassphrase
+V deriveBitsHkdf
+V encryptAesGcm
+V getSubtle
+V initBn128Wasm
+V randomBytes
+V unwrapWithPassphrase
+V verifyGroth16
+V wrapWithPassphrase

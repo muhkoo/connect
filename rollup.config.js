@@ -1,7 +1,5 @@
 import typescript from "rollup-plugin-typescript2";
-import replace from "@rollup/plugin-replace";
 import dts from "rollup-plugin-dts";
-import packageJson from "./package.json" with { type: "json" };
 import nodeResolve from "@rollup/plugin-node-resolve";
 import commonjs from "@rollup/plugin-commonjs";
 import wasm from "@rollup/plugin-wasm";
@@ -64,13 +62,13 @@ const jsConfig = {
     wasm({
       targetEnv: 'auto-inline',
     }),
-    replace({
-      "process.env.npm_package_version": JSON.stringify(packageJson.version),
-      "(process.env.LOG_LEVEL || LOGLEVEL).toUpperCase() as keyof typeof LogLevel": `"${process.env.LOG_LEVEL}"` || "ERROR",
-      preventAssignment: true,
-    }),
     typescript({
-      clean: true
+      clean: true,
+      // The rolled-up bundles in rollup.dts.config.js are the only declarations
+      // we ship. Per-file emit additionally scattered ~427 stray .d.ts through
+      // dist/, including a mislabelled dist/browser/index.d.ts that declared a
+      // DIFFERENT entry than the bundle beside it.
+      tsconfigOverride: { compilerOptions: { declaration: false, declarationMap: false } },
     }),
   ].filter(Boolean),
 };
@@ -89,28 +87,16 @@ const workerConfig = isBrowser && {
   },
   plugins: [
     wasm({ targetEnv: "auto-inline" }),
-    replace({
-      "process.env.npm_package_version": JSON.stringify(packageJson.version),
-      preventAssignment: true,
+    typescript({
+      clean: true,
+      tsconfigOverride: { compilerOptions: { declaration: false, declarationMap: false } },
     }),
-    typescript({ clean: true }),
   ],
 };
 
-// Complete DTS build config.
-// Build types from the browser entry point (not `src/index.ts`) so the
-// declared shape matches what consumers actually see at runtime — the
-// browser bundle uses flat `export *` re-exports, while `src/index.ts`
-// uses namespaced `export * as foo` which doesn't survive
-// rollup-plugin-dts cleanly. Server-build consumers also see this same
-// shape (their `dist/server/index.js` is built from a near-identical entry).
-const dtsComplete = {
-  input: "src/browser/index.ts",
-  output: {
-    file: "dist/connect.d.ts",
-    format: "es",
-  },
-  plugins: [dts()],
-};
+// NOTE: the declaration bundles are NOT built here. They live in
+// rollup.dts.config.js (`yarn build:dts`). This block used to hold a duplicate
+// dts config that ran on EVERY BUILD_ENV, so `yarn build` rolled connect.d.ts
+// four times — three of them thrown away.
 
-export default [jsConfig, workerConfig, dtsComplete].filter(Boolean);
+export default [jsConfig, workerConfig].filter(Boolean);

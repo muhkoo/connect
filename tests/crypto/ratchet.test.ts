@@ -1,5 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import fs from 'fs/promises';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { subtle } from 'crypto';
 
 import { DoubleRatchetManager } from '../../src/crypto/DoubleRatchetManager';
@@ -8,9 +7,9 @@ import {
   PreimagePoK,
   AuthPublicInput,
   Field,
-  Poseidon,
-  VerificationKey
+  Poseidon
 } from '../../src/crypto/ZeroKnowledge';
+import { loadPreimagePoKCircuit } from '../helpers/circuits';
 
 // Mock logger for tests
 const appLogger = {
@@ -22,111 +21,22 @@ const appLogger = {
 // Make appLogger available globally for the test
 (global as any).appLogger = appLogger;
 
-const _dir = './tests/v1/crypto/keys';
-// Cleanup JSON files before and after tests
-async function cleanupFiles() {
-  const files = await fs.readdir(_dir);
-  console.log('Cleaning up files:', files);
-  for (const file of files) {
-    if (file.endsWith('.json')) {
-      await fs.unlink(_dir + `/${file}`).catch(() => { });
-    }
-  }
-}
-
-// Setup circuits - use real ones if available, otherwise mock
+// Install the real circuit artifacts. `ZeroKnowledge.ts` no longer self-loads
+// them, so the buffers have to be injected before PreimagePoK can compile/prove.
+// Deliberately no mock fallback: canned prove/verify would make the ZK
+// assertions below meaningless as a refactor safety net.
 async function setupCircuits() {
-  const fs = await import('fs');
-  const path = await import('path');
-
-  // Check if real circuit files exist
-  const circuitPath = path.join(process.cwd(), 'circuits', 'build', 'preimagePoK_0001.zkey');
-  const hasRealCircuits = fs.existsSync(circuitPath);
-
-  if (hasRealCircuits) {
-    console.log('Using REAL circuits from circuits/build/');
-    // Real circuits will be loaded automatically by the classes
-    return;
-  }
-
-  console.log('Real circuits not found, using MOCK circuits for testing');
-  // For testing without real circuits, mock the circuit behavior
-  // Override the prove and verify methods for testing
-  (PreimagePoK as any).prove = async (
-    publicInput: AuthPublicInput,
-    secret: Field,
-    salt: Field,
-    ecdsaPub: Field
-  ) => {
-    // Mock proof generation
-    const mockProof = {
-      pi_a: ['0x1', '0x2'],
-      pi_b: [['0x3', '0x4'], ['0x5', '0x6']],
-      pi_c: ['0x7', '0x8'],
-      protocol: 'groth16',
-      curve: 'bn128'
-    };
-
-    // Calculate expected values for verification
-    const ecdsaPubHash = await Poseidon.hash([ecdsaPub]);
-    const computedCommitment = await Poseidon.hash([secret, salt, ecdsaPubHash]);
-
-    // Return mock proof with public signals
-    return {
-      proof: mockProof,
-      publicSignals: [
-        computedCommitment.toString(),
-        publicInput.nonce,
-        ecdsaPubHash.toString()
-      ]
-    };
-  };
-
-  (PreimagePoK as any).verify = async (proof: any, publicSignals?: string[]) => {
-    // Mock verification - in real implementation this would verify the actual proof
-    // For testing, we'll do basic validation
-    if (!proof || !publicSignals || publicSignals.length !== 3) {
-      return false;
-    }
-    return true;
-  };
-
-  // Mock the compile method
-  (PreimagePoK as any).compile = async () => {
-    const mockVerificationKey: VerificationKey = {
-      protocol: 'groth16',
-      curve: 'bn128',
-      nPublic: 3,
-      vk_alpha_1: [],
-      vk_beta_2: [],
-      vk_gamma_2: [],
-      vk_delta_2: [],
-      vk_alphabeta_12: [],
-      IC: []
-    };
-
-    (PreimagePoK as any).verificationKey = mockVerificationKey;
-
-    return {
-      verificationKey: mockVerificationKey
-    };
-  };
+  await loadPreimagePoKCircuit();
 }
 
 describe('Double Ratchet with ZK Registration and JWK/Base58 Keys', () => {
   beforeAll(async () => {
-    await cleanupFiles();
-
-    // Setup circuits (real or mock depending on availability)
+    // Load the real circuits
     await setupCircuits();
 
     appLogger.debug('Compiling PreimagePoK...');
     await PreimagePoK.compile();
   }, 20000);
-
-  afterAll(async () => {
-    // await cleanupFiles();
-  });
 
   it('should register with JWK keys, perform ZK handshake, and communicate (1:1)', async () => {
     const clientId = 'client1';
@@ -140,16 +50,16 @@ describe('Double Ratchet with ZK Registration and JWK/Base58 Keys', () => {
     const clientAuthKeyPair = keyStore.getAuthKeyPair(clientId)!;
     await keyStore.generateOwnKeyPair(serverId); // Generate server keys
     const clientDehydrated = await keyStore.dehydrateKeyPair(clientId);
-    const compressedKeys = await keyStore.compressDehydratedKeys(clientId);
+    const packedKeys = await keyStore.packDehydratedKeys(clientId);
     appLogger.debug(`Developer view - Client ${clientId} keys:`, {
       ecdhPub: clientDehydrated.ecdhPub.slice(0, 16) + '...',
       ecdsaPriv: clientDehydrated.ecdsaPriv.slice(0, 16) + '...',
-      compressed: compressedKeys
+      packed: packedKeys
     });
 
-    console.log('Compressed Keys:', compressedKeys);
+    console.log('Packed Keys:', packedKeys);
 
-    await keyStore.hydrateFromCompressed(clientId, compressedKeys);
+    await keyStore.hydrateFromPacked(clientId, packedKeys);
 
     console.log(clientDehydrated)
 
@@ -183,7 +93,7 @@ describe('Double Ratchet with ZK Registration and JWK/Base58 Keys', () => {
       ecdsaPubHash.toString()
     );
 
-    // Generate proof using the mock implementation
+    // Generate a REAL Groth16 proof against the checked-in circuit artifacts.
     const { proof } = await PreimagePoK.prove(publicInput, secret, salt, ecdsaPubField);
 
     // Client generates auth token

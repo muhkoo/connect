@@ -107,8 +107,8 @@ All three rely on globalThis-level WebCrypto (`crypto.subtle`,
 
 ```bash
 yarn test               # vitest (watch mode)
-yarn test:unit          # vitest --run
-yarn test:integration   # TEST_TYPE=integration vitest --run tests/integration
+yarn test:unit          # vitest --run --project unit
+yarn test:e2e           # vitest --run --project e2e (needs a live deployment)
 ```
 
 Note: some files under `tests/integration/` are stale (they import from

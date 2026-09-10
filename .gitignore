@@ -129,12 +129,16 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-tests/**/*.json
 
-yarn.lock
+# yarn.lock IS committed (packageManager: yarn@1.22.22) so builds are
+# reproducible and CI can use --frozen-lockfile. package-lock.json stays
+# ignored: a second lockfile that can disagree is how this went wrong before.
 package-lock.json
 .DS_Store
 .claude/
 # Stray IPFS/Kubo daemon config — never belongs in this repo
 config.json
 CLAUDE.md
+
+# Generated TypeDoc output (yarn build:docs)
+connect-docs

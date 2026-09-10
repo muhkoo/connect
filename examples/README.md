@@ -1,12 +1,13 @@
 # Examples
 
-This directory contains TypeScript example scripts for the SDK. **Most of the
-scripts in this folder are stale** — they import classes (`ApiClient`,
-`SessionManager`, `Network`) that no longer exist in `src/` or are not
-exported from any build. They are kept for historical reference until
-they're rewritten or deleted.
+This directory is currently empty of runnable scripts. Every script that used to
+live here (`basic-usage.ts`, `network-example.ts`, `network-ratchet-example.ts`,
+`network-rest-example.ts`, `network-unified-example.ts`) imported classes —
+`ApiClient`, `SessionManager`, the legacy `Network` — that were removed in the
+2026-05 unified-`Client` overhaul. They no longer compiled against `src/`, so
+they have been deleted rather than left as misleading reference material.
 
-If you're looking for runnable, current usage examples, see
+For runnable, current usage examples, see
 [`../docs/examples.md`](../docs/examples.md). It covers:
 
 - `BroadcastChannel` — multi-peer E2EE rooms
@@ -17,20 +18,9 @@ If you're looking for runnable, current usage examples, see
 - `WSTransport` — raw WebSocket lifecycle
 - `KeyStore` — dehydrate/hydrate identity
 
-## Files in this directory
-
-| File | Status |
-| --- | --- |
-| `basic-usage.ts` | Stale. Imports `ApiClient` from `../src/api/client` (does not exist). |
-| `network-example.ts` | Stale. Imports `SessionManager` from `../src` (does not exist) and uses the legacy `Network` class. |
-| `network-ratchet-example.ts` | Stale. Uses the legacy `Network` class (not exported in any build). |
-| `network-rest-example.ts` | Stale. Legacy `Network`. |
-| `network-unified-example.ts` | Stale. Legacy `Network`. |
-
-Reproducing the chat flow against the current SDK is best done by reading the
-`muhkoo/web` SPA (which drives the `Client` directly) alongside the snippets in
-`docs/examples.md`. The `public/*.html` pages in `muhkoo/accelerator` are the
-pre-SPA demos and predate the `Client` entirely.
+The canonical docs site (the `../docs` repo → `docs.muhkoo.dev`) is the source of
+truth for the `Client` API. The `muhkoo/web` SPA drives the `Client` directly and
+is the best end-to-end reference for a real application.
 
 ## Quick start (using the current public API)
 
@@ -51,18 +41,8 @@ await channel.announce();
 await channel.send("hello room");
 ```
 
-## Running
-
-The current scripts don't compile against the current source tree, so there's
-nothing useful to run from this folder. The `package.json` has no
-`examples` script.
-
 ## Next steps
 
-When someone gets to it, the action items are:
-
-1. Delete the four stale `network-*.ts` scripts.
-2. Rewrite `basic-usage.ts` against the real surface (`BroadcastChannel` +
-   `PersonalSpaceClient`).
-3. Add a `yarn example:chat` and `yarn example:storage` script wiring the new
-   files into the project test/build setup.
+If someone wants examples back in this folder, write them against the real
+surface (`Client`, `BroadcastChannel`, `PersonalSpaceClient`) and wire them into
+`package.json` with an `example:*` script so they stay compiled and honest.

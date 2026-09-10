@@ -1,94 +1,100 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, defaultExclude } from 'vitest/config';
 import tsconfigPaths from 'vite-tsconfig-paths';
 
+/**
+ * Two projects, no curated allowlist.
+ *
+ *   unit  every tests/**\/*.test.ts that isn't e2e — runs by default, so a new
+ *         test file runs the moment it lands, with no config edit.
+ *   e2e   tests/**\/*.e2e.test.ts — needs a live deployment, so it is opt-in
+ *         (`yarn test:e2e`) rather than silently self-skipping inside the
+ *         default run and being counted as "passing".
+ *
+ * This replaces a 60-line hand-curated `include` allowlist. That allowlist
+ * didn't merely default files off — a CLI path argument is INTERSECTED with
+ * `include`, so an unlisted file could not be run at all, even explicitly.
+ */
+
+/**
+ * Vite cannot handle a bare `.wasm` import ("ESM integration proposal for Wasm
+ * is not supported currently"), which is why no test could import
+ * src/workers/groth16-verifier.ts — the edge Groth16 verifier that IS the
+ * accelerator's login verification path.
+ *
+ * Reproduce @rollup/plugin-wasm's `auto-inline` contract instead: a default
+ * export `(imports) => Promise<WebAssembly.Instance>`. Reading from disk rather
+ * than base64-inlining is fine here; only the shape has to match.
+ */
+const wasmLoader = () => ({
+  name: 'muhkoo:wasm-loader',
+  enforce: 'pre' as const,
+  load(id: string) {
+    const file = id.split('?')[0];
+    if (!file.endsWith('.wasm')) return null;
+    return [
+      "import { readFileSync } from 'node:fs';",
+      `const bytes = readFileSync(${JSON.stringify(file)});`,
+      'export default async function load(imports) {',
+      '  const { instance } = await WebAssembly.instantiate(bytes, imports ?? {});',
+      '  return instance;',
+      '}',
+    ].join('\n');
+  },
+});
+
+const paths = () =>
+  tsconfigPaths({
+    root: './',
+    projects: ['./tsconfig.json'],
+    loose: true,
+    ignoreConfigErrors: true,
+  });
+
+const shared = {
+  setupFiles: ['./vitest.setup.ts'],
+  environment: 'node' as const,
+  globals: true,
+};
+
+/**
+ * Suites that cannot run. Each entry names its reason and is a bug to fix or a
+ * file to delete — not a permanent home. Keep this list short and justified.
+ */
+const CANNOT_RUN = [
+  // Its "Body Size Validation" block base58-encodes 2-4MB payloads synchronously
+  // and never returns. A sync hang ignores testTimeout, so it wedges the whole
+  // run rather than failing. Tracked as the known base58 perf issue in CLAUDE.md.
+  'tests/messaging/message.test.ts',
+];
+
+const NEVER = [...defaultExclude, '**/dist/**', 'wip/**', 'connect-docs/**'];
+
 export default defineConfig({
-  plugins: [tsconfigPaths({
-    root: './', // Set the root directory for tsconfig paths
-    projects: ['./tsconfig.json'], // Specify the tsconfig files to use
-    loose: true, // Allow resolution of non-module files
-    ignoreConfigErrors: true, // Ignore errors in tsconfig files
-  })],
+  plugins: [wasmLoader(), paths()],
   test: {
-    setupFiles: ['./vitest.setup.ts'],
-    environment: "node", // Use "jsdom" if testing browser-specific code
-    globals: true,       // Enables global APIs like `describe` and `it`
-    coverage: {
-      reporter: ["text", "json", "html"], // Add coverage reporting (optional)
-    },
-    include: [
-      // Unified Client facade + namespaces
-      "**/client.test.ts",
-      "**/tests/client/kv.test.ts",
-      "**/tests/client/file-storage.test.ts",
-      "**/tests/client/message.test.ts",
-      "**/tests/client/functions.test.ts",
-      // App-describing decorators (@MuhkooAgent/@MuhkooSpace/… + ejectAgentPrompt)
-      "**/tests/core/agentDescribe.test.ts",
-      // HTTP credential plumbing + session recovery, WebSocket transport
-      "**/tests/core/HttpClient.test.ts",
-      // SDK-owned ratchet-keypair vault (stable keypair across reloads)
-      "**/tests/core/ChatKeyVault.test.ts",
-      "**/tests/transport/WSTransport.test.ts",
-      // "**/ecdh.test.ts",
-      "**/tests/crypto/ratchet.test.ts",
-      "**/tests/crypto/zk-real.test.ts",
-      // Identity vault crypto (M1.0): OPRF, seed↔identity split, seed wrap/unwrap
-      "**/tests/auth/vault.test.ts",
-      "**/tests/auth/passkey-origin.test.ts",
-      "**/tests/auth/passkey-auto-unlock.test.ts",
-      // SDK-level vault auth e2e (opt-in: E2E_STAGING=1 + MUHKOO_BASE_URL)
-      "**/tests/auth/vault-sdk.e2e.test.ts",
-      "**/tests/auth/recovery-phrase.e2e.test.ts",
-      "**/tests/auth/vault-migration.e2e.test.ts",
-      "**/tests/auth/change-password.e2e.test.ts",
-      "**/tests/auth/ecdsa-signature.e2e.test.ts",
-      "**/tests/auth/hex-pubkey-login.e2e.test.ts",
-      // M2.1 email factor (gated split-key) e2e - local form: MUHKOO_BASE_URL +
-      // OTP_LOG (scrapes the dev-mode OTP from the accelerator's wrangler log)
-      "**/tests/auth/email-factor.e2e.test.ts",
-      // Staging close-out e2e (real mailbox; codes handed in via $OTP_DIR files)
-      "**/tests/auth/email-factor-staging.e2e.test.ts",
-      // Hosted-auth handoff crypto (unit)
-      "**/tests/auth/hosted-handoff.test.ts",
-      // v2 ECDH device-pairing handoff (TV pairing) crypto (unit)
-      "**/tests/auth/device-pairing-handoff.test.ts",
-      // TV device pairing SDK surface (client.auth.hosted.*) + deviceStore (unit;
-      // fake fetch + fake storage + injected sleep, no network/timers/snarkjs)
-      "**/tests/auth/device-pairing-sdk.test.ts",
-            "**/tests/auth/device-login.test.ts",
-      // Hosted-auth full flow (e2e; opt-in: E2E_STAGING=1 + MUHKOO_BASE_URL)
-      "**/tests/auth/hosted-flow.e2e.test.ts",
-      // Storage pipeline (cipher + RS codec + FileStorage end-to-end)
-      "**/tests/storage/FileStorage.test.ts",
-      "**/tests/storage/shard-batching.test.ts",
-      // Space fan-out group-encryption layer
-      "**/tests/vfs/**/*.test.ts",
-      "**/tests/vcs/**/*.test.ts",
-      "**/tests/spaces/**/*.test.ts",
-      // Offline layer — HLC clock, CRDT primitives, IndexedDB store, sync
-      "**/tests/offline/**/*.test.ts",
-      // P2P layer — block-exchange protocol, engine, ShardClient peer hook
-      "**/tests/p2p/**/*.test.ts",
-      // "**/session-manager.test.ts",
-      // "**/api-client.test.ts",
-      // Salvaged tests
-      // "**/utilities.test.ts",
-      // "**/event-core.test.ts",
-      // Temporarily disabled due to performance issues with base58 encoding
-      // "**/message.test.ts",
-      // Integration tests (require Accelerator to be running)
-      // "**/*.integration.test.ts",
-      // "tests/**/*.{test,spec}.{ts,tsx,js,jsx}"
-    ], // Include all test files
-    exclude: [
-      "node_modules",
-      "connect-docs",
-      'wip',
-      "**/dist/**",
-      // Exclude integration tests from default test run
-      // Run them explicitly with: yarn test:integration
-      process.env.TEST_TYPE !== 'integration' ? "**/*.integration.test.ts" : ""
-    ], // Exclude node_modules and dist folders
-    testTimeout: 30000,  // Set a timeout for all tests
+    coverage: { reporter: ['text', 'json', 'html'] },
+    // Project configs don't inherit the root `plugins`, so each repeats paths().
+    projects: [
+      {
+        plugins: [wasmLoader(), paths()],
+        test: {
+          ...shared,
+          name: 'unit',
+          include: ['tests/**/*.test.ts'],
+          exclude: [...NEVER, '**/*.e2e.test.ts', ...CANNOT_RUN],
+          testTimeout: 30000,
+        },
+      },
+      {
+        plugins: [wasmLoader(), paths()],
+        test: {
+          ...shared,
+          name: 'e2e',
+          include: ['tests/**/*.e2e.test.ts'],
+          exclude: NEVER,
+          testTimeout: 120000,
+        },
+      },
+    ],
   },
 });

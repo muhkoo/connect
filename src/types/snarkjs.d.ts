@@ -69,7 +69,7 @@ declare module 'snarkjs' {
     export const groth16: Groth16;
     export const plonk: Plonk;
 
-    export function wtns: {
+    export const wtns: {
         calculate(
             input: any,
             wasmPath: string
@@ -78,7 +78,7 @@ declare module 'snarkjs' {
         exportJson(witness: Uint8Array): any;
     };
 
-    export function zKey: {
+    export const zKey: {
         exportVerificationKey(zkeyPath: string): Promise<any>;
         exportSolidityVerifier(
             zkeyPath: string,
@@ -117,7 +117,7 @@ declare module 'snarkjs' {
         ): Promise<boolean>;
     };
 
-    export function powersOfTau: {
+    export const powersOfTau: {
         newAccumulator(
             curve: string,
             power: number,
@@ -162,7 +162,7 @@ declare module 'snarkjs' {
         ): Promise<void>;
     };
 
-    export function r1cs: {
+    export const r1cs: {
         info(
             r1csPath: string,
             logger?: any

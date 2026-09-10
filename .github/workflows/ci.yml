@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # circuits/build/* holds the checked-in Groth16 artifacts the crypto
+        # suites prove against (~4MB). A shallow checkout still fetches them,
+        # but they must not be filtered out.
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # yarn.lock is committed, so CI installs exactly what was resolved locally
+      # and fails loudly if package.json and the lockfile disagree.
+      - run: yarn install --frozen-lockfile
+
+      # tsc was silently broken until the snarkjs.d.ts syntax fix: four TS1005
+      # errors suppressed every semantic diagnostic repo-wide. Keep it first.
+      - run: yarn typecheck
+
+      - run: yarn lint
+
+      # Build BEFORE testing. dist/ is gitignored, so the export-parity test's
+      # artifact assertions — the only ones that check what actually ships —
+      # would otherwise skip silently on a clean checkout.
+      - run: yarn build
+
+      # REQUIRE_BUILD_ARTIFACTS turns a missing dist/ into a failure instead of
+      # an invisible skip, so a rollup/dts-config regression that never touches
+      # src/ cannot go green.
+      - run: yarn test:unit
+        env:
+          REQUIRE_BUILD_ARTIFACTS: '1'

@@ -183,8 +183,8 @@ protocol without changing the wire format:
 
 Events live on a per-instance `EventTarget`, so two channels in one app do
 not cross-contaminate each other's events. (This is a deliberate departure
-from the older `Network` class, which used the static `EventCore` and had
-that exact bug.)
+from the now-deleted `Network` class, which used the static `EventCore` and
+had that exact bug.)
 
 ## Zero-knowledge authentication
 
