@@ -239,9 +239,16 @@ yarn watch:docs
    Consumer-side shims can be deleted.
 
 ### Test config note
-`vitest.config.ts` uses a curated `include` allowlist (many tests are commented
-out for perf/flakiness). When adding a test, add its path to that list or it
-won't run.
+`vitest.config.ts` has TWO projects and no allowlist: `unit` (every
+`tests/**/*.test.ts` that isn't e2e — the default run) and `e2e`
+(`tests/**/*.e2e.test.ts`, opt-in via `yarn test:e2e`, so those suites are never
+counted as passing when they only skipped). A new test file runs the moment it
+lands; no config edit. The only exclusion is `CANNOT_RUN` in that file, which
+today holds one entry with its reason.
+
+CI builds BEFORE testing and sets `REQUIRE_BUILD_ARTIFACTS=1`, because `dist/` is
+gitignored and `tests/api/export-surface.test.ts`'s artifact assertions — the only
+ones that check what actually ships — would otherwise skip silently.
 
 ## Development Guidelines
 
