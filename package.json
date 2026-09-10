@@ -50,6 +50,10 @@
         "default": "./dist/server/index.js"
       }
     },
+    "./workers": {
+      "types": "./dist/connect.workers.d.ts",
+      "default": "./dist/workers/index.js"
+    },
     "./p2p-worker": "./dist/browser/blockEngine.worker.js"
   },
   "scripts": {

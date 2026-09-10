@@ -169,16 +169,26 @@ yarn watch:docs
 - **TypeScript**: ESNext target with strict mode enabled
 - **Rollup**: Three separate builds — browser (`dist/browser/`), Node.js server (`dist/server/`), and Cloudflare Workers (`dist/workers/`). The build target is selected by `BUILD_ENV={browser,server,workers}`
 - **`@rollup/plugin-wasm`** is enabled in all three builds with `targetEnv: 'auto-inline'` — `.wasm` imports are base64-inlined so the Groth16 verifier's bundled-WASM fallback works in any runtime
-- **Exports**: `package.json` declares exactly two entry points — `.` and
-  `./p2p-worker`. The `.` export uses conditional resolution (`workerd` /
-  `browser` / `default`) to pick the right bundle; there are no per-module
-  subpaths (`@muhkoo/connect/crypto` and friends do not resolve). Types for
-  each condition come from its OWN declaration bundle: `workerd` resolves to
-  `dist/connect.workers.d.ts` (29 values, matching that bundle exactly),
-  everything else to `dist/connect.d.ts`, rolled up from `src/api.ts`. CAVEAT: a
-  consumer on `moduleResolution: "bundler"` without `customConditions` never sees
-  the `workerd` condition in tsc, so the honest workers types stay inert until
-  that consumer adds `"customConditions": ["workerd"]`
+- **Exports**: `package.json` declares three entry points — `.`, `./workers` and
+  `./p2p-worker`. There are no per-module subpaths (`@muhkoo/connect/crypto` and
+  friends do not resolve). The `.` export uses conditional resolution (`workerd` /
+  `browser` / `default`) to pick the right bundle, and each condition carries its
+  OWN types: `workerd` → `dist/connect.workers.d.ts` (29 values, matching that
+  bundle exactly), everything else → `dist/connect.d.ts`, rolled from `src/api.ts`.
+
+  **Workers consumers should import from `@muhkoo/connect/workers`, not `.`.**
+  The `workerd` CONDITION alone is not enough: a consumer on
+  `moduleResolution: "bundler"` without `customConditions` resolves with
+  `["import","types"]`, never sees `workerd`, and falls through to `default` —
+  getting types that promise 175 symbols the workers bundle does not export,
+  `Client` among them. The explicit `./workers` subpath resolves correctly under
+  every configuration with no consumer-side opt-in. Verified: importing `Client`
+  from `@muhkoo/connect/workers` fails with TS2305, while the root specifier
+  still gives the full surface.
+
+  `tests/api/export-surface.test.ts` asserts the exports map stays coherent —
+  every target exists AND is matched by `files`. A target `files` omits fails
+  resolution hard once published, which is worse than the stale types it replaces.
 
 ## Important Technical Details
 

@@ -742,6 +742,79 @@ const snapshotBody = (text: string) =>
         .map((l) => l.trim())
         .filter((l) => l && !l.startsWith('#'));
 
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. PACKAGE EXPORTS MAP COHERENCE
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Every target in `exports` must exist on disk AND be matched by `files`, or it
+// does not ship. An exports entry pointing at an unshipped file fails
+// resolution HARD at install time — strictly worse than the stale-types problem
+// the per-condition wiring exists to fix.
+//
+// The `./workers` subpath matters specifically: the `workerd` CONDITION is
+// invisible to a consumer on moduleResolution "bundler" without
+// customConditions (tsc resolves with ["import","types"]), so without an
+// explicit subpath the honest workers types are unreachable in practice.
+
+/** Every "types"/"default"/string leaf of the exports map, as repo-relative paths. */
+function exportTargets(node: unknown, out: string[] = []): string[] {
+    if (typeof node === 'string') out.push(node.replace(/^\.\//, ''));
+    else if (node && typeof node === 'object') {
+        for (const v of Object.values(node as Record<string, unknown>)) exportTargets(v, out);
+    }
+    return out;
+}
+
+/** Minimal npm `files` glob match — enough for the patterns this package uses. */
+function matchesFiles(target: string, patterns: string[]): boolean {
+    return patterns.some((pat) => {
+        const rx = new RegExp(
+            '^' +
+                pat
+                    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                    .replace(/\*\*/g, '\u0000')
+                    .replace(/\*/g, '[^/]*')
+                    .replace(/\u0000/g, '.*') +
+                '$',
+        );
+        return rx.test(target) || target.startsWith(pat.replace(/\/$/, '') + '/');
+    });
+}
+
+describe('package exports map', () => {
+    const pkg = JSON.parse(readFileSync(abs('package.json'), 'utf8')) as {
+        exports: Record<string, unknown>;
+        files: string[];
+    };
+
+    it('exposes an explicit ./workers subpath', () => {
+        expect(
+            pkg.exports['./workers'],
+            'The `workerd` export CONDITION is skipped by moduleResolution "bundler" ' +
+                'unless the consumer sets customConditions, so the honest workers types are ' +
+                'unreachable without an explicit subpath. Do not remove this.',
+        ).toBeTruthy();
+        expect((pkg.exports['./workers'] as Record<string, string>).types).toBe(
+            './dist/connect.workers.d.ts',
+        );
+    });
+
+    it.skipIf(!hasBuild)('points every target at a file that exists', () => {
+        const missing = exportTargets(pkg.exports).filter((t) => !existsSync(abs(t)));
+        expect(missing, `exports targets missing from dist/:\n${bullets(missing)}`).toEqual([]);
+    });
+
+    it('points every target at a file the `files` allowlist ships', () => {
+        // A target `files` omits resolves to nothing once published.
+        const unshipped = exportTargets(pkg.exports).filter((t) => !matchesFiles(t, pkg.files));
+        expect(
+            unshipped,
+            `exports targets NOT matched by package.json "files" — these would 404 for ` +
+                `every consumer:\n${bullets(unshipped)}`,
+        ).toEqual([]);
+    });
+});
+
 describe('surface snapshot', () => {
     it(`matches ${SNAPSHOT}`, () => {
         const surface = sourceSurface(BROWSER_ENTRY);
