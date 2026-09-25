@@ -68,7 +68,7 @@ export class DoubleRatchetCipher implements PacketCipher {
             this.deps.serverId,
             sessionId,
             serializedMessage,
-            false, // newDhKey — let the ratchet manage key rotation
+            false, // newDhKey — rotation is disabled until the key-schedule rewrite (audit H1)
             this.deps.sessionType,
         );
         return { encrypted: true, cipherMessage: JSON.stringify(cipherMessage) };

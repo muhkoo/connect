@@ -48,6 +48,28 @@ const OPRF = ristretto255_oprf.oprf;
 // Domain separation for the server key derivation (RFC 9497 `info`).
 const KEY_INFO = new TextEncoder().encode("muhkoo-oprf-v1");
 
+/**
+ * The RFC 9497 mode this client speaks, declared on every evaluation request.
+ *
+ * Declaring it is what lets the server refuse loudly instead of answering in a
+ * mode we did not ask for — the silent substitution that IS audit finding C4.
+ * A server too old to know the field drops it and answers in base mode, which is
+ * what we asked for anyway, so sending it is safe in both directions and imposes
+ * no deploy ordering.
+ *
+ * NOT to be confused with the vault's KEY VERSION, a different axis that also
+ * uses small integers: there, `2` means "per-account key". Here `2` means POPRF.
+ * The server half of these constants is `accelerator/src/services/oprf.ts` and
+ * MUST hold the same numbers.
+ */
+export const OPRF_PROTOCOL_BASE = 0;
+/** RFC 9497 mode 0x02 — the fix for C4. Reserved; no deployment serves it yet. */
+export const OPRF_PROTOCOL_POPRF = 2;
+export type OprfProtocol = typeof OPRF_PROTOCOL_BASE | typeof OPRF_PROTOCOL_POPRF;
+
+/** What this SDK build actually speaks. Bumped to POPRF by the mode migration. */
+export const OPRF_PROTOCOL: OprfProtocol = OPRF_PROTOCOL_BASE;
+
 export interface OprfBlind {
   /** Secret blind scalar — stays on the client; needed to finalize. */
   blind: Uint8Array;

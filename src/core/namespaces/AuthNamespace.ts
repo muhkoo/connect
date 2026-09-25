@@ -23,7 +23,7 @@ import { exportPublicKeyHex, exportPublicKeyBase64, signMessage } from "../../au
 import {
     randomSeed, passwordPreHash, wrapKeyFromOprf, wrapKeyFromBytes, wrapSeed, unwrapSeed, toBase64, fromBase64,
 } from "../../auth/vault";
-import { oprfBlind, oprfFinalize } from "../../auth/oprf";
+import { oprfBlind, oprfFinalize, OPRF_PROTOCOL } from "../../auth/oprf";
 import { emailFactorInput, googleFactorInput, gatedBlind, gatedWrapKey } from "../../auth/gatedFactor";
 import { passkeySupported, passkeyPrfCapable, createPasskeyWithPrf, evaluatePasskeyPrf, defaultRpId, rpIdUsableForOrigin, passkeyUsableFromOrigin, PasskeyOriginError } from "../../auth/passkey";
 import type { SessionState } from "../Session";
@@ -48,6 +48,38 @@ export class VaultUnavailableError extends Error {
         this.name = "VaultUnavailableError";
         (this as Error & { cause?: unknown }).cause = cause;
     }
+}
+
+/**
+ * The vault refused the OPRF protocol this client speaks.
+ *
+ * Distinct from {@link VaultUnavailableError} because the remedy is different and
+ * the two used to be conflated: "unavailable" means retry, and a version mismatch
+ * never resolves by retrying — it resolves by updating the app (or the server).
+ *
+ * Critically, this must NOT be caught into the
+ * `vaultSeed ?? deriveMasterSeedFromPassword(...)` fallback in `login`/`unlock`.
+ * That fallback is correct for an account with no password factor, and wrong for
+ * a refusal: it derives a different seed, and on a legacy-migrated account —
+ * where the fallback seed happens to be the right one — it would let
+ * `migrateLegacyPasswordFactor` rewrite the factor as a side effect of a failure
+ * the user was never shown.
+ */
+export class VaultProtocolMismatchError extends Error {
+    constructor(cause?: unknown) {
+        super(
+            "This app version can't talk to the secure vault. Update the app and try again.",
+        );
+        this.name = "VaultProtocolMismatchError";
+        (this as Error & { cause?: unknown }).cause = cause;
+    }
+}
+
+/** Is `e` the vault refusing our OPRF protocol (HTTP 409)? */
+function isProtocolRefusal(e: unknown): boolean {
+    // Classified by STATUS and CODE, never by matching the server's prose.
+    const err = e as { status?: unknown; code?: unknown } | null;
+    return !!err && err.status === 409 && err.code === "oprf_protocol_unsupported";
 }
 
 /**
@@ -171,7 +203,12 @@ export class ZkAuth {
         if (!token) return;
         try {
             await this.enrollPasswordFactor(username, password, seed, token);
-        } catch {
+        } catch (e) {
+            // "Best effort" is right for a transient failure — we retry next
+            // login. It is wrong for a protocol refusal: that will fail every
+            // time, and swallowing it means the user is told nothing while the
+            // account quietly never gets its factor. Surface that one.
+            if (e instanceof VaultProtocolMismatchError) throw e;
             /* migrate next time */
         }
     }
@@ -848,7 +885,15 @@ export class ZkAuth {
     private async passwordWrapKey(username: string, password: string): Promise<CryptoKey> {
         const pre = passwordPreHash(username, password);
         const { blind, blinded } = oprfBlind(pre);
-        const { evaluated } = await this.deps.auth.oprfEvaluate(username, toBase64(blinded));
+        const { evaluated } = await this.deps.auth
+            .oprfEvaluate(username, toBase64(blinded), OPRF_PROTOCOL)
+            .catch((e: unknown) => {
+                // Raised here, at the one place that knows the call was an OPRF
+                // evaluation, so every caller up the stack sees the typed error
+                // rather than a generic transport failure.
+                if (isProtocolRefusal(e)) throw new VaultProtocolMismatchError(e);
+                throw e;
+            });
         return wrapKeyFromOprf(oprfFinalize(pre, blind, fromBase64(evaluated)));
     }
 
@@ -873,7 +918,13 @@ export class ZkAuth {
 
         const key = await this
             .passwordWrapKey(username, password)
-            .catch((e) => { throw new VaultUnavailableError(e); }); // OPRF eval unreachable / rate-limited
+            .catch((e) => {
+                // A protocol refusal passes through UNCHANGED. Wrapping it here
+                // would erase the type one line after it was raised, and tell the
+                // user to check their connection about a version mismatch.
+                if (e instanceof VaultProtocolMismatchError) throw e;
+                throw new VaultUnavailableError(e); // OPRF eval unreachable / rate-limited
+            });
 
         try {
             return await unwrapSeed({ iv: factor.iv, ct: factor.wrap }, key);

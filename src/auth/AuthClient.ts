@@ -12,6 +12,28 @@
  */
 
 import type { Groth16Proof } from "../types/zk";
+import { OPRF_PROTOCOL, type OprfProtocol } from "./oprf";
+
+/**
+ * A non-2xx response from `/api/auth/*`, carrying the HTTP status and the
+ * worker's machine-readable `code` alongside its human `error` string.
+ *
+ * Exists because the status used to be discarded: every failure arrived as a
+ * bare `Error` whose only distinguishing feature was its message, so classifying
+ * one meant regex-matching a sentence the server is free to reword. See
+ * `VaultUnavailableError`, which still does exactly that for rate limits.
+ */
+export class AuthHttpError extends Error {
+    constructor(
+        readonly label: string,
+        readonly status: number,
+        readonly code: string | undefined,
+        detail: string,
+    ) {
+        super(`AuthClient.${label}: ${detail}`);
+        this.name = "AuthHttpError";
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Wire types — must stay in sync with `accelerator/src/durable-objects/UserAuth.ts`.
@@ -133,9 +155,23 @@ export class AuthClient {
 
     // ---- Identity vault (M1.0) ----------------------------------------------
 
-    /** Blinded OPRF evaluation — the server-gated half of a password/recovery wrap key. */
-    async oprfEvaluate(username: string, blinded: string): Promise<{ evaluated: string }> {
-        const res = await this.fetchFn(`${this.baseUrl}/api/auth/oprf`, this.json("POST", { username, blinded }));
+    /**
+     * Blinded OPRF evaluation — the server-gated half of a password/recovery wrap key.
+     *
+     * `oprfProtocol` declares the RFC 9497 mode this client speaks so the server
+     * can refuse rather than answer in a different one. A server too old to know
+     * the field drops it and answers in base mode, so this is safe against any
+     * deployment.
+     */
+    async oprfEvaluate(
+        username: string,
+        blinded: string,
+        oprfProtocol: OprfProtocol = OPRF_PROTOCOL,
+    ): Promise<{ evaluated: string }> {
+        const res = await this.fetchFn(
+            `${this.baseUrl}/api/auth/oprf`,
+            this.json("POST", { username, blinded, oprfProtocol }),
+        );
         return await this.parse<{ evaluated: string }>("oprfEvaluate", res);
     }
 
@@ -150,10 +186,11 @@ export class AuthClient {
         factorType: "email" | "google",
         purpose: "enroll" | "recover",
         verifyToken: string,
+        oprfProtocol: OprfProtocol = OPRF_PROTOCOL,
     ): Promise<{ evaluated: string; evaluated2: string }> {
         const res = await this.fetchFn(
             `${this.baseUrl}/api/auth/oprf`,
-            this.json("POST", { username, blinded, factorType, purpose, verifyToken }),
+            this.json("POST", { username, blinded, factorType, purpose, verifyToken, oprfProtocol }),
         );
         return await this.parse<{ evaluated: string; evaluated2: string }>("oprfEvaluateGated", res);
     }
@@ -277,11 +314,13 @@ export class AuthClient {
             // Leave body null; we'll fall through to the status-only message.
         }
         if (!res.ok) {
-            const msg =
-                body && typeof body === "object" && "error" in (body as object)
-                    ? String((body as { error: unknown }).error)
-                    : `${res.status} ${res.statusText}`;
-            throw new Error(`AuthClient.${label}: ${msg}`);
+            const obj = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+            const msg = obj && "error" in obj ? String(obj.error) : `${res.status} ${res.statusText}`;
+            // Throws `AuthHttpError` rather than `Error` so callers can classify
+            // by STATUS and CODE instead of regex-matching a human sentence.
+            // `VaultUnavailableError` still does the latter for rate limits; new
+            // code should not copy it — a server-side copy edit breaks it.
+            throw new AuthHttpError(label, res.status, obj && typeof obj.code === "string" ? obj.code : undefined, msg);
         }
         return body as T;
     }

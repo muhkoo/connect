@@ -145,6 +145,12 @@ describe('Client — credential injection', () => {
         ]);
         expect(calls[4].method).toBe('PUT');
 
+        // Every OPRF request declares the RFC 9497 mode this client speaks, so a
+        // server can refuse rather than answer in a mode we did not ask for. This
+        // is the only end-to-end path in the suite that exercises the real
+        // request body, so it is where the field is worth pinning.
+        expect(calls[3].body.oprfProtocol).toBe(0);
+
         // `login: false` signs the freshly registered user back out (locally).
         expect(client.isAuthenticated).toBe(false);
     }, 30000);
