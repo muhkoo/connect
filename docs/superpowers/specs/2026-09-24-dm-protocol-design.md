@@ -586,22 +586,42 @@ Key "is new" on the peer's `(ephPublicKey, nonce)` rather than on map membership
 re-reciprocate whenever either changes; reset `sentHandshakeTo` alongside the ratchet. This is also
 what lets §4.3's hard fail tell a legitimate reconnect from an attack.
 
-### 6.6 Locked state — a user-visible behaviour change
+### 6.6 Locked state — enforcing an existing invariant
 
-`restore()` yields a token with **no identity**, and DMs flow fine in that state today:
-`MessageNamespace.ts:215-216` needs only `session.username`, and `EncryptedSession.ts:132-134` mints
-its own P-384 pair when one is missing. But signing a certificate needs
-`identity.ecdsaKeyPair.privateKey`, and the encrypted pin read needs `requireIdentity()`
-(`KvNamespace.ts:332-338`), which throws.
+**Requiring an unlocked identity for DMs is the intended design; it was simply never enforced.** The
+invariant is already written down in `ChatKeyVault`'s header:
 
-**Invariant: authenticated DM requires an unlocked identity.** `client.message.send` and
-`subscribe('user:…')` throw a typed `IdentityLockedError` naming `client.auth.zk.unlock(password)`;
-a locked client rejects inbound handshakes with `rejected/locked` rather than TOFU-ing them. The
-`{encrypt: false}` escape hatch used for space keys is not available: a plaintext pin is one the
-server rewrites at will.
+> *"the wrapping secret is the **master seed** (not the password) … The seed is only ever held in
+> memory (never persisted), so this vault can only provision/rehydrate while the client is
+> unlocked."*
 
-This is the most likely item to be discovered in production rather than in review. Changelog and
-docs.
+So the stable member keypair — the one the ratchet and the Space keyring both depend on — is
+available only while unlocked, by design. What makes DMs *appear* to work in a locked session is a
+silent fallback: `EncryptedSession.initialize()` (`:131-133`) calls
+`this.keyStore.generateOwnKeyPair(this.myId)` whenever the `KeyStore` has no entry, which is exactly
+the locked case. `restore()` yields a token with no identity, and `MessageNamespace.ts:215-216` needs
+only `session.username`, so nothing stops it.
+
+That fallback does not preserve the invariant, it hides its violation. A locked client substitutes a
+**throwaway** P-384 pair for the `ChatKeyVault`-stable one, and per that same file the consequence is
+that "the member re-admits to every space on every load and the group-key cache can never
+round-trip." With C2's pinning in place it would also present to every peer as a fresh certified
+chat-key on every reload — an endless stream of legitimate-looking rekeys.
+
+So this spec is not adding a restriction. It is removing a fallback that was papering over a missing
+precondition:
+
+- `EncryptedSession.initialize()` no longer mints a keypair. An absent `KeyStore` entry is an error,
+  not a cue to invent an identity.
+- `client.message.send` and `subscribe('user:…')` throw a typed `IdentityLockedError` naming
+  `client.auth.zk.unlock(password)`.
+- A locked client rejects inbound handshakes with `rejected/locked` rather than TOFU-ing them.
+- The `{encrypt: false}` escape hatch used for space keys is not available here: a plaintext pin is
+  one the server rewrites at will.
+
+Still a changelog entry, because apps relying on the accidental behaviour will see a new error where
+they previously saw silent degradation — but it is a bug fix, not a policy change, and the error
+message should say so.
 
 ---
 
