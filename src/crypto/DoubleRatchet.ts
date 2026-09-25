@@ -30,7 +30,6 @@ class DoubleRatchet {
     private sessionType: 'global' | 'specific';
     private maxSkip: number = 3000;
     private overlapPeriod: number = 30000; // ms
-    private windowSize: number = 100; // messages per DH ratchet
 
     constructor(senderId: string, recipientId: string, sessionType: 'global' | 'specific', isClient: boolean = true) {
         this.sessionType = sessionType;
@@ -129,20 +128,26 @@ class DoubleRatchet {
         }
 
         const keyStore = KeyStore.getInstance();
-        if (this.sessionType === 'specific' && this.state.sendCount >= this.windowSize && this.state.sendCount > 0) {
-            newDhKey = true;
-        }
+        // The DH-ratchet path is disabled, deliberately. It used to fire by
+        // itself once `sendCount` passed a 100-message window, and it was wrong
+        // in three ways at once: it wrote the fresh pair into the PROCESS-GLOBAL
+        // `KeyStore` under our own id (clobbering the long-term ECDH key that
+        // every other ratchet and the Space key-unwrap path read back from the
+        // same entry), it stepped our sending chain without telling the peer (so
+        // message 101 of any conversation stopped decrypting), and it hardcoded
+        // the client role regardless of which half of the session we are.
+        //
+        // No caller in the SDK asks for a rotation — every one passes `false` —
+        // so failing loudly here is strictly better than silently desynchronising
+        // a session. Rotation returns on the standard trigger (receipt of a new
+        // peer `dhPub`) with the key schedule rebuilt; see
+        // docs/superpowers/specs/2026-09-24-dm-protocol-design.md §0 and §3.6.
         if (newDhKey && this.sessionType === 'specific') {
-            appLogger.debug(`Generating new DH key pair for ${senderId}`);
-            const ecdhKeyPair = await crypto.subtle.generateKey(
-                { name: 'ECDH', namedCurve: 'P-384' },
-                true,
-                ['deriveKey', 'deriveBits']
+            throw new Error(
+                'DoubleRatchet: DH key rotation is disabled — the previous implementation ' +
+                    'corrupted the process-global KeyStore and desynchronised the peer. ' +
+                    'Rotation is reinstated with the key-schedule rewrite (audit H1).',
             );
-            this.state.clientDhPriv = ecdhKeyPair.privateKey as CryptoKey;
-            this.state.clientDhPub = ecdhKeyPair.publicKey as CryptoKey;
-            keyStore.keys.set(senderId, { privateKey: ecdhKeyPair.privateKey as CryptoKey, publicKey: ecdhKeyPair.publicKey as CryptoKey });
-            await this.dhRatchet(this.state.serverDhPub, true);
         }
 
         const [messageKey, newChainKey] = await this.symmetricRatchet(this.state.sendChainKey!);
