@@ -231,6 +231,7 @@ V AES_GCM_TAG_BYTES
 V AccessTokensNamespace
 V AgentsNamespace
 V AuthClient
+V AuthHttpError
 V AuthNamespace
 V AuthPublicInput
 V Authenticator
@@ -327,10 +328,13 @@ V StorageNamespace
 V SyncEngine
 V VERSION
 V VFS_ROOT_INFO
+V VaultProtocolMismatchError
 V VaultUnavailableError
 V VcsError
 V VcsNamespace
 V VfsConflictError
+V VfsCorruptRecordError
+V VfsLimitError
 V VfsLockedError
 V VfsNamespace
 V VfsNotFoundError
