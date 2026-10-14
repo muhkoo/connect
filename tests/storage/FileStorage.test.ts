@@ -437,3 +437,98 @@ describe("read fetches parity only when it is needed", () => {
         expect(damaged.asked.length, "4 data shards, then the 2 parity").toBe(6);
     });
 });
+
+describe("a multi-chunk read fetches ahead, within a bound", () => {
+    /**
+     * A shard store whose reads take a while, and which records how many
+     * distinct CHUNKS have a shard read in flight at once.
+     */
+    function slowShards(delay = 15) {
+        const store = new Map<string, Uint8Array>();
+        const chunkOf = new Map<string, number>();
+        const active = new Map<number, number>();   // chunk → shard reads in flight
+        const seen = { maxChunks: 0, chunksStarted: [] as number[] };
+        return {
+            store, chunkOf, seen,
+            async putShard(hash: string, bytes: Uint8Array) { store.set(hash, bytes); return hash; },
+            async getShard(hash: string) {
+                const c = chunkOf.get(hash) ?? -1;
+                if (!active.has(c)) seen.chunksStarted.push(c);
+                active.set(c, (active.get(c) ?? 0) + 1);
+                seen.maxChunks = Math.max(seen.maxChunks, active.size);
+                try {
+                    await new Promise((r) => setTimeout(r, delay));
+                    return store.get(hash) ?? null;
+                } finally {
+                    const n = active.get(c)! - 1;
+                    if (n === 0) active.delete(c); else active.set(c, n);
+                }
+            },
+        };
+    }
+    async function eightChunks() {
+        const shards = slowShards();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const storage = new FileStorage({ shards: shards as any, chunkSize: 4096, dataShards: 4, parityShards: 2, rsWasmModule });
+        const data = randomBytes(8 * 4096);
+        const { manifest } = await storage.writeFileToShards({ data, metadata: { name: "big.bin", type: "application/octet-stream" } });
+        for (const c of manifest.chunks) for (const h of c.shardHashes) shards.chunkOf.set(h, c.chunkIndex);
+        expect(manifest.chunks).toHaveLength(8);
+        return { shards, storage, data, manifest };
+    }
+
+    it("readFileFromShards overlaps chunks — at most the one being read and two ahead", async () => {
+        const { shards, storage, data, manifest } = await eightChunks();
+        const { data: back } = await storage.readFileFromShards(manifest);
+        expect(back).toEqual(data);
+        expect(shards.seen.maxChunks).toBeGreaterThan(1);
+        expect(shards.seen.maxChunks).toBeLessThanOrEqual(3);
+        expect(shards.seen.chunksStarted).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);   // started in order
+    });
+
+    it("readChunksFromShards yields in order, and holds no more than that while its caller is slow", async () => {
+        const { shards, storage, data, manifest } = await eightChunks();
+        const parts: Uint8Array[] = [];
+        for await (const part of storage.readChunksFromShards(manifest)) {
+            parts.push(part);
+            await new Promise((r) => setTimeout(r, 40));   // a slow consumer: the reads must not run away
+        }
+        expect(Buffer.concat(parts)).toEqual(Buffer.from(data));
+        expect(shards.seen.maxChunks).toBeGreaterThan(1);
+        expect(shards.seen.maxChunks).toBeLessThanOrEqual(3);
+    });
+
+    it("a failed chunk fails the read, in order, and leaves no unhandled rejection behind", async () => {
+        const { shards, storage, manifest } = await eightChunks();
+        // Lose three shards of chunk 5: more than parity can cover.
+        for (const h of manifest.chunks[5].shardHashes.slice(0, 3)) shards.store.delete(h);
+        const got: number[] = [];
+        await expect((async () => {
+            let i = 0;
+            for await (const _ of storage.readChunksFromShards(manifest)) got.push(i++);
+        })()).rejects.toThrow();
+        expect(got).toEqual([0, 1, 2, 3, 4]);
+    });
+
+    it("stops fetching when its caller breaks out, and a read still in flight fails quietly", async () => {
+        const { shards, storage, manifest } = await eightChunks();
+        // Chunk 2 will fail while the consumer is already gone.
+        for (const h of manifest.chunks[2].shardHashes.slice(0, 3)) shards.store.delete(h);
+        const unhandled: unknown[] = [];
+        const onUnhandled = (e: unknown) => unhandled.push(e);
+        process.on("unhandledRejection", onUnhandled);
+        try {
+            for await (const _ of storage.readChunksFromShards(manifest)) break;   // the first chunk only
+            await new Promise((r) => setTimeout(r, 150));   // let the abandoned reads settle
+            await new Promise((r) => setImmediate(r));
+        } finally {
+            process.off("unhandledRejection", onUnhandled);
+        }
+        // Chunk 0 held, and at most two ahead plus the one started as it was handed over.
+        // (A chunk can appear twice: its parity is fetched after its data shards.)
+        const started = [...new Set(shards.seen.chunksStarted)];
+        expect(started.length).toBeLessThanOrEqual(1 + 2 + 1);
+        expect(started).toEqual([0, 1, 2, 3].slice(0, started.length));
+        expect(unhandled).toEqual([]);
+    });
+});

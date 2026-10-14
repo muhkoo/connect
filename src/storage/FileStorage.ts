@@ -111,6 +111,16 @@ export interface WriteToShardsInput {
     onProgress?: (completed: number, total: number) => void;
 }
 
+/**
+ * How many chunks past the one being read a multi-chunk read fetches ahead
+ * (see `chunksInOrder`). Two: enough to keep requests overlapping on a link
+ * where each one waits on its round trip. While the caller holds chunk k,
+ * up to `READ_AHEAD_CHUNKS + 1` more chunks can be in flight (the next
+ * starts as k is handed over), so at the default 4 MB chunk about 16 MB of
+ * reads in flight per file, on top of the chunk held.
+ */
+const READ_AHEAD_CHUNKS = 2;
+
 export class FileStorage {
     private readonly space: SharedSpaceClient | undefined;
     private readonly shards: ShardClient;
@@ -229,11 +239,9 @@ export class FileStorage {
 
         // Materialize each chunk into plaintext, then concatenate. We don't
         // stream across chunks here because the consuming surface returns
-        // `Uint8Array`; a streaming variant would reuse `readChunk` unchanged.
+        // `Uint8Array`; `readChunksFromShards` is the streaming variant.
         const plaintextChunks: Uint8Array[] = [];
-        for (const chunkManifest of [...manifest.chunks].sort((a, b) => a.chunkIndex - b.chunkIndex)) {
-            plaintextChunks.push(await this.readChunk(chunkManifest));
-        }
+        for await (const chunk of this.chunksInOrder(manifest)) plaintextChunks.push(chunk);
         let total = 0;
         for (const c of plaintextChunks) total += c.length;
         const out = new Uint8Array(total);
@@ -254,8 +262,46 @@ export class FileStorage {
      */
     async *readChunksFromShards(manifest: FileManifest): AsyncGenerator<Uint8Array> {
         await this.codec.ready(this.rsWasmModule);
-        for (const chunkManifest of [...manifest.chunks].sort((a, b) => a.chunkIndex - b.chunkIndex)) {
-            yield await this.readChunk(chunkManifest);
+        yield* this.chunksInOrder(manifest);
+    }
+
+    /**
+     * Each chunk's plaintext, in order, with the next {@link READ_AHEAD_CHUNKS}
+     * already being fetched.
+     *
+     * One chunk at a time, a large file cost a full round trip per 4 MB chunk
+     * with nothing overlapping it: a 33 MB file was eight serial requests,
+     * each mostly waiting. Within a chunk the shard reads were already
+     * parallel; this overlaps the chunks too.
+     *
+     * Bounded on purpose: while the caller holds a yielded chunk, at most
+     * `1 + READ_AHEAD_CHUNKS` more are in flight, and nothing new starts until
+     * it asks for the next — a slow consumer of the stream is not run away
+     * from. A failure surfaces at its own chunk, in order; reads already
+     * started past it are let finish, their failures swallowed rather than
+     * left unhandled. If the caller stops early (`break` or `return()`), no
+     * further read starts and the ones in flight settle on their own; they are
+     * not awaited, so `return()` is not delayed by a slow shard.
+     */
+    private async *chunksInOrder(manifest: FileManifest): AsyncGenerator<Uint8Array> {
+        const ordered = [...manifest.chunks].sort((a, b) => a.chunkIndex - b.chunkIndex);
+        const ahead: Promise<Uint8Array>[] = [];
+        let next = 0;
+        const start = (): void => {
+            const read = this.readChunk(ordered[next++]);
+            read.catch(() => {});   // reported when its turn comes
+            ahead.push(read);
+        };
+        while (next < ordered.length && ahead.length < 1 + READ_AHEAD_CHUNKS) start();
+        try {
+            while (ahead.length > 0) {
+                const chunk = await ahead.shift()!;
+                if (next < ordered.length) start();
+                yield chunk;
+            }
+        } finally {
+            next = ordered.length;   // nothing more is started
+            ahead.length = 0;        // in-flight reads settle unobserved; each has its own .catch
         }
     }
 
