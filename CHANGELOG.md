@@ -12,6 +12,12 @@ whole 0.14 line, so every default install, including the `npx -y @muhkoo/cli` in
 the preview deploy script, ran without shard batching or `loginWithDevice`.
 `npm run release` publishes and moves both tags together.
 
+## 0.15.0-alpha.6 — Large files read faster (2026-10-14)
+
+### Changed
+
+- **Large files read two chunks ahead.** `readFileFromShards` and the chunk stream now fetch up to two chunks ahead of the one being decoded instead of one at a time, so a large file reads about 40% faster. A read that stops early starts no further fetches, and at most three chunks are held in memory for the stream.
+
 ## 0.15.0-alpha.5 — Payment refusals you can act on, and `client.app.access()` (2026-10-10)
 
 ### Added
