@@ -12,6 +12,15 @@ whole 0.14 line, so every default install, including the `npx -y @muhkoo/cli` in
 the preview deploy script, ran without shard batching or `loginWithDevice`.
 `npm run release` publishes and moves both tags together.
 
+## 0.15.0-alpha.9 — Dependency security patches (2026-10-14)
+
+No changes to the SDK's behaviour; the built bundles are byte-identical to 0.15.0-alpha.8 apart from the version stamp.
+
+### Security
+
+- **Patched the Dependabot alerts.** `uuid` is now `^13.0.1` (missing buffer bounds check in v3/v5/v6). The rest are build and test tooling only: `vite` 7.3.7, `vitest` 4.1.11, `rollup` 4.64, plus `postcss`, `ws`, `js-yaml`, `shell-quote`, `nanoid`, `minimatch`, `brace-expansion`, `picomatch`, `flatted`, `markdown-it`, `linkify-it`, `source-map-js` and `@humanfs/node`. The `elliptic` advisory has no fixed release and stays open.
+- **The build sets rollup-plugin-typescript2's `include` explicitly.** Its default `**/*.ts+(|x)` stops matching under the patched `picomatch`, which made the build skip every `.ts` file.
+
 ## 0.15.0-alpha.8 — released alongside @muhkoo/cli 0.15.0-alpha.8 (2026-10-14)
 
 No changes to the SDK. Published so `@muhkoo/cli`, which is versioned in lockstep with this package, could release a `vfs mount` fix.

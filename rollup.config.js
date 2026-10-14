@@ -23,6 +23,11 @@ const externalFn = isWorkers
   ? undefined
   : (id) => !id.startsWith(".") && !path.isAbsolute(id);
 
+// rpt2's default include is `**/*.ts+(|x)`. picomatch 2.3.2 / 4.0.4+ (the
+// POSIX-class security fix) no longer match the empty `+(|x)` alternative, so
+// rpt2 silently skipped every .ts file and resolution failed. Spell it out.
+const tsInclude = ["*.ts", "**/*.ts", "*.tsx", "**/*.tsx", "**/*.cts", "**/*.mts"];
+
 // JS build config
 const jsConfig = {
   input,
@@ -64,6 +69,7 @@ const jsConfig = {
     }),
     typescript({
       clean: true,
+      include: tsInclude,
       // The rolled-up bundles in rollup.dts.config.js are the only declarations
       // we ship. Per-file emit additionally scattered ~427 stray .d.ts through
       // dist/, including a mislabelled dist/browser/index.d.ts that declared a
@@ -89,6 +95,7 @@ const workerConfig = isBrowser && {
     wasm({ targetEnv: "auto-inline" }),
     typescript({
       clean: true,
+      include: tsInclude,
       tsconfigOverride: { compilerOptions: { declaration: false, declarationMap: false } },
     }),
   ],
