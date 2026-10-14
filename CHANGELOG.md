@@ -12,6 +12,10 @@ whole 0.14 line, so every default install, including the `npx -y @muhkoo/cli` in
 the preview deploy script, ran without shard batching or `loginWithDevice`.
 `npm run release` publishes and moves both tags together.
 
+## 0.15.0-alpha.8 — released alongside @muhkoo/cli 0.15.0-alpha.8 (2026-10-14)
+
+No changes to the SDK. Published so `@muhkoo/cli`, which is versioned in lockstep with this package, could release a `vfs mount` fix.
+
 ## 0.15.0-alpha.7 — released alongside @muhkoo/cli 0.15.0-alpha.7 (2026-10-14)
 
 No changes to the SDK. Published so `@muhkoo/cli`, which is versioned in lockstep with this package, could release its `vfs mount` fixes.
