@@ -360,18 +360,45 @@ in-session replay, not cross-session replay, which `roomId` + the ephemeral bind
 ### 4.1 Accelerator endpoint
 
 Deployed **before** the connect release: additive and backward-compatible. The reverse order bricks
-every DM.
+every DM. Amended by the e2e-channels design (`2026-09-27-e2e-channels-design.md`, CS-7 and Q15):
+the batch form and the endpoint's own rate-limit buckets. It ships as that design's release step I,
+which is this spec's §9 step 2.
 
 ```
-POST /api/auth/identity      body: { username: string }
-                             200:  { identityKey: string }   // b64 rawP256
+POST /api/auth/identity      body: { username: string }             // 1–64 characters
+                             200:  { identityKey: string }          // b64 rawP256
+POST /api/auth/identity      body: { usernames: string[] }          // 1–64 names, each 1–64 characters
+                             200:  { keys: { [lowercasedName: string]: string } }   // b64 rawP256; duplicates collapse
+                             400:  { error: "Malformed identity lookup" }
+                             429:  { error }, with Retry-After
 ```
 
 - **POST with a body**, not a path segment — matching `/api/auth/oprf` and `/api/auth/vault`.
-- **Unknown usernames get a deterministic decoy**, derived HKDF-style from a server secret and the
-  username and mapped to a valid P-256 point, answered 200. A 404 would reopen the enumeration
-  oracle that `zk.ts` deliberately closes elsewhere. See §4.3 for the client-side consequence.
-- **Rate limited** on the same bucket and window as `/api/auth/challenge`.
+- **Exactly one form per request.** A body with both fields or neither, a non-string name, an empty
+  name, a name over 64 characters, or 65 or more names is a 400, refused before any rate-limit
+  bucket is charged. Names are matched case-insensitively and the batch answer is keyed by the
+  lowercased name.
+- **Always standard padded base64 of the 65-byte raw point.** A key stored as 130-character hex
+  (legacy portal sign-ups) is normalised to base64; the server already accepted both
+  (`accelerator/src/durable-objects/userAuth/zk.ts:28-43`).
+- **Unknown usernames get a deterministic decoy**, answered 200 in the same shape. It is
+  HKDF-SHA256 over a per-deployment secret seed (32 random bytes stored as `identity:decoySeed` in
+  the UserAuth DO, created on first use and never rotated, since a new seed would change every
+  decoy), with an empty salt and info `"muhkoo/identity/decoy/v1\n" + lowercase(username)`, 33
+  bytes long. Bytes 0–31 are a candidate x, reduced mod p, incremented until it lies on P-256; bit 0
+  of byte 32 chooses the parity of y. An account row whose stored key does not decode is answered
+  the same way. A 404 would reopen the enumeration oracle that `zk.ts` deliberately closes
+  elsewhere. See §4.3 for the client-side consequence.
+- **Rate limited on the endpoint's own buckets, one hit per call whatever the batch size.** They
+  are never keyed by a looked-up name and never touch `/api/auth/challenge`'s buckets, so lookups
+  cannot lock anyone out of signing in. (The earlier text shared the challenge bucket; Space
+  traffic would then have throttled sign-in.) The window is `RL_WINDOW_MS`, 5 minutes. A caller
+  with a session is charged `rl:idl:user:<lowercased session username>` at 120 per window, then
+  `rl:idl:ip:<ip>` at 600. A caller without a session, including a machine access token, is
+  charged only `rl:idl:ip:<ip>`, at 30. The constants are the `IDLOOKUP_*` values in
+  `accelerator/src/durable-objects/userAuth/rateLimit.ts`.
+- A caller that needs many keys sends one batch per 64 names. A 429 is a lookup failure (§4.3):
+  that operation fails closed and is retried later.
 - Responses are cached in-process per username for the lifetime of the `Client`.
 
 Recommended in the same window, though not required by this spec: **start enforcing the
@@ -698,7 +725,7 @@ API via `export * from "../crypto"`. Out of scope here; fix or delete in a follo
 |---|---|---|---|
 | 0 | **Outage hotfix** (§0) | connect | Ships now, patch release, independent of everything below. |
 | 1 | `aad?` on `encryptAesGcm`/`decryptAesGcm`; `canonicalHeader()` | connect | Additive, no behaviour change. Unblocks 3. |
-| 2 | **`POST /api/auth/identity`** + rate limit + decoy | accelerator | Additive. Must be deployed before 3, or DMs break. |
+| 2 | **`POST /api/auth/identity`** (single and batch, own rate-limit buckets) + decoy, §4.1 | accelerator | Additive. Must be deployed before 3, or DMs break. Ships as e2e-channels release step I. |
 | 3 | **Protocol change** — §3 frame, §3.4 root, §3.5 header, §3.6 ratchet, §3.8 decrypt order, §4 pinning, §5 `encryptTo`, §6 plumbing | connect | One release. The DM wire break. |
 | 4 | `safetyNumber()` docs page | docs | Follows 3. |
 
@@ -740,6 +767,15 @@ Every test below must fail before its change and pass after. There is essentiall
 - Pin map: rollback (`counter <` mark) and deletion (absent map with a mark) both hard-fail.
 - Locked client: `send`/`subscribe` throw; inbound handshake rejected.
 - Verifier modes: `legacy` channels still complete a handshake; unset defaults to `required`.
+
+**Identity endpoint (§4.1)** — accelerator `tests/auth-identity.test.ts`, `tests/identity-decoy.test.ts`,
+`tests/userauth-keys.test.ts`, and the server suite `tests/auth-identity.server.test.ts`
+- A registered key comes back as base64, including one stored as hex; an unknown name gets a decoy
+  that imports as a P-256 key and is the same on every call, in either form and after a restart.
+- The batch form returns keys and decoys, collapsing duplicates and case; 65 names is a 400.
+- The 121st call by one session in the window is a 429; a caller without a session gets 30 per IP.
+- A lookup never writes a `chal:` or `rl:chal:` key, and 30 concurrent lookups of one username by
+  30 callers leave that username its whole challenge budget.
 
 **Recipient scoping (C3)**
 - `FakeChannel` must **record the recipient** — `tests/client/message.test.ts:34` currently

@@ -111,8 +111,9 @@ export class BroadcastChannel {
         void this.announce();
       }
     });
-    this.transport.on(EventCoreEvents.DISCONNECTED, () => {
-      this.emit(BroadcastChannelEvents.DISCONNECTED);
+    // `detail` is the close `{code, reason}` when the socket reported one.
+    this.transport.on(EventCoreEvents.DISCONNECTED, (e: CustomEvent) => {
+      this.emit(BroadcastChannelEvents.DISCONNECTED, e.detail);
     });
     this.transport.on(EventCoreEvents.RECONNECTING, (e: CustomEvent) => {
       this.emit(BroadcastChannelEvents.RECONNECTING, e.detail);
@@ -154,6 +155,11 @@ export class BroadcastChannel {
   /** Close the WebSocket and stop reconnecting. */
   disconnect(): void {
     this.transport.disconnect();
+  }
+
+  /** Reconnect after a terminal close (see `terminalCloseCodes`) or `disconnect()`, on a fresh `urlProvider` URL. */
+  resume(): void {
+    this.transport.resume();
   }
 
   /**

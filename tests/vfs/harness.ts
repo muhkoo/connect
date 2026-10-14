@@ -12,7 +12,12 @@ import { VfsNamespace, type VfsContentStore } from "../../src/vfs/VfsNamespace";
 import type { VfsStore } from "../../src/vfs/types";
 import type { FileManifest } from "../../src/storage/types";
 
-export function makeStore(): VfsStore & { records: Map<string, unknown>; puts: number; gets: string[] } {
+export function makeStore(): VfsStore & {
+    records: Map<string, unknown>;
+    puts: number;
+    gets: string[];
+    lists: Array<string | undefined>;
+} {
     const records = new Map<string, unknown>();
     return {
         records,
@@ -20,6 +25,9 @@ export function makeStore(): VfsStore & { records: Map<string, unknown>; puts: n
         // Every read, in order — so a test can assert that resolving many paths
         // does not re-fetch the same directory record over and over.
         gets: [] as string[],
+        // Every prefix list() was asked for, in order (undefined = everything),
+        // so a test can assert that a caller narrows its listing.
+        lists: [] as Array<string | undefined>,
         async get(key) {
             (this as { gets: string[] }).gets.push(key);
             return records.get(key) ?? null;
@@ -31,8 +39,9 @@ export function makeStore(): VfsStore & { records: Map<string, unknown>; puts: n
         async delete(key) {
             records.delete(key);
         },
-        async list() {
-            return [...records.keys()];
+        async list(prefix?: string) {
+            (this as { lists: Array<string | undefined> }).lists.push(prefix);
+            return [...records.keys()].filter((k) => prefix === undefined || k.startsWith(prefix));
         },
     };
 }
@@ -75,7 +84,13 @@ export function makeContent(): VfsContentStore & { blobs: Map<string, { bytes: U
     };
 }
 
-export function makeVfs(opts: { seed?: Uint8Array | null; historyLimit?: number } = {}) {
+export function makeVfs(
+    opts: {
+        seed?: Uint8Array | null;
+        historyLimit?: number;
+        limits?: { entries?: number; pathChars?: number };
+    } = {},
+) {
     const store = makeStore();
     const content = makeContent();
     let seed = opts.seed === undefined ? new Uint8Array(32).fill(7) : opts.seed;
@@ -84,6 +99,9 @@ export function makeVfs(opts: { seed?: Uint8Array | null; historyLimit?: number 
         content,
         seed: () => seed,
         historyLimit: opts.historyLimit,
+        // Injectable so a hostile-tree test can hit the budget in milliseconds
+        // instead of building a million entries to prove the ceiling holds.
+        limits: opts.limits,
     });
     return {
         vfs,

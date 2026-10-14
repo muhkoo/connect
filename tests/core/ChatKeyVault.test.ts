@@ -18,9 +18,7 @@ function memStore(): ChatKeyStore & { blob: WrappedPayload | null } {
 
 /** Fresh KeyStore singleton per test (it's a process-global map). */
 function resetKeyStore(id: string): void {
-    const ks = KeyStore.getInstance();
-    ks.keys.delete(id);
-    ks.authKeys.delete(id);
+    KeyStore.getInstance().forget(id);
 }
 
 describe("ChatKeyVault", () => {

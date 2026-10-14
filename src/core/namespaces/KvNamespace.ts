@@ -5,6 +5,7 @@
  *   await client.kv.set('todos', id, { title, completed })
  *   const todo = await client.kv.get('todos', id)
  *   const ids  = await client.kv.list('todos')
+ *   const keys = await client.kv.keys('todos/')   // full keys, any prefix
  *   await client.kv.delete('todos', id)
  *   const off  = client.kv.on('change', e => …)   // realtime, cross-device
  *
@@ -30,6 +31,7 @@ import { WSTransport } from "../../transport/WSTransport";
 import { EventCoreEvents } from "../../events";
 import type { KvCache } from "../../offline/KvCache";
 import type { QueueEntry } from "../../offline/store/OfflineStore";
+import { listPersonalKeys, RepeatedCursorError } from "../personalList";
 
 export interface KvNamespaceDeps {
     http: HttpClient;
@@ -162,26 +164,43 @@ export class KvNamespace {
         }
     }
 
-    /** List the ids present in `collection`. */
+    /**
+     * List the ids present in `collection`. The server filters by
+     * `${collection}/` and pages; values are not fetched.
+     */
     async list(collection: string): Promise<string[]> {
         const prefix = `${collection}/`;
+        return (await this.keys(prefix)).map((k) => k.slice(prefix.length));
+    }
+
+    /**
+     * Every key in the signed-in user's personal space that starts with
+     * `prefix` (all of them when it is ""), as full keys: `todos/t1`, not
+     * `t1`. Values are not fetched. The personal space is shared by every
+     * app the user signs into, so expect keys you did not write: the VFS's
+     * `vfs/…`, version control's `vcs/…`, the SDK's own `chat-keys` and
+     * `space-keys/…`.
+     *
+     * The local `startsWith` filter stays on purpose: a server older than
+     * the key index ignores `prefix` and returns every key.
+     */
+    async keys(prefix = ""): Promise<string[]> {
         const offline = this.deps.offline;
-        const fromKeys = (keys: string[]) =>
-            keys.filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
-        if (!offline?.enabled) {
-            const res = await this.deps.http.post<{ keys: string[] }>(this.spacePath("/list"), {});
-            return fromKeys(res.keys ?? []);
-        }
+        const under = (keys: string[]) => [...new Set(keys.filter((k) => k.startsWith(prefix)))];
+        const remote = () => listPersonalKeys(this.deps.http, this.spacePath("/list"), prefix);
+        if (!offline?.enabled) return under(await remote());
         try {
-            const res = await this.deps.http.post<{ keys: string[] }>(this.spacePath("/list"), {});
+            const fromServer = await remote();
             // Union with cached live keys so un-synced offline creates still show.
-            const cached = await offline.liveKeys(this.commitment());
-            return [...new Set([...(res.keys ?? []), ...cached].filter((k) => k.startsWith(prefix)))].map((k) =>
-                k.slice(prefix.length),
-            );
+            return under([...fromServer, ...(await offline.liveKeys(this.commitment(), prefix))]);
         } catch (err) {
-            if (err instanceof HttpError) throw err;
-            return fromKeys(await offline.liveKeys(this.commitment()));
+            // A refusal, or a server that repeats its cursor, is an answer,
+            // not an outage: falling back would hand back a partial list as
+            // if it were whole. Only a failure to reach the server (even
+            // mid-paging) falls back to the cache, as a failed list did
+            // before paging.
+            if (err instanceof HttpError || err instanceof RepeatedCursorError) throw err;
+            return under(await offline.liveKeys(this.commitment(), prefix));
         }
     }
 

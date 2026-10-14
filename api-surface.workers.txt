@@ -35,6 +35,7 @@ T MessageOptions
 T OAuthProvider
 T PacketOptions
 T Participant
+T PaymentRequiredCode
 T Permission
 T PermissionCheckRequest
 T PermissionCheckResult
@@ -67,6 +68,7 @@ V MessageDefault
 V PBKDF2_DEFAULT_ITERATIONS
 V PREIMAGE_POK_VERIFICATION_KEY
 V Packet
+V PaymentRequiredError
 V SerializeMessage
 V WSTransport
 V decorators

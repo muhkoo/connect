@@ -4,7 +4,7 @@
  * a real identity (so at-rest ciphertext is exercised), over an IndexedDbStore.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { KvNamespace } from "../../src/core/namespaces/KvNamespace";
@@ -69,7 +69,7 @@ async function makeOfflineKv() {
     const kv = new KvNamespace({ http, session, wsBaseUrl: "ws://localhost:8787", offline: cache });
     manager.registerReplayer("kv", (e) => kv.replay(e));
 
-    return { kv, store, manager, setOnline: (v: boolean) => (isOnline = v) };
+    return { kv, store, manager, cache, setOnline: (v: boolean) => (isOnline = v) };
 }
 
 describe("client.kv — offline", () => {
@@ -107,6 +107,42 @@ describe("client.kv — offline", () => {
         await kv.set("todos", "t2", { a: 2 }); // offline create
         const ids = await kv.list("todos");
         expect(ids.sort()).toEqual(["t1", "t2"]);
+    });
+
+    it("offline list asks the cache for the collection's prefix only", async () => {
+        const { kv, cache, setOnline } = await makeOfflineKv();
+        await kv.set("todos", "t1", { a: 1 });
+        await kv.set("notes", "n1", { a: 2 });
+        setOnline(false);
+        await kv.set("todos", "t2", { a: 3 }); // offline create
+        expect((await cache.liveKeys(COMMITMENT, "todos/")).sort()).toEqual(["todos/t1", "todos/t2"]);
+        expect(await cache.liveKeys(COMMITMENT, "notes/")).toEqual(["notes/n1"]);
+        expect((await cache.liveKeys(COMMITMENT)).sort()).toEqual(["notes/n1", "todos/t1", "todos/t2"]);
+        // The local filter would hide a cache read of everything, so watch what is asked for.
+        const asked = vi.spyOn(cache, "liveKeys");
+        expect((await kv.list("todos")).sort()).toEqual(["t1", "t2"]);
+        expect(await kv.list("notes")).toEqual(["n1"]);
+        setOnline(true);
+        // Online, against this fake (which ignores the prefix): server keys plus cached keys, still only the collection.
+        expect(await kv.list("notes")).toEqual(["n1"]);
+        // Offline (the cache alone) and online (the union) both ask for the collection's prefix, never for everything.
+        expect(asked.mock.calls).toEqual([
+            [COMMITMENT, "todos/"],
+            [COMMITMENT, "notes/"],
+            [COMMITMENT, "notes/"],
+        ]);
+    });
+
+    it("a server that repeats its cursor is an error with offline on, not a quiet cache-only list", async () => {
+        const { kv } = await makeOfflineKv();
+        await kv.set("todos", "t1", { a: 1 });
+        // Offline is on here, as in every browser. Only a failure to REACH the
+        // server falls back to the cache; a server that answers wrongly must
+        // not turn into a silently partial list.
+        const http = (kv as unknown as { deps: { http: HttpClient } }).deps.http;
+        vi.spyOn(http, "post").mockResolvedValue({ keys: ["todos/t1"], cursor: "same" });
+        await expect(kv.list("todos")).rejects.toThrow(/repeated a cursor/);
+        await expect(kv.keys("todos/")).rejects.toThrow(/repeated a cursor/);
     });
 
     it("offline delete tombstones locally and replays", async () => {

@@ -189,6 +189,63 @@ describe("checkout", () => {
         await repo.checkout(first);
         expect(await vfs.readText("/apps/demo/src/deep/a.txt")).toBe("nested");
     });
+
+    it("turns a directory back into the file it replaced", async () => {
+        // It deleted the files the commit lacks, leaving `thing/` empty but
+        // there, and then could not write the file `thing`: the files were
+        // gone, HEAD had not moved, and status reported them removed.
+        const { repo, vfs } = makeRepo();
+        await write(vfs, "/keep.txt", "k");
+        await write(vfs, "/thing", "a file");
+        const first = await repo.commit("thing is a file");
+        await vfs.delete("/apps/demo/thing");
+        await write(vfs, "/thing/inner.txt", "now a directory");
+        await write(vfs, "/thing/sub/deeper.txt", "and deeper");
+        const second = await repo.commit("thing is a directory");
+
+        await repo.checkout(first);
+        expect(await vfs.readText("/apps/demo/thing")).toBe("a file");
+        expect(await vfs.walk("/apps/demo")).toEqual(["/apps/demo/keep.txt", "/apps/demo/thing"]);
+        expect(await repo.status()).toEqual([]);
+        // And back: the content the directory held is still there to restore.
+        await repo.checkout(second);
+        expect(await vfs.readText("/apps/demo/thing/sub/deeper.txt")).toBe("and deeper");
+    });
+
+    it("reads the working tree with read-ahead, not one directory at a time", async () => {
+        // Asked to discard changes, a checkout has no status to read the tree
+        // first, so in a fresh process nothing is cached. Checking every
+        // directory it needs BEFORE walking the tree opened each record by
+        // path, one round trip after another, and doubled the checkout.
+        const { repo, vfs, store } = makeRepo();
+        for (let d = 0; d < 40; d++) await write(vfs, `/d${d}/sub/f.txt`, `${d}`);
+        const first = await repo.commit("first");
+        await write(vfs, "/new.txt", "n");
+        await repo.commit("second");
+        vfs.clearCache();
+
+        // Gets are answered in rounds, each once the checkout has asked for
+        // all it will: a round is a round trip.
+        const get = store.get.bind(store);
+        let waiting: Array<{ key: string; answer: () => void }> = [];
+        store.get = (key: string) =>
+            new Promise((resolve) => waiting.push({ key, answer: () => resolve(get(key)) }));
+        let done = false;
+        const checkout = repo.checkout(first, { discardChanges: true }).finally(() => (done = true));
+        let directoryRounds = 0;
+        while (!done) {
+            await new Promise((resolve) => setImmediate(resolve));
+            const round = waiting;
+            waiting = [];
+            if (round.some(({ key }) => key.startsWith("vfs/d/"))) directoryRounds++;
+            for (const { answer } of round) answer();
+        }
+        await checkout;
+        store.get = get;
+        expect(await vfs.exists("/apps/demo/new.txt")).toBe(false);
+        // 83 directory records, five levels deep. One at a time was 80 rounds.
+        expect(directoryRounds).toBeLessThanOrEqual(10);
+    });
 });
 
 describe("log", () => {

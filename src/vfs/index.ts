@@ -3,6 +3,8 @@ export {
     VfsLockedError,
     VfsNotFoundError,
     VfsConflictError,
+    VfsCorruptRecordError,
+    VfsLimitError,
     type VfsStat,
     type VfsStore,
     type DirNode,

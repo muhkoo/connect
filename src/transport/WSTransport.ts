@@ -70,6 +70,8 @@ export interface WSTransportOptions {
    * auto-response. Default `"pong"`.
    */
   pongFrame?: string;
+  /** A close with one of these codes is terminal: no reconnect, `DISCONNECTED` carries `{code, reason}`; `resume()` restarts. */
+  terminalCloseCodes?: number[];
 }
 
 export class WSTransport extends EventCore {
@@ -121,6 +123,8 @@ export class WSTransport extends EventCore {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
 
+  private readonly terminalCloseCodes: number[];
+
   constructor(opts: WSTransportOptions) {
     super();
     if (!opts || !opts.url) {
@@ -137,6 +141,7 @@ export class WSTransport extends EventCore {
     this.heartbeatTimeout = opts.heartbeatTimeout ?? 10000;
     this.pingFrame = opts.pingFrame ?? "ping";
     this.pongFrame = opts.pongFrame ?? "pong";
+    this.terminalCloseCodes = opts.terminalCloseCodes ?? [];
   }
 
   /** Open the socket. Resolves when CONNECTED fires. Rejects on first error. */
@@ -195,12 +200,17 @@ export class WSTransport extends EventCore {
           }
         };
 
-        socket.onclose = () => {
+        socket.onclose = (ev?: CloseEvent) => {
+          const code = typeof ev?.code === "number" ? ev.code : undefined;
           const wasConnected = this._isConnected;
           this._isConnected = false;
           this._isConnecting = false;
           this.stopHeartbeat();
-          this.emit(EventCoreEvents.DISCONNECTED, undefined);
+          this.emit(EventCoreEvents.DISCONNECTED, code !== undefined ? { code, reason: ev?.reason ?? "" } : undefined);
+          if (code !== undefined && this.terminalCloseCodes.includes(code)) {
+            this.autoReconnect = false;
+            return;
+          }
           if (this.autoReconnect && wasConnected) {
             this.scheduleReconnect();
           }
@@ -226,6 +236,14 @@ export class WSTransport extends EventCore {
     }
     this._isConnected = false;
     this._isConnecting = false;
+  }
+
+  /** Restart reconnecting after a terminal close or `disconnect()`; the next URL comes from `urlProvider`. */
+  resume(): void {
+    // A reconnect already pending is left to run: a second timer would dial on top of it.
+    if (this._isConnected || this._isConnecting || this.reconnectTimeout) return;
+    this.autoReconnect = true;
+    this.scheduleReconnect();
   }
 
   /**
@@ -335,6 +353,7 @@ export class WSTransport extends EventCore {
     this.reconnectAttempts++;
     this.emit(EventCoreEvents.RECONNECTING, { attempt: this.reconnectAttempts });
     this.reconnectTimeout = setTimeout(async () => {
+      this.reconnectTimeout = null;
       try {
         await this.connect();
       } catch {

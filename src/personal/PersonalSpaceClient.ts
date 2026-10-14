@@ -25,6 +25,7 @@
 
 import type { Groth16Proof } from "../types/zk";
 import { resolveArtifact, type CircuitIntegrity } from "../auth/circuitIntegrity";
+import { paymentRequiredFrom } from "../core/PaymentRequiredError";
 
 type Snarkjs = {
     groth16: {
@@ -119,13 +120,17 @@ function nonceHexToFieldString(nonceHex: string): string {
  */
 async function parseOrThrow<T>(response: Response, label: string): Promise<T> {
     if (!response.ok) {
-        let detail = "";
+        let text = "";
         try {
-            const text = await response.text();
-            detail = text ? `: ${text}` : "";
+            text = await response.text();
         } catch {
             // ignore — we'll just use the status code
         }
+        // A put refused for payment: its own class. Every other failure is the
+        // plain Error it always was.
+        const refused = paymentRequiredFrom(response.status, text);
+        if (refused) throw refused;
+        const detail = text ? `: ${text}` : "";
         throw new Error(`PersonalSpaceClient ${label} failed (${response.status})${detail}`);
     }
     return (await response.json()) as T;

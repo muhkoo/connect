@@ -23,6 +23,7 @@
 import { BroadcastChannel, BroadcastChannelEvents } from "../sessions/BroadcastChannel";
 import { FileStorage } from "../storage/FileStorage";
 import { ShardClient, type ShardByteCache, type PeerBlockSource } from "../storage/transport/ShardClient";
+import { commitManifest } from "../storage/transport/storageCommit";
 import type { FileManifest, FileStat } from "../storage/types";
 import { Message } from "../messaging/Message";
 import { Packet } from "../messaging/Packet";
@@ -31,6 +32,12 @@ import type { SpaceKeyring } from "./SpaceKeyring";
 import { canonicalMessage, signSpaceMessage, verifySpaceMessage } from "./SpaceCipher";
 import { KeyStore } from "../crypto/KeyStore";
 import type { JoinRequest, HistoryPolicy } from "./types";
+import { AdmissionDeniedError, IdentityLockedError, SpaceTrustError } from "../core/trust/errors";
+import type { LogSync, MemberView } from "./trust/LogSync";
+import { ecBytes, keyCommit } from "./trust/canonical";
+import { ikEquals } from "./trust/ik";
+import { KeyringHttpError } from "./KeyringClient";
+import { log as logger } from "../utilities";
 
 type Listener = (e: CustomEvent) => void;
 
@@ -132,6 +139,16 @@ export interface MessageDeletedEvent {
     handle: number;
 }
 
+export type AdmissionState = "locked" | "requesting" | "keyed" | "not-member" | "identity-mismatch" | "integrity";
+
+/** WebSocket close code for a refused private-Space socket (design §3.6; accelerator NOT_MEMBER_CLOSE_CODE). */
+export const NOT_MEMBER_CLOSE_CODE = 4403;
+/** At most one resume after a 4403 per Space per this interval (design §6.7). */
+export const NOT_MEMBER_RECHECK_MS = 60_000;
+
+const NOT_MEMBER_MESSAGE = "You're not a member of this private channel. Ask the owner to add you.";
+const IDENTITY_MISMATCH_MESSAGE = "The owner added a different identity for you. Ask them to re-add you.";
+
 export interface SpaceDeps {
     /** Transport room id. For fan-out spaces this is the encoded space pubkey. */
     name: string;
@@ -139,6 +156,12 @@ export interface SpaceDeps {
     httpBaseUrl: string;
     /** Header-injecting fetch from the client's HttpClient. */
     fetch: typeof fetch;
+    /**
+     * The same fetch with the client's silent 401 recovery (`HttpClient.fetchWithRecovery`). File uploads
+     * use it, so a PUT made with a dead session re-establishes the session once instead of failing.
+     * Defaults to {@link fetch}.
+     */
+    fetchWithRecovery?: typeof fetch;
     /** Resolves the user id used for the ratchet / member id (signed-in username). */
     myId: () => string;
     /** Resolves a short-lived WS upgrade ticket (or null when keyless). */
@@ -166,6 +189,21 @@ export interface SpaceDeps {
     deferShardUpload?: (hash: string) => Promise<void>;
     /** Offline message cache + send queue. Undefined ⇒ no offline behavior. */
     offline?: SpaceOfflineAdapter;
+    /** Locked session (design §3.3): no keyring, never connects; the app re-opens after sign-in. */
+    locked?: boolean;
+    /** The Space's membership log (a signed private Space), when this client has trust wired. */
+    logSync?: LogSync;
+    /** Visibility the Space was created with; only a private Space gets a genesis (design §3.8). */
+    visibility?: "private" | "public";
+    /** This app's id, which a genesis names (design §3.5). */
+    appId?: () => Promise<string>;
+    /**
+     * Status of GET /keyring/state after the client's silent 401 recovery, or "network": asked after a
+     * 4403 close before believing it (design §6.9).
+     */
+    probeState?: () => Promise<number | "network">;
+    /** True while the session holds a token, so a reconnect must never go ticketless. */
+    hasSession?: () => boolean;
 }
 
 /** The subset of {@link BroadcastChannel} a {@link Space} drives. */
@@ -179,13 +217,22 @@ export interface SpaceChannelLike {
     sendRaw(frame: unknown): void;
     peers?(): string[];
     isConnected?(): boolean;
+    /** Reconnect after a terminal close, on a fresh URL. */
+    resume?(): void;
 }
 
 export class Space {
     readonly name: string;
     readonly historyPolicy: HistoryPolicy;
     private channel: SpaceChannelLike | null = null;
-    private readonly pending: Array<[string, Listener]> = [];
+    /**
+     * The log turned this user away and closed `channel` (design §3.7). Its
+     * single-use ticket is spent, so it is never dialled again: the next
+     * `connect()` checks the log and opens a new channel on a fresh ticket.
+     */
+    private channelSpent = false;
+    /** Every raw channel listener (`on`), attached to each channel this Space opens. */
+    private readonly listeners: Array<[string, Listener]> = [];
     private readonly cipher: SpacePacketCipher | null;
     /** Per-instance event bus for fan-out events (isolated across spaces). */
     private readonly events = new EventTarget();
@@ -193,11 +240,23 @@ export class Space {
     private catchUpUnsub: (() => void) | null = null;
     /** Optional P2P swarm for this Space (block exchange among members). */
     private peerNet: AttachedPeerNetwork | null = null;
+    private _admission: AdmissionState;
+    /** Whether admission follows the log's changes yet (subscribed once, on the first open the log admits). */
+    private admissionWired = false;
+    /** When the last resume after a 4403 ran (design §6.7: at most one per {@link NOT_MEMBER_RECHECK_MS}). */
+    private lastResumeAt = -Infinity;
+    private resumeTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Bumped by `disconnect()`: a /keyring/state answer that arrives after it is dropped. */
+    private teardowns = 0;
 
     constructor(private readonly deps: SpaceDeps) {
         this.name = deps.name;
         this.historyPolicy = deps.historyPolicy ?? "static";
         this.cipher = deps.keyring ? new SpacePacketCipher(deps.keyring) : null;
+        this._admission = deps.locked ? "locked" : "requesting";
+        deps.keyring?.onKeysChanged(() => {
+            if (this._admission === "requesting") this.setAdmission("keyed");
+        });
     }
 
     /** The encoded space id (same as the transport name for fan-out spaces). */
@@ -210,21 +269,166 @@ export class Space {
         return this.deps.keyring;
     }
 
+    /** Where this member stands in this Space (design §4.5.12, as the slice ships it). */
+    get admission(): AdmissionState {
+        return this._admission;
+    }
+
+    /** Subscribe to admission changes. Returns an unsubscribe. */
+    onAdmission(h: (s: AdmissionState) => void): () => void {
+        const l = (e: Event) => h((e as CustomEvent<AdmissionState>).detail);
+        this.events.addEventListener("admission", l);
+        return () => this.events.removeEventListener("admission", l);
+    }
+
+    protected setAdmission(s: AdmissionState): void {
+        if (this._admission === s) return;
+        this._admission = s;
+        this.emitEvent("admission", s);
+    }
+
+    /** The log turned this user away; nothing reconnects until it admits them again. */
+    private denied(): boolean {
+        return this._admission === "not-member" || this._admission === "identity-mismatch";
+    }
+
+    /**
+     * Sync the membership log and derive admission from it, before any ticket
+     * (design §3.4, §3.7, §4.5.12). A 403 from the log route is not-member and a
+     * 401 is locked. Any other failure is fatal only where this client has
+     * verified the log before (it holds a high-water mark). Otherwise the Space
+     * opens as unlogged this time, and the next open or `mlog` frame syncs again.
+     */
+    private async admitByLog(ls: LogSync): Promise<void> {
+        try {
+            await ls.sync();
+        } catch (e) {
+            if (e instanceof KeyringHttpError && e.status === 403) {
+                this.setAdmission("not-member");
+                throw new AdmissionDeniedError("not-member", NOT_MEMBER_MESSAGE);
+            }
+            if (e instanceof KeyringHttpError && e.status === 401) {
+                this.setAdmission("locked");
+                throw new IdentityLockedError();
+            }
+            // A mark that cannot be read counts as held: the failure is not waved through.
+            if (await ls.hasHighWater().catch(() => true)) throw e;
+            logger.warn("Space: the member list could not be read; opening without it", {
+                spaceId: this.name,
+                code: failureCode(e),
+                message: e instanceof Error ? e.message : String(e),
+            });
+        }
+        await this.evaluateAdmission();
+        if (this._admission === "not-member") throw new AdmissionDeniedError("not-member", NOT_MEMBER_MESSAGE);
+        if (this._admission === "identity-mismatch") throw new AdmissionDeniedError("identity-mismatch", IDENTITY_MISMATCH_MESSAGE);
+        if (!this.admissionWired) {
+            this.admissionWired = true;
+            ls.onChange(() => {
+                void this.evaluateAdmission().catch((e: unknown) => {
+                    logger.warn("Space: admission could not be re-derived from the member list", {
+                        spaceId: this.name,
+                        code: failureCode(e),
+                        message: e instanceof Error ? e.message : String(e),
+                    });
+                });
+            });
+        }
+    }
+
+    /** Re-derive admission from the verified log (design §3.4 rows, §3.7, §4.5.12). */
+    private async evaluateAdmission(): Promise<void> {
+        const ls = this.deps.logSync;
+        if (!ls) return;
+        // Before the logEnabled check: a log that went missing leaves the Space unlogged, and broken.
+        if (ls.integrity.broken) {
+            this.setAdmission("integrity");
+            return;
+        }
+        if (!ls.logEnabled) return;
+        const m = ls.member(this.deps.myId());
+        if (!m) {
+            this.setAdmission("not-member");
+            this.dropChannel();
+            return;
+        }
+        if (!ikEquals(m.ik, await ls.signer.identityKeyRaw())) {
+            this.setAdmission("identity-mismatch");
+            this.dropChannel();
+            return;
+        }
+        if (this._admission !== "keyed") this.setAdmission(this.deps.keyring?.hasAnyKey() ? "keyed" : "requesting");
+    }
+
+    /**
+     * A 4403 alone never shows not-member: ask /keyring/state first (design §6.9, AV12).
+     * 403 is not-member and 401, which `probeState` returns only once a silent re-auth has failed, is
+     * locked; either closes the channel for good, like a log refusal. Any
+     * other answer (404 while step I has no state route, 2xx, 5xx, a network error) resumes, at most
+     * once per {@link NOT_MEMBER_RECHECK_MS}.
+     */
+    private async onNotMemberClose(): Promise<void> {
+        const teardowns = this.teardowns;
+        const status = this.deps.probeState
+            ? await this.deps.probeState().catch((): "network" => "network")
+            : "network";
+        if (teardowns !== this.teardowns) return; // disconnected while asking: nothing to resume
+        if (status === 403) {
+            this.setAdmission("not-member");
+            this.dropChannel();
+            return;
+        }
+        if (status === 401) {
+            this.setAdmission("locked");
+            this.dropChannel();
+            return;
+        }
+        if (this.resumeTimer) return;
+        const wait = Math.max(0, this.lastResumeAt + NOT_MEMBER_RECHECK_MS - Date.now());
+        this.resumeTimer = setTimeout(() => {
+            this.resumeTimer = null;
+            this.lastResumeAt = Date.now();
+            this.channel?.resume?.();
+        }, wait);
+    }
+
+    /** Close the socket of a user the log turned away, and never dial that channel again (design §3.7). */
+    private dropChannel(): void {
+        if (!this.channel || this.channelSpent) return;
+        this.channelSpent = true;
+        this.disconnect();
+    }
+
     // -- transport -------------------------------------------------------------
 
-    /** Open the space websocket (resolves the ticket + identity lazily). */
+    /**
+     * Open the space websocket (resolves the ticket + identity lazily). On a
+     * Space with a membership log, the log is checked first: a user it does not
+     * list, or lists under another identity key, is refused with
+     * {@link AdmissionDeniedError} before any ticket is fetched (design §4.5.12).
+     */
     async connect(): Promise<void> {
-        if (!this.channel) {
+        if (this.deps.locked) throw new IdentityLockedError();
+        const ls = this.deps.logSync;
+        // Checked on the first open, and again on a Space the log turned away, so a later call never reopens its socket unchecked.
+        // A channel the log closed is replaced, not redialled: its ticket was single-use.
+        if (ls && (!this.channel || this.channelSpent || this.denied())) await this.admitByLog(ls);
+        if (!this.channel || this.channelSpent) {
+            const spent = this.channel;
             // The WS upgrade ticket is single-use + short-TTL, so a reconnect
             // must mint a FRESH one — otherwise the socket drops (idle timeout,
             // network blip) and never comes back. `buildUrl` is handed to the
             // transport as a `urlProvider` it calls before each reconnect.
-            const buildUrl = async () => {
+            const buildUrl = async (reconnect = false) => {
                 const ticket = await this.deps.fetchTicket();
-                return (
-                    `${this.deps.wsBaseUrl}/api/spaces/${encodeURIComponent(this.name)}/websocket` +
-                    (ticket ? `?ticket=${encodeURIComponent(ticket)}` : "")
-                );
+                if (!ticket && reconnect && this.deps.keyring && this.deps.hasSession?.()) {
+                    // A reconnect with a live session never goes ticketless (anonymous): let the transport retry.
+                    throw new Error("Space: no WebSocket ticket yet; retrying");
+                }
+                const q = new URLSearchParams();
+                if (ticket) q.set("ticket", ticket);
+                q.set("refuse", "close"); // be refused with the 4403 close, which this SDK treats as terminal (design §3.6)
+                return `${this.deps.wsBaseUrl}/api/spaces/${encodeURIComponent(this.name)}/websocket?${q.toString()}`;
             };
             const url = await buildUrl();
             this.channel = this.deps.createChannel
@@ -233,13 +437,19 @@ export class Space {
                       url,
                       myId: this.deps.myId(),
                       autoAnnounce: false,
-                      urlProvider: buildUrl,
+                      urlProvider: () => buildUrl(true),
                       // Keep recovering across network flaps (each attempt mints a
                       // fresh ticket); teardown calls disconnect() which stops it.
                       maxReconnectAttempts: 0,
+                      // A 4403 stops the transport; the Space decides whether to resume.
+                      terminalCloseCodes: [NOT_MEMBER_CLOSE_CODE],
                   });
-            for (const [event, handler] of this.pending) this.channel.on(event, handler);
-            this.pending.length = 0;
+            this.channelSpent = false;
+            this.rawWired = false;
+            for (const [event, handler] of this.listeners) {
+                spent?.off(event, handler);
+                this.channel.on(event, handler);
+            }
             // Fan-out spaces drive their own `{name}` handshake + frame routing.
             // Legacy (keyring-less) callers wire these themselves, so leave that
             // path byte-for-byte unchanged.
@@ -249,6 +459,10 @@ export class Space {
                     // Kick P2P peer discovery now the signaling channel is live
                     // (re-runs on each reconnect to re-form the mesh).
                     this.peerNet?.start();
+                });
+                this.channel.on(BroadcastChannelEvents.DISCONNECTED, (e: CustomEvent) => {
+                    const detail = e.detail as { code?: number } | undefined;
+                    if (detail?.code === NOT_MEMBER_CLOSE_CODE) void this.onNotMemberClose();
                 });
                 this.wireFanout();
                 // Register offline catch-up once: on each reconnect the sync
@@ -262,6 +476,11 @@ export class Space {
     }
 
     disconnect(): void {
+        this.teardowns++;
+        if (this.resumeTimer) {
+            clearTimeout(this.resumeTimer);
+            this.resumeTimer = null;
+        }
         this.channel?.disconnect();
         this.catchUpUnsub?.();
         this.catchUpUnsub = null;
@@ -291,18 +510,16 @@ export class Space {
         return this.peerNet?.onGossip(handler) ?? (() => {});
     }
 
-    /** Subscribe to a raw channel event. Buffered until `connect()` if early. */
+    /** Subscribe to a raw channel event. Buffered until `connect()` if early, and kept across a new channel. */
     on(event: string, handler: Listener): void {
-        if (this.channel) this.channel.on(event, handler);
-        else this.pending.push([event, handler]);
+        this.listeners.push([event, handler]);
+        this.channel?.on(event, handler);
     }
 
     off(event: string, handler: Listener): void {
-        if (this.channel) this.channel.off(event, handler);
-        else {
-            const i = this.pending.findIndex(([e, h]) => e === event && h === handler);
-            if (i >= 0) this.pending.splice(i, 1);
-        }
+        const i = this.listeners.findIndex(([e, h]) => e === event && h === handler);
+        if (i >= 0) this.listeners.splice(i, 1);
+        this.channel?.off(event, handler);
     }
 
     // -- legacy Double Ratchet path (unchanged) --------------------------------
@@ -557,6 +774,7 @@ export class Space {
      * hold nothing, request a key and poll until one arrives (or timeout).
      */
     async join(opts: { timeoutMs?: number; pollMs?: number } = {}): Promise<boolean> {
+        if (this.deps.locked) return false;
         const keyring = this.requireKeyring();
         await this.connect();
         if (await keyring.loadFromCache()) return true;
@@ -572,10 +790,29 @@ export class Space {
         return false;
     }
 
-    /** Creator path: mint the initial group key, then connect. */
+    /** Creator path: mint epoch 0; for a private Space, sign the genesis + ec(0) BEFORE connecting (design §4.5.10). */
     async create(): Promise<void> {
+        if (this.deps.locked) throw new IdentityLockedError();
         const keyring = this.requireKeyring();
         await keyring.bootstrapNew();
+        const ls = this.deps.logSync;
+        if (this.deps.visibility === "private" && ls) {
+            if (!this.deps.appId) throw new Error("Space: a private Space's genesis needs the app id.");
+            const appId = await this.deps.appId();
+            const k0 = keyring.rawKey(0)!;
+            await ls.append(
+                "genesis",
+                { visibility: "private", policy: this.historyPolicy, appId, baseEpoch: -1, legacyCommits: {} },
+                async (hash, entry) => {
+                    const ec = {
+                        v: 1 as const, spaceId: this.name, epoch: 0, prevKeyed: -1,
+                        keyCommit: await keyCommit(0, k0, this.name),
+                        headSeq: 0, headHash: hash, sole: true, by: entry.by, ik: entry.ik, at: entry.at,
+                    };
+                    return { ...ec, sig: await ls.signer.sign(ecBytes(ec)) };
+                },
+            );
+        }
         await this.connect();
         // Publish our identity in the member directory so peers can verify our
         // message signatures (the creator never "joins", so register here).
@@ -598,7 +835,51 @@ export class Space {
 
     /** Rotate to a fresh epoch and re-wrap to the roster (rotate spaces). */
     async rotate(roster?: Array<{ memberId: string; identityEcdhPub: string }>): Promise<number> {
+        if (this.deps.logSync?.logEnabled) throw new SpaceTrustError("log-refused", "Key rotation for signed spaces arrives with a later release.");
         return this.requireKeyring().rotate(roster);
+    }
+
+    // -- signed member list (design §3.5–§3.8) ---------------------------------
+
+    /** Whether this Space has a verified membership log. */
+    get logEnabled(): boolean {
+        return !!this.deps.logSync?.logEnabled;
+    }
+
+    /** The verified member list, or null when this Space has no log. */
+    membership(): MemberView[] | null {
+        return this.deps.logSync?.logEnabled ? this.deps.logSync.members() : null;
+    }
+
+    /** Called with the member list (null when unlogged) each time the log is re-synced. Returns an unsubscribe. */
+    onMembership(h: (m: MemberView[] | null) => void): () => void {
+        return this.deps.logSync ? this.deps.logSync.onChange(() => h(this.membership())) : () => {};
+    }
+
+    private requireLog(): LogSync {
+        const ls = this.deps.logSync;
+        if (!ls?.logEnabled) throw new SpaceTrustError("log-refused", "This space has no signed member list.");
+        return ls;
+    }
+
+    /** Add by exact username (design §3.8; the owner, or an editor for viewers). Looks the IK up in the directory. */
+    async add(username: string, opts: { role?: "viewer" | "editor" } = {}): Promise<{ seq: number }> {
+        const ls = this.requireLog();
+        const memberIk = await ls.directory.lookup(username);
+        return ls.append("add", { member: username, memberIk, role: opts.role ?? "viewer" });
+    }
+
+    /** Remove a member. In this build it cuts them off at the relay; it does not rotate the key. */
+    async remove(memberId: string): Promise<{ seq: number }> {
+        return this.requireLog().append("remove", { member: memberId });
+    }
+
+    async setRole(memberId: string, role: "viewer" | "editor"): Promise<{ seq: number }> {
+        return this.requireLog().append("role", { member: memberId, role });
+    }
+
+    async leave(): Promise<{ seq: number }> {
+        return this.requireLog().append("leave", {});
     }
 
     // -- room-scoped files (no websocket needed) -------------------------------
@@ -656,22 +937,10 @@ export class Space {
 
     /** Commit/release a manifest's shards with the accelerator (metering + refcount). */
     private async commitShards(manifest: FileManifest, action: "commit" | "release"): Promise<void> {
-        const hashes = manifest.chunks.flatMap((c) => c.shardHashes);
-        if (hashes.length === 0) return;
-        const body = JSON.stringify({ hashes, bytes: manifest.size });
-        for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-                const res = await this.deps.fetch(`${this.deps.httpBaseUrl}/api/storage/${action}`, {
-                    method: "POST", headers: { "Content-Type": "application/json" }, body,
-                });
-                if (res.ok) return;
-            } catch { /* retry */ }
-            await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-        }
-        // Best-effort: a missed commit leaves the shards to orphan-GC (still not
-        // durable-unmetered long-term); a missed release just delays GC. Reconciled
-        // by the platform sweep. Don't fail the caller's write on a metering hiccup.
-        console.warn(`[muhkoo] storage ${action} did not confirm for ${hashes.length} shard(s)`);
+        // Through the client's 401 recovery when there is one: the commit refuses
+        // a dead session with 401, and three tries with the same token only
+        // delayed the warning.
+        await commitManifest(this.deps.fetchWithRecovery ?? this.deps.fetch, this.deps.httpBaseUrl, manifest, action);
     }
 
     private fileStorage(backgroundUpload = false): FileStorage {
@@ -683,6 +952,7 @@ export class Space {
             baseUrl: this.deps.httpBaseUrl,
             pathPrefix: "/api/shards",
             fetch: this.deps.fetch,
+            fetchWithRecovery: this.deps.fetchWithRecovery,
             cache: this.deps.shardCache,
             deferUpload: this.deps.deferShardUpload,
             peers: this.peerNet?.exchange,
@@ -705,6 +975,8 @@ export class Space {
     private async onRawFrame(frame: unknown): Promise<void> {
         const f = frame as Record<string, unknown>;
         if (!f || typeof f !== "object") return;
+        if (f.mlog && typeof f.mlog === "object") { this.deps.logSync?.scheduleSync(); return; }
+        if (f.rotateDue) { return; } // no client can answer a rotation request yet: key rotation for signed spaces comes later
         if (typeof f.spaceMessage === "string" && this.cipher) {
             const handle = Number(f.timestamp ?? 0);
             const decoded = await this.decodeFrame(f.spaceMessage as string, this.cipher, /*raw*/ true, handle);
@@ -757,7 +1029,12 @@ export class Space {
             // A new member appeared — refresh the directory so their future
             // messages verify, and (if we hold the key) auto-admit them.
             void this.deps.keyring?.refreshDirectory({ force: true });
-            if (this.deps.autoAdmit !== false && this.deps.keyring?.hasAnyKey() && req.memberId !== this.deps.myId()) {
+            if (
+                this.deps.autoAdmit !== false &&
+                this.deps.keyring?.hasAnyKey() &&
+                req.memberId !== this.deps.myId() &&
+                this.deps.keyring.canWrapTo(req.memberId)
+            ) {
                 void this.deps.keyring.admit(req.memberId, req.identityEcdhPub).catch(() => {});
             }
             return;
@@ -774,6 +1051,9 @@ export class Space {
      * (replacement content for an existing handle). Requires a keyring.
      */
     private async sealMessage(payload: unknown, channel?: string, contentType?: string, clientId?: string): Promise<string> {
+        if (this.deps.logSync?.integrity.broken) {
+            throw new SpaceTrustError("integrity", "This space's member list couldn't be verified. You can still read messages you already have; sending is paused.");
+        }
         const cipher = this.requireCipher(contentType);
         const message = new Message(payload);
         const headers = await cipher.seal(message.serialize());
@@ -953,6 +1233,11 @@ export class Space {
 
 function delay(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
+}
+
+/** A failure's HTTP status or error code, for a log line. */
+function failureCode(e: unknown): unknown {
+    return (e instanceof KeyringHttpError ? e.status : (e as { code?: unknown } | null)?.code) ?? "unknown";
 }
 
 /**

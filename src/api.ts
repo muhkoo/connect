@@ -72,6 +72,7 @@ export * from "./core/namespaces/SpaceNamespace";
 export * from "./core/namespaces/AgentsNamespace";
 export * from "./core/namespaces/FunctionsNamespace";
 export * from "./core/namespaces/AccessTokensNamespace";
+export * from "./core/namespaces/AppNamespace";
 
 // The encrypted filesystem and its history.
 export * from "./vfs/VfsNamespace";
@@ -94,6 +95,13 @@ export * from "./spaces/SpaceKeyring";
 export * from "./spaces/SpacePacketCipher";
 export * from "./spaces/KeyringClient";
 export * from "./network/PacketCipher";
+
+// The e2e-channels trust layer: signed membership logs, pinned identities and
+// the errors a locked session or a denied admission throws (design §3.3–§3.7,
+// §6.9). `./core/trust/errors` re-exports `./spaces/trust/errors` verbatim.
+export * from "./core/trust/errors";
+export type { MemberView } from "./spaces/trust/LogSync";
+export type { ChatKeyCert, MembershipEntry } from "./spaces/trust/types";
 
 // Byte/base58/id helpers and the decorators. Previously reachable only from the
 // server build, which is why `base58Encode` and friends were server-only.

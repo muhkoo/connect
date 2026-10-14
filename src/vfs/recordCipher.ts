@@ -14,6 +14,8 @@ import { randomBytes } from "../crypto/primitives/random";
 import { VFS_ROOT_INFO, type SealedRecord } from "./types";
 
 const AES_GCM_IV_BYTES = 12;
+/** The GCM tag appended to every ciphertext, so the shortest one there can be. */
+const AES_GCM_TAG_BYTES = 16;
 const AES_KEY_BYTES = 32;
 
 export function toBase64(bytes: Uint8Array): string {
@@ -81,4 +83,58 @@ export async function unseal<T>(key: Uint8Array, record: unknown): Promise<T | n
     if (typeof r.iv !== "string" || typeof r.ct !== "string") return null;
     const plaintext = await decryptAesGcm(key, fromBase64(r.iv), fromBase64(r.ct));
     return JSON.parse(new TextDecoder().decode(plaintext)) as T;
+}
+
+/** Raised by `openSealed` when the stored value itself is at fault. `message` says how. */
+export class SealedRecordError extends Error {
+    constructor(reason: string) {
+        super(reason);
+        this.name = "SealedRecordError";
+    }
+}
+
+/**
+ * `unseal` for a record that must not be guessed at.
+ *
+ * Throws SealedRecordError for everything that is wrong WITH THE STORED VALUE:
+ * not an envelope, not base64, the wrong size, a ciphertext that does not
+ * authenticate under `key`, plaintext that is not JSON. Every one of those
+ * surfaced before as a bare DOMException or SyntaxError naming nothing.
+ *
+ * Anything else - no WebCrypto in this runtime, say - is rethrown untouched.
+ * Blaming the record for a failure of the runtime would tell the user a
+ * healthy directory is corrupt, and invite them to delete it.
+ */
+export async function openSealed(key: Uint8Array, record: unknown): Promise<unknown> {
+    const r = record as Partial<SealedRecord> | null;
+    if (!r || typeof r !== "object" || Array.isArray(r) || typeof r.iv !== "string" || typeof r.ct !== "string") {
+        throw new SealedRecordError("it is not a sealed record");
+    }
+    let iv: Uint8Array;
+    let ct: Uint8Array;
+    try {
+        iv = fromBase64(r.iv);
+        ct = fromBase64(r.ct);
+    } catch {
+        throw new SealedRecordError("its envelope is not base64");
+    }
+    // Checked here rather than left to the cipher, whose complaints about
+    // either are indistinguishable from its complaints about the runtime.
+    if (iv.length !== AES_GCM_IV_BYTES || ct.length < AES_GCM_TAG_BYTES) {
+        throw new SealedRecordError("its envelope is the wrong size");
+    }
+    let plaintext: Uint8Array;
+    try {
+        plaintext = await decryptAesGcm(key, iv, ct);
+    } catch (err) {
+        // What the WebCrypto spec requires for a tag that does not verify:
+        // a different key, or bytes that were altered.
+        if ((err as { name?: unknown })?.name !== "OperationError") throw err;
+        throw new SealedRecordError("it does not decrypt with the key it should");
+    }
+    try {
+        return JSON.parse(new TextDecoder().decode(plaintext));
+    } catch {
+        throw new SealedRecordError("it decrypts, but not to a record");
+    }
 }

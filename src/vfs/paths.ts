@@ -75,6 +75,31 @@ export function isUnder(path: string, dir: string): boolean {
 export const MAX_NAME_BYTES = 255;
 
 /**
+ * Control characters, C1 controls and bidi overrides.
+ *
+ * Built once, not per call: `isSafeName` runs for every entry of every
+ * record read.
+ */
+const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+const CONTROL_OR_BIDI_ALL = new RegExp(CONTROL_OR_BIDI.source, "g");
+const utf8 = new TextEncoder();
+
+/**
+ * A string from a record, made fit to print: cut to `max` characters, then
+ * every control or bidi character written as a `\uXXXX` escape.
+ *
+ * For values that end up in an error message or a warning - a record id, a
+ * format version. The CLI prints messages as they are, so a raw escape
+ * sequence there would run in the user's terminal: clear lines, rewrite
+ * what was printed above it, or set the clipboard. Names do not need this;
+ * `isSafeName` refuses them outright.
+ */
+export function printable(value: string, max = Infinity): string {
+    const cut = value.length > max ? `${value.slice(0, max)}...` : value;
+    return cut.replace(CONTROL_OR_BIDI_ALL, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/**
  * Is this a name we are willing to store, and to hand back as a path segment?
  *
  * This is the READ-side check as much as the write-side one, and the read side
@@ -94,9 +119,8 @@ export const MAX_NAME_BYTES = 255;
 export function isSafeName(name: string): boolean {
     if (!name || name === "." || name === "..") return false;
     if (name.includes("/") || name.includes(String.fromCharCode(92))) return false;
-    const CONTROL_OR_BIDI = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]");
     if (CONTROL_OR_BIDI.test(name)) return false;
-    return new TextEncoder().encode(name).length <= MAX_NAME_BYTES;
+    return utf8.encode(name).length <= MAX_NAME_BYTES;
 }
 
 export function assertValidName(name: string): void {

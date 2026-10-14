@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { makeVfs } from "./harness";
 import { globToRegExp } from "../../src/vfs/glob";
 import { VfsConflictError, VfsNotFoundError } from "../../src/vfs/types";
+import { VfsNamespace } from "../../src/vfs/VfsNamespace";
 
 describe("VFS — copy", () => {
     it("copies a file without moving any bytes", async () => {
@@ -152,6 +153,30 @@ describe("VFS — sweep", () => {
         expect(store.records.has("vfs/space")).toBe(true);
     });
 
+    it("asks the store for its own prefix only", async () => {
+        const { vfs, store } = makeVfs();
+        await vfs.writeFile("/a.txt", "a");
+        store.lists.length = 0;
+        await vfs.sweep();
+        expect(store.lists).toEqual(["vfs/"]);
+    });
+
+    it("still keeps to its namespace when the store ignores the prefix", async () => {
+        // A store written for the old no-argument list() returns every key.
+        const { vfs, store } = makeVfs();
+        await vfs.writeFile("/a.txt", "a");
+        store.records.set("chat-keys", { some: "blob" });
+        store.records.set("vfs/space", "space-id");
+        store.records.set("vfs/d/orphaned-by-a-race", { v: 1, iv: "x", ct: "y" });
+        store.list = async () => [...store.records.keys()];
+
+        const { removed } = await vfs.sweep();
+
+        expect(removed).toEqual(["vfs/d/orphaned-by-a-race"]);
+        expect(store.records.has("chat-keys")).toBe(true);
+        expect(store.records.has("vfs/space")).toBe(true);
+    });
+
     it("refuses to wipe records when the root reads as empty", async () => {
         // An empty root with orphans present is the shape of a FAILED LOAD.
         // Sweeping there would delete a tree we merely failed to reach.
@@ -227,6 +252,92 @@ describe("VFS — reclaiming storage", () => {
 
         await vfs.delete("/src", { recursive: true });
         expect(content.blobs.size).toBe(0);
+    });
+
+    it("releases a restored version once, not once per mention", async () => {
+        // restore() puts a version back without a second reference, so its
+        // manifest is in the entry AND in the history. Releasing per mention
+        // released that one reference twice - the second time, a copy's.
+        const { vfs, content } = makeVfs();
+        await vfs.writeFile("/a.txt", "v1");
+        await vfs.writeFile("/a.txt", "v2");
+        await vfs.restore("/a.txt", 0);
+        await vfs.copy("/a.txt", "/b.txt");
+
+        await vfs.delete("/a.txt");
+        expect(await vfs.readText("/b.txt")).toBe("v1");
+        expect([...content.blobs.values()].map((b) => b.refs)).toEqual([1]);
+    });
+
+    it("keeps the version a restore brings back, when it is the one a full history lets go of", async () => {
+        // restore() pushes the current version first, and with the history
+        // full that pushes the version being restored off the end: its one
+        // reference was released, and the entry then pointed at nothing.
+        for (const [limit, writes] of [[3, 4], [undefined, 21]] as const) {
+            const { vfs, content } = makeVfs({ historyLimit: limit });
+            for (let i = 1; i <= writes; i++) await vfs.writeFile("/a.txt", `v${i}`);
+            const versions = await vfs.history("/a.txt");
+            await vfs.restore("/a.txt", versions.length - 1);
+            expect(await vfs.readText("/a.txt"), `limit ${limit}`).toBe("v1");
+            // Every version is still named once: the entry, or the history.
+            expect([...content.blobs.values()].map((b) => b.refs)).toEqual(Array(writes).fill(1));
+        }
+    });
+
+    it("keeps a version history still lists when an older mention of it falls off the end", async () => {
+        // A restored version is in the history twice once the file is saved
+        // again. The older mention falling off released the one reference the
+        // newer mention depends on.
+        const { vfs } = makeVfs({ historyLimit: 3 });
+        await vfs.writeFile("/a.txt", "v1");
+        await vfs.writeFile("/a.txt", "v2");
+        await vfs.restore("/a.txt", 0);        // entry v1; history [v2, v1]
+        await vfs.writeFile("/a.txt", "v3");   // history [v1, v2, v1]
+        await vfs.writeFile("/a.txt", "v4");   // history [v3, v1, v2]: the older v1 falls off
+        expect(await vfs.history("/a.txt")).toHaveLength(3);
+        await vfs.restore("/a.txt", 1);
+        expect(await vfs.readText("/a.txt")).toBe("v1");
+    });
+
+    it("lets go of a version once when it falls off the end more than once in a save", async () => {
+        // A history longer than the limit - kept under a larger one, then
+        // opened with a smaller - can lose several versions to one save, and
+        // after a restore the same version more than once. Released per
+        // mention, it took the reference a copy holds.
+        const { vfs, store, content } = makeVfs();
+        await vfs.writeFile("/a.txt", "v1");
+        await vfs.copy("/a.txt", "/keep.txt");  // v1, a second reference
+        await vfs.writeFile("/a.txt", "v2");
+        await vfs.restore("/a.txt", 0);         // entry v1; history [v2, v1]
+        await vfs.writeFile("/a.txt", "v3");    // history [v1, v2, v1]
+        const smaller = new VfsNamespace({ store, content, seed: () => new Uint8Array(32).fill(7), historyLimit: 1 });
+        await smaller.writeFile("/a.txt", "v4"); // history [v3]: v1 goes twice
+        expect(await smaller.readText("/keep.txt")).toBe("v1");
+        const refs = new Map([...content.blobs.values()].map((b) => [new TextDecoder().decode(b.bytes), b.refs]));
+        expect(refs).toEqual(new Map([["v1", 1], ["v3", 1], ["v4", 1]]));
+    });
+
+    it("still lets go of a restored version once nothing names it", async () => {
+        const { vfs, content } = makeVfs({ historyLimit: 3 });
+        await vfs.writeFile("/a.txt", "v1");
+        await vfs.writeFile("/a.txt", "v2");
+        await vfs.restore("/a.txt", 0);        // entry v1; history [v2, v1]
+        for (let i = 3; i <= 6; i++) await vfs.writeFile("/a.txt", `v${i}`);
+        // Entry v6, history [v5, v4, v3]: v1 and v2 are named nowhere.
+        expect([...content.blobs.values()].map((b) => new TextDecoder().decode(b.bytes)).sort()).toEqual(["v3", "v4", "v5", "v6"]);
+        expect([...content.blobs.values()].map((b) => b.refs)).toEqual([1, 1, 1, 1]);
+    });
+
+    it("keeps content through a recursive delete asked to keep it", async () => {
+        // A checkout removes a directory that sits where a commit has a file,
+        // and commits still reference what was in it.
+        const { vfs, content } = makeVfs();
+        await vfs.writeFile("/src/a.txt", "a");
+        await vfs.writeFile("/src/deep/b.txt", "b");
+
+        await vfs.delete("/src", { recursive: true, keepContent: true });
+        expect(await vfs.exists("/src")).toBe(false);
+        expect(content.blobs.size).toBe(2);
     });
 
     it("keeps a copy's bytes alive when the original is deleted", async () => {

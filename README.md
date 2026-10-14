@@ -121,9 +121,8 @@ npm install @muhkoo/connect@alpha
 # or: yarn add @muhkoo/connect@alpha / pnpm add @muhkoo/connect@alpha
 ```
 
-Ask for the **`alpha`** tag explicitly. `latest` still points at the older
-`0.13.2-alpha.0` line, so a bare `npm install @muhkoo/connect` installs a build
-without the surface documented here. Two published builds are deprecated and
+The **`alpha`** and **`latest`** tags both point at the newest alpha, so a bare
+`npm install @muhkoo/connect` gets it too. Two published builds are deprecated and
 should not be pinned: `0.14.0-alpha.0` (reports the wrong version at runtime)
 and `0.14.0-alpha.3` (shipped with no type declarations, so every SDK type
 resolves to `any`).
@@ -395,6 +394,56 @@ that the remembered pairing lives on the auth origin only: `localStorage` is
 per-origin, so sharing a registrable domain buys an app nothing here, and the
 key that opens the seed is never handed to a developer app.
 
+### The encrypted filesystem (`client.vfs` / `client.vcs`)
+
+`client.vfs` is a filesystem of encrypted directory records, with file content
+written through `client.storage`. `client.vcs` is version control for one
+project at a time: `client.vcs.open(slug)` returns the repository for
+`/apps/<slug>`.
+
+```typescript
+await client.vfs.writeFile("/apps/my-app/src/index.ts", "export {};");
+const files = await client.vfs.walk("/apps/my-app");       // every file path, depth-first
+const all = await client.vfs.walkEntries("/apps/my-app");  // directories too, as VfsStat (0.14.0-alpha.9)
+
+const repo = client.vcs.open("my-app");
+await repo.status();
+await repo.commit("First commit");
+```
+
+**Read it as untrusted input.** Hosted sign-in hands the app the master seed, so
+every app a user signs into can write any directory record, history record or
+repository object in that user's filesystem, in shapes this SDK would never
+write. From 0.14.0-alpha.9, the SDK treats everything it
+reads back as untrusted. A record that used to crash, hang or quietly mislead it
+now throws a typed error, or is hidden with a `[muhkoo/vfs]` warning. Two new
+errors are exported from the package root:
+
+- **`VfsLimitError`**: a walk or copy would pass a ceiling (500,000 entries,
+  32,000,000 characters of path text, 64 directories deep, or one directory in
+  more than 4 places in a copy), or a write would put a directory more than 64
+  below the root. It is thrown rather than returning part of the tree, because
+  a sync reads a missing path as a deleted one. `limit` and `max` say which
+  ceiling; `at` says where it was reached.
+- **`VfsCorruptRecordError`**: a directory record does not decrypt, or is not a
+  shape this version reads. It is never read as an empty directory and never
+  skipped, and it is left exactly as stored. `id` is the record, `path` where it
+  was reached.
+
+The remedy for either is to remove what you do not recognise with a recursive
+delete: `client.vfs.delete(path, { recursive: true })`, or `muhkoo vfs rm -r
+<path>` from the CLI. Version control checks every object against its hash and
+throws `VcsError` for any repository record it cannot read. The new `repo.abortMerge()`
+clears a pending merge, including one whose record cannot be read, which would
+otherwise stop every commit. One behaviour change to note: `exists("/")` is now
+`true`, and it throws `VfsLockedError` while the filesystem is locked, where it
+used to answer `false`.
+
+This is a mitigation, not a fix: apps being handed the seed is still the root
+cause. The limits, messages and every behaviour change are listed under
+*Filesystem and version control* in [`API_REFERENCE.md`](./API_REFERENCE.md);
+[`CHANGELOG.md`](./CHANGELOG.md) says why each one changed.
+
 > The sections below document the lower-level building blocks the client is
 > composed from (`BroadcastChannel`, `EncryptedSession`, `PersonalSpaceClient`,
 > the Groth16 verifier, …). Reach for them directly only when you need control
@@ -489,7 +538,7 @@ app uses PBKDF2(password, "muhkoo-zk-v1:" + username) -> 32-byte seed ->
 HKDF-Expand for each material -> P-256 via `@noble/curves` -> Poseidon
 commitment.
 
-### Universal Groth16 verification (Workers / Node / browser)
+### Universal Groth16 verification (edge / Node / browser)
 
 ```typescript
 import {

@@ -390,7 +390,8 @@ export class FileStorage {
         const fetchInto = async (indexes: number[]): Promise<void> => {
             await this.runWithConcurrency(
                 indexes.map((i) => async () => {
-                    fetched[i] = await this.shards.getShard(manifest.shardHashes[i]);
+                    // The size keeps a batch of concurrent reads within what the server will send.
+                    fetched[i] = await this.shards.getShard(manifest.shardHashes[i], { size: manifest.shardSize });
                 }),
             );
         };

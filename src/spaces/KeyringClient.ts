@@ -9,17 +9,35 @@
  *   GET  /api/spaces/:id/keyring/pending        -> JoinRequest[]
  *   GET  /api/spaces/:id/keyring/roster         -> { memberId, identityEcdhPub }[]
  *   POST /api/spaces/:id/keyring/rotate         { nextEpoch } -> { epoch }
+ *   GET  /api/spaces/:id/keyring/log            ?since&limit -> { entries, head }
+ *   POST /api/spaces/:id/keyring/log            { entry, ec? } -> { ok, head }
+ *   GET  /api/spaces/:id/keyring/state          (status only)
  *   GET  /api/spaces/:id/metadata               -> SpaceMetadata
  */
 
 import type { KeyringTransport } from "./SpaceKeyring";
 import type { WrappedKey, JoinRequest, SpaceMetadata, RosterMember, InviteLink } from "./types";
+import type { EpochCommit, MembershipEntry, MlogHead } from "./trust/types";
+
+/** A keyring route answered non-2xx; status and JSON body preserved (the existing methods keep their plain Errors). */
+export class KeyringHttpError extends Error {
+    constructor(readonly status: number, readonly body: Record<string, unknown> | null, route: string) {
+        super(`KeyringClient ${route}: ${status}${body && typeof body.error === "string" ? ` ${body.error}` : ""}`);
+        this.name = "KeyringHttpError";
+    }
+}
 
 export interface KeyringClientDeps {
     spaceId: string;
     httpBaseUrl: string;
     /** Header-injecting fetch from the client's HttpClient. */
     fetch: typeof fetch;
+    /**
+     * The same fetch with the HttpClient's silent 401 recovery (`HttpClient.fetchWithRecovery`).
+     * `probeState` and the log routes use it, so a 401 reads as locked only once a re-auth has failed (design §6.9).
+     * Defaults to {@link fetch}.
+     */
+    fetchWithRecovery?: typeof fetch;
 }
 
 export class KeyringClient implements KeyringTransport {
@@ -43,6 +61,49 @@ export class KeyringClient implements KeyringTransport {
         const res = await this.deps.fetch(this.url(suffix));
         if (!res.ok) throw new Error(`KeyringClient GET ${suffix}: ${res.status} ${res.statusText}`);
         return (await res.json()) as T;
+    }
+
+    /**
+     * The log routes. Sent through `fetchWithRecovery` when given, as `probeState` is, so a stale session is
+     * re-established before a 401 reads as locked (design §6.9): a GET replays safely, and a POST body is a string.
+     */
+    private async request<T>(method: "GET" | "POST", suffix: string, body?: unknown): Promise<T> {
+        const res = await (this.deps.fetchWithRecovery ?? this.deps.fetch)(
+            this.url(suffix),
+            method === "POST"
+                ? { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+                : undefined,
+        );
+        const text = await res.text();
+        let json: Record<string, unknown> | null = null;
+        try { json = text ? (JSON.parse(text) as Record<string, unknown>) : null; } catch { json = null; }
+        if (!res.ok) throw new KeyringHttpError(res.status, json, `${method} ${suffix.split("?")[0]}`);
+        return json as T;
+    }
+
+    /** GET /keyring/log (design §3.6): entries with seq > since, ascending, ≤ limit; head null = no log. */
+    async fetchLog(since = -1, limit = 500): Promise<{ entries: MembershipEntry[]; head: MlogHead | null }> {
+        return this.request("GET", `/keyring/log?since=${since}&limit=${limit}`);
+    }
+
+    /** POST /keyring/log {entry, ec?} → {ok, head}; `409 {error:"Log moved", head}` (no code) on a compare-and-set miss. */
+    async postLogEntry(entry: MembershipEntry, ec?: EpochCommit): Promise<{ ok: true; head: MlogHead }> {
+        return this.request("POST", "/keyring/log", ec ? { entry, ec } : { entry });
+    }
+
+    /**
+     * Status of GET /keyring/state, or "network" when the request fails: 403 is not-member, 401 is locked,
+     * anything else resumes (design §6.9). Sent through `fetchWithRecovery` when given, so a stale session
+     * is re-established before a 401 is believed.
+     */
+    async probeState(): Promise<number | "network"> {
+        try {
+            const res = await (this.deps.fetchWithRecovery ?? this.deps.fetch)(this.url("/keyring/state"));
+            try { await res.text(); } catch { /* ignore */ }
+            return res.status;
+        } catch {
+            return "network";
+        }
     }
 
     async postJoinRequest(req: JoinRequest): Promise<void> {

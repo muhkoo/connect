@@ -36,9 +36,13 @@ import { SpaceNamespace } from "./namespaces/SpaceNamespace";
 import { AgentsNamespace } from "./namespaces/AgentsNamespace";
 import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
 import { AccessTokensNamespace } from "./namespaces/AccessTokensNamespace";
+import { AppNamespace } from "./namespaces/AppNamespace";
+import { TrustContext } from "./trust/TrustContext";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 import { VfsNamespace } from "../vfs/VfsNamespace";
 import { VcsNamespace } from "../vcs/VcsNamespace";
+import { listPersonalKeys } from "./personalList";
+import { drainLock, vfsCoordinator } from "./crossTab";
 
 /** Personal-space key holding the id of the space VFS content is written to. */
 const VFS_SPACE_KEY = "vfs/space";
@@ -54,6 +58,7 @@ import type { OfflineStore } from "../offline/store/OfflineStore";
 import { KvCache } from "../offline/KvCache";
 import { DbCache } from "../offline/DbCache";
 import { ShardClient } from "../storage/transport/ShardClient";
+import { commitManifest } from "../storage/transport/storageCommit";
 
 /** The hosted Muhkoo Accelerator — the default {@link ClientOptions.baseUrl}. */
 export const DEFAULT_BASE_URL = "https://api.muhkoo.dev";
@@ -173,12 +178,16 @@ export class Client {
     readonly message: MessageNamespace;
     /** Fan-out group spaces — `client.space.createSpace(...)`, etc. */
     readonly space: SpaceNamespace;
+    /** Trust records shared by every Space: pins and per-Space log heads (design §3.4, §6.9). */
+    readonly trust: { readonly persistent: boolean; unpin(username: string): Promise<void>; resetSpacePins(spaceId: string): Promise<void> };
     /** Programmable Agents — `client.agents.create(appId, …)`, etc. */
     readonly agents: AgentsNamespace;
     /** Serverless functions — `client.functions.deploy(appId, …)`, etc. */
     readonly functions: FunctionsNamespace;
     /** Access tokens — `client.accessTokens.create(appId, …)`, etc. */
     readonly accessTokens: AccessTokensNamespace;
+    /** This app — `client.app.access()`: may the signed-in user add data here? */
+    readonly app: AppNamespace;
     /** Offline cache + sync — `client.offline.status`, `client.offline.snapshot`, etc. */
     readonly offline: OfflineManager;
 
@@ -191,12 +200,16 @@ export class Client {
     private recoverInFlight: Promise<boolean> | null = null;
 
     constructor(options: ClientOptions = {}) {
-        // Build stamp — always logged (independent of logLevel) so the running
-        // build is identifiable in the console. Catches stale cached bundles
-        // during development; bump `VERSION` (and package.json) each build.
-        try {
-            console.info(`[@muhkoo/connect] initialized — v${VERSION}`);
-        } catch { /* console may be unavailable in some runtimes */ }
+        // Build stamp — logged (independent of logLevel) so the running build
+        // is identifiable in the console. Catches stale cached bundles during
+        // development; bump `VERSION` (and package.json) each build.
+        // Browser console only: in Node it lands on stdout, in front of a
+        // CLI's own output (`muhkoo kv ls --json | jq`).
+        if (typeof window !== "undefined" && typeof document !== "undefined") {
+            try {
+                console.info(`[@muhkoo/connect] initialized — v${VERSION}`);
+            } catch { /* console may be unavailable in some runtimes */ }
+        }
 
         if (options.logLevel && typeof globalThis.appLogger?.setLevel === "function") {
             globalThis.appLogger.setLevel(options.logLevel);
@@ -216,6 +229,8 @@ export class Client {
             store: offlineStore,
             session: this.session,
             enabled: offlineEnabled,
+            // Every tab of the origin shares the queue: one drains it at a time.
+            locks: drainLock(),
         });
 
         // Wrap fetch so every accelerator round-trip feeds the connectivity
@@ -305,14 +320,12 @@ export class Client {
                 if (!c) throw new Error("client.vfs: no session — sign in first.");
                 await this.http.del(`/api/personal/${encodeURIComponent(c)}/kv/${encodeURIComponent(key)}`);
             },
-            list: async () => {
+            list: async (prefix) => {
                 const c = this.session.commitment;
                 if (!c) throw new Error("client.vfs: no session — sign in first.");
-                const res = await this.http.post<{ keys: string[] }>(
-                    `/api/personal/${encodeURIComponent(c)}/list`,
-                    {},
-                );
-                return res?.keys ?? [];
+                // The server filters by prefix and pages. An older server ignores
+                // the prefix and returns every key, which is why callers filter.
+                return listPersonalKeys(this.http, `/api/personal/${encodeURIComponent(c)}/list`, prefix ?? "");
             },
         };
 
@@ -323,7 +336,7 @@ export class Client {
             if (!contentSpace) {
                 contentSpace = (async () => {
                     const existing = await personalStore.get(VFS_SPACE_KEY);
-                    if (typeof existing === "string" && existing) return this.space.get(existing);
+                    if (typeof existing === "string" && existing) return this.space.get(existing, "static", { messaging: false });
                     // `messaging: false` — this space only ever holds files, and
                     // file chunks carry their own keys, so it needs no group
                     // keyring and no socket. Creating it the normal way opens a
@@ -342,6 +355,9 @@ export class Client {
         this.vfs = new VfsNamespace({
             store: personalStore,
             seed: () => this.session.seed,
+            // Orders writes of a folder with this app's other tabs on the
+            // device - undefined outside a browser tab with Web Locks.
+            coordinator: vfsCoordinator(() => this.session.commitment),
             // Share the personal space's socket with `client.kv` rather than
             // opening a second one to the same Durable Object.
             subscribe: (handler) => this.kv.onRaw(handler),
@@ -351,21 +367,28 @@ export class Client {
                 // GC. `storage.writeFile` would additionally index the manifest
                 // in the space — a second, diverging source of truth for a file
                 // whose handle the VFS already holds.
-                write: async (data, meta) => {
+                write: async (data, meta, opts) => {
                     const space = await resolveContentSpace();
-                    const { manifest, stat } = await space.putFile(data, { name: meta.name, type: meta.type });
+                    const { manifest, stat } = await space.putFile(
+                        data,
+                        { name: meta.name, type: meta.type },
+                        { onProgress: opts?.onProgress },
+                    );
                     return { manifest, size: stat.size };
                 },
                 // Reads go through the manifest alone — no space needed. That is
                 // the capability path, so it keeps working for a file whose
                 // handle was shared from someone else's filesystem.
                 read: async (manifest) => (await this.storage.readByManifest(manifest)).data,
-                release: async (manifest) => {
-                    await (await resolveContentSpace()).releaseFile(manifest);
-                },
-                retain: async (manifest) => {
-                    await (await resolveContentSpace()).commitFile(manifest);
-                },
+                // A reference names only shards, so taking or dropping one needs
+                // no Space. Opening the content space here created it for a user
+                // who had never written a file: a checkout, a copy, a delete, or
+                // Cloud Drive's move of its pre-VFS files. A paid-only app refuses
+                // that creation for a Free user (accelerator spec
+                // 2026-10-06-paid-accounts-and-past-due, D12). Same body as
+                // `Space.commitFile`, so it is the same reference.
+                release: (manifest) => commitManifest(this.http.fetchWithRecovery, this.baseUrl, manifest, "release"),
+                retain: (manifest) => commitManifest(this.http.fetchWithRecovery, this.baseUrl, manifest, "commit"),
             },
         });
 
@@ -416,6 +439,17 @@ export class Client {
         };
         const chatKeys = new ChatKeyVault(chatKeyStore);
 
+        // Shared by every Space (and, in sub-project 4, DMs): the account's
+        // identity signer, the identity directory, and the pin/log-head store
+        // (design §3.4, §6.9). Built before `SpaceNamespace` so it can hand the
+        // namespace a reference to wire into each Space it builds.
+        const trustContext = new TrustContext({ http: this.http, session: this.session });
+        this.trust = {
+            get persistent() { return trustContext.persistent; },
+            unpin: (u) => trustContext.unpinUser(u),
+            resetSpacePins: (id) => trustContext.resetSpacePins(id),
+        };
+
         this.space = new SpaceNamespace({
             http: this.http,
             session: this.session,
@@ -424,10 +458,14 @@ export class Client {
             offline: this.offline,
             p2p: options.p2p,
             chatKeys,
+            trust: trustContext,
         });
         this.agents = new AgentsNamespace({ http: this.http });
         this.functions = new FunctionsNamespace({ http: this.http, fnHostSuffix: options.functionsHostSuffix });
         this.accessTokens = new AccessTokensNamespace({ http: this.http });
+        // Each "allowed" sends what the offline queue kept after a refusal for
+        // payment, without waiting for the next reconnect.
+        this.app = new AppNamespace({ http: this.http, onAllowed: () => this.offline.resume() });
 
         // Replay deferred shard uploads on reconnect. The bytes live in the
         // Cache API keyed by hash; re-PUT them through a (defer-free) shard
@@ -437,6 +475,7 @@ export class Client {
                 baseUrl: this.baseUrl,
                 pathPrefix: "/api/shards",
                 fetch: this.http.fetch,
+                fetchWithRecovery: this.http.fetchWithRecovery,
                 cache: this.offline.fileCache,
             });
             this.offline.registerReplayer("file", async (entry) => {

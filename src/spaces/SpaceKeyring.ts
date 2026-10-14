@@ -26,6 +26,7 @@ import {
     importEcdsaPublicKey,
 } from "./SpaceCipher";
 import type { EpochKeyProvider } from "./SpacePacketCipher";
+import type { ChatKeyCert, EpochCommit, MembershipEntry, MlogHead } from "./trust/types";
 
 /**
  * Reserved member id for the app's "keeper" — a trusted always-available member
@@ -64,6 +65,13 @@ export interface KeyringTransport {
     /** Add `username` to a private channel's membership allowlist. */
     invite(username: string): Promise<void>;
     fetchMetadata(): Promise<SpaceMetadata | null>;
+    // The three members below are optional, so a transport without them (the existing test transports) still type-checks.
+    /** GET /keyring/log (design §3.6): entries with seq > since, ascending, ≤ limit; head null = no log. */
+    fetchLog?(since?: number, limit?: number): Promise<{ entries: MembershipEntry[]; head: MlogHead | null }>;
+    /** POST /keyring/log {entry, ec?}. */
+    postLogEntry?(entry: MembershipEntry, ec?: EpochCommit): Promise<{ ok: true; head: MlogHead }>;
+    /** Status of GET /keyring/state, or "network" when the request fails. */
+    probeState?(): Promise<number | "network">;
 }
 
 /** PersonalSpace-backed cache of this member's group keys (epoch → base64 key). */
@@ -85,6 +93,10 @@ export interface SpaceKeyringDeps {
     transport: KeyringTransport;
     cache?: SpaceKeyCache;
     historyPolicy?: HistoryPolicy;
+    /** Mints the IK certificate for this member's chat keys (design §3.2). Absent, or resolving undefined, means none. */
+    keyCert?: () => Promise<ChatKeyCert | undefined>;
+    /** Whether a key may be wrapped to `memberId`; absent means anyone. On a signed Space: log members and the keeper only. */
+    canWrapTo?: (memberId: string) => boolean;
 }
 
 export class SpaceKeyring implements EpochKeyProvider {
@@ -101,9 +113,22 @@ export class SpaceKeyring implements EpochKeyProvider {
      *  this window won't re-fetch (the roster hasn't changed that fast); genuine
      *  membership changes use `{ force: true }` (join requests / history loads). */
     private static readonly DIR_COOLDOWN_MS = 5000;
+    private readonly keyListeners = new Set<() => void>();
 
     constructor(private readonly deps: SpaceKeyringDeps) {
         this.policy = deps.historyPolicy ?? "static";
+    }
+
+    /** Notified whenever this keyring gains a key (bootstrap, cache hit, pull). Returns an unsubscribe. */
+    onKeysChanged(h: () => void): () => void {
+        this.keyListeners.add(h);
+        return () => this.keyListeners.delete(h);
+    }
+
+    private notifyKeys(): void {
+        for (const h of this.keyListeners) {
+            try { h(); } catch { /* a listener's failure never breaks the keyring */ }
+        }
     }
 
     // -- member directory (for verifying sender signatures) -------------------
@@ -164,6 +189,16 @@ export class SpaceKeyring implements EpochKeyProvider {
         return this.keys.size > 0;
     }
 
+    /** The raw 32-byte group key for `epoch`, for its key commitment (design §4.2.4). */
+    rawKey(epoch: number): Uint8Array | undefined {
+        return this.keys.get(epoch);
+    }
+
+    /** Whether a key may be wrapped to `memberId` (design §4.5.1: on a signed Space, log members and the keeper only). */
+    canWrapTo(memberId: string): boolean {
+        return this.deps.canWrapTo ? this.deps.canWrapTo(memberId) : true;
+    }
+
     // -- lifecycle -------------------------------------------------------------
 
     /** Hydrate keys from the PersonalSpace cache, if available. Best-effort —
@@ -203,6 +238,7 @@ export class SpaceKeyring implements EpochKeyProvider {
         }
         this.epoch = Math.max(0, ...Array.from(this.keys.keys()));
         klog(`loadFromCache: HIT ${this.keys.size} epoch(s), current=${this.epoch}`);
+        this.notifyKeys();
         return true;
     }
 
@@ -232,6 +268,7 @@ export class SpaceKeyring implements EpochKeyProvider {
         this.keys.set(0, generateSpaceKey());
         this.epoch = 0;
         await this.persist();
+        this.notifyKeys();
     }
 
     // -- newcomer: request + pull ---------------------------------------------
@@ -239,14 +276,22 @@ export class SpaceKeyring implements EpochKeyProvider {
     /**
      * Post a join request so an online key-holder can wrap a key for us. Also
      * publishes our identity keys in the member directory (so others can verify
-     * our message signatures, and the keeper can wrap to us).
+     * our message signatures, and the keeper can wrap to us). With a `keyCert`
+     * dep it also carries the IK certificate over exactly those two strings.
      */
     async requestKey(desiredEpoch?: number): Promise<void> {
+        let keyCert: ChatKeyCert | undefined;
+        try {
+            keyCert = this.deps.keyCert ? await this.deps.keyCert() : undefined;
+        } catch {
+            keyCert = undefined; // step I never requires a certificate; the join still goes out (server brief §3)
+        }
         await this.deps.transport.postJoinRequest({
             memberId: this.deps.memberId,
             identityEcdhPub: this.deps.identityEcdhPub,
             identityEcdsaPub: this.deps.identityEcdsaPub,
             desiredEpoch,
+            ...(keyCert ? { keyCert } : {}),
         });
     }
 
@@ -272,6 +317,7 @@ export class SpaceKeyring implements EpochKeyProvider {
         if (added > 0) {
             this.epoch = Math.max(this.epoch, ...Array.from(this.keys.keys()));
             await this.persist();
+            this.notifyKeys();
         }
         klog(`pullKeys: +${added} epoch(s) (now hold ${this.keys.size}, current=${this.epoch})`);
         return added;
@@ -300,6 +346,7 @@ export class SpaceKeyring implements EpochKeyProvider {
      * `rotate` space they receive only the current epoch.
      */
     async admit(targetMemberId: string, identityEcdhPub: string): Promise<void> {
+        if (!this.canWrapTo(targetMemberId)) throw new Error(`SpaceKeyring: ${targetMemberId} is not a member of this space`);
         const recipient = await importEcdhPublicKey(identityEcdhPub);
         const epochs = this.policy === "static"
             ? Array.from(this.keys.keys())
@@ -321,6 +368,8 @@ export class SpaceKeyring implements EpochKeyProvider {
         const admitted: string[] = [];
         for (const req of pending) {
             if (req.memberId === this.deps.memberId) continue;
+            // The server's pending list still holds ex-members after a remove.
+            if (!this.canWrapTo(req.memberId)) continue;
             await this.admit(req.memberId, req.identityEcdhPub);
             admitted.push(req.memberId);
         }
@@ -339,6 +388,8 @@ export class SpaceKeyring implements EpochKeyProvider {
         this.epoch = nextEpoch;
         for (const m of members) {
             if (m.memberId === this.deps.memberId) continue;
+            // The roster keeps ex-members too; the same rule as admit applies to every wrap.
+            if (!this.canWrapTo(m.memberId)) continue;
             const recipient = await importEcdhPublicKey(m.identityEcdhPub);
             const wrapped = await wrapSpaceKey(newKey, nextEpoch, recipient);
             await this.deps.transport.postWrappedKey(m.memberId, wrapped, this.deps.memberId);

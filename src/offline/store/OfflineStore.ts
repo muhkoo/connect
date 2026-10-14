@@ -26,6 +26,14 @@ export interface QueueEntry {
     method: string;
     /** Serializable arguments captured at enqueue time. */
     args: unknown;
+    /**
+     * Whose write it is: the commitment of the user signed in when it was
+     * queued, stamped by `OutboundQueue.enqueue`. A drain sends only the
+     * signed-in user's entries, because every replayer builds its request
+     * from the session signed in when it runs. Absent on entries an older
+     * SDK queued, which any drain sends, as before.
+     */
+    commitment?: string;
 }
 
 export interface OfflineEntry<T> {

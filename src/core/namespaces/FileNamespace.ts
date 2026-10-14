@@ -167,6 +167,7 @@ export class StorageNamespace {
                 baseUrl: this.deps.baseUrl,
                 pathPrefix: "/api/shards",
                 fetch: this.deps.http.fetch,
+                fetchWithRecovery: this.deps.http.fetchWithRecovery,
                 cache: this.deps.shardCache,
                 deferUpload: this.deps.deferShardUpload,
             });

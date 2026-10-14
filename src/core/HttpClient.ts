@@ -20,6 +20,9 @@
  * accelerator directly.
  */
 
+import { HttpError } from "./HttpError";
+import { paymentRequiredFrom } from "./PaymentRequiredError";
+
 export interface HttpClientOptions {
     /** Absolute URL of the accelerator worker (trailing slash optional). */
     baseUrl: string;
@@ -50,9 +53,10 @@ export interface HttpClientOptions {
      * token) or `false` if it couldn't (the `401` propagates as an
      * {@link HttpError}). Wired by {@link Client} to `auth.zk.recover()`.
      *
-     * Only consulted by the JSON helpers (`get`/`post`/`del`); the raw
-     * {@link fetch} passes 401s straight through so the auth wire calls that
-     * power recovery itself can't recurse.
+     * Only consulted by the JSON helpers (`get`/`post`/`del`) and
+     * {@link HttpClient.fetchWithRecovery}; the raw {@link fetch} passes 401s
+     * straight through so the auth wire calls that power recovery itself
+     * can't recurse.
      */
     onUnauthorized?: () => Promise<boolean>;
 }
@@ -78,17 +82,9 @@ function reqPath(input: RequestInfo | URL): string {
     }
 }
 
-/** Thrown for any non-2xx accelerator response. Carries the HTTP status. */
-export class HttpError extends Error {
-    constructor(
-        message: string,
-        readonly status: number,
-        readonly body?: unknown,
-    ) {
-        super(message);
-        this.name = "HttpError";
-    }
-}
+// Moved to its own module so `PaymentRequiredError` can extend it; re-exported
+// here so every existing import of it from this module keeps working.
+export { HttpError } from "./HttpError";
 
 export class HttpClient {
     readonly baseUrl: string;
@@ -150,6 +146,23 @@ export class HttpClient {
         );
     };
 
+    /**
+     * {@link fetch} with the JSON helpers' stale-session recovery: a 401 on a
+     * request made while a session token is held runs `onUnauthorized` once
+     * and, if that recovered, replays the request once with the fresh token.
+     * The final response is returned whatever its status, never thrown. The
+     * replay re-sends `init` as given, so its body must be re-sendable (a
+     * string or bytes, not a stream).
+     */
+    readonly fetchWithRecovery: typeof fetch = async (input, init) => {
+        const res = await this.fetch(input, init);
+        // `onUnauthorized` is consulted at most once per call, so a replay that
+        // still 401s (recovery minted a token the endpoint still rejects) can't loop.
+        if (res.status !== 401 || !this.onUnauthorized || !this.getSessionToken()) return res;
+        if (!(await this.onUnauthorized())) return res;
+        return this.fetch(input, init);
+    };
+
     /** True when `input` resolves to {@link baseOrigin} (relative URLs always do). */
     private isSameOrigin(input: RequestInfo | URL): boolean {
         try {
@@ -185,24 +198,15 @@ export class HttpClient {
         return this.request<T>("DELETE", path, body);
     }
 
-    private async request<T>(method: string, path: string, body?: unknown, allowRecovery = true): Promise<T> {
+    private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
         const url = path.startsWith("http") ? path : `${this.baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
         const init: RequestInit = { method };
         if (body !== undefined) {
             init.headers = { "Content-Type": "application/json" };
             init.body = JSON.stringify(body);
         }
-        const res = await this.fetch(url, init);
-
-        // Stale session: try to silently re-auth and replay the request once.
-        // `allowRecovery` is cleared on the retry so a still-401 response (e.g.
-        // recovery minted a token the endpoint still rejects) can't loop.
-        if (res.status === 401 && allowRecovery && this.onUnauthorized && this.getSessionToken()) {
-            const recovered = await this.onUnauthorized();
-            if (recovered) {
-                return this.request<T>(method, path, body, false);
-            }
-        }
+        // Stale session: silently re-auth and replay the request once.
+        const res = await this.fetchWithRecovery(url, init);
 
         let parsed: unknown = null;
         try {
@@ -215,7 +219,9 @@ export class HttpClient {
                 parsed && typeof parsed === "object" && "error" in (parsed as object)
                     ? String((parsed as { error: unknown }).error)
                     : `${res.status} ${res.statusText}`;
-            throw new HttpError(msg, res.status, parsed);
+            // A refusal for payment is its own class, so an app can tell it from
+            // any other 4xx; every other error is the HttpError it always was.
+            throw paymentRequiredFrom(res.status, parsed) ?? new HttpError(msg, res.status, parsed);
         }
         return parsed as T;
     }

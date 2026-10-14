@@ -16,10 +16,18 @@ interface DehydratedKeys {
     ecdsaPriv: string; // ECDSA private key in JWK format
 }
 
+/** A member's own ECDH and ECDSA pairs, held outside the store until {@link KeyStore.replaceOwnKeyPair}. */
+interface OwnKeyPair {
+    ecdh: KeyPair;
+    ecdsa: AuthKeyPair;
+}
+
 class KeyStore {
     private static instance: KeyStore;
     private _keys: Map<string, KeyPair> = new Map();
     private _authKeys: Map<string, AuthKeyPair> = new Map();
+    /** The exact pairs marked vault-backed, so a pair written over them later is never taken for them. */
+    private _vaultBacked: Map<string, OwnKeyPair> = new Map();
 
     private constructor() { }
 
@@ -74,7 +82,38 @@ class KeyStore {
         appLogger.debug(`Stored remote public keys for ${id}: ecdhPub=${dehydrated.ecdhPub.slice(0, 16)}...`);
     }
 
+    /** Generate an own pair without touching the store; {@link replaceOwnKeyPair} puts it in place. */
+    public async generateKeyPair(): Promise<OwnKeyPair> {
+        const ecdh = await crypto.subtle.generateKey(
+            { name: 'ECDH', namedCurve: 'P-384' },
+            true,
+            ['deriveKey', 'deriveBits']
+        );
+        const ecdsa = await crypto.subtle.generateKey(
+            { name: 'ECDSA', namedCurve: 'P-384' },
+            true,
+            ['sign', 'verify']
+        );
+        return {
+            ecdh: { privateKey: ecdh.privateKey, publicKey: ecdh.publicKey },
+            ecdsa: { privateKey: ecdsa.privateKey, publicKey: ecdsa.publicKey },
+        };
+    }
+
     public async hydrateKeyPair(id: string, dehydrated: DehydratedKeys): Promise<void> {
+        const { ecdh, ecdsa } = await this.importKeyPair(dehydrated);
+        const existing = this._keys.get(id);
+        if (!existing || !existing.privateKey) {
+            this._keys.set(id, ecdh);
+        }
+        const existingAuth = this._authKeys.get(id);
+        if (!existingAuth || !existingAuth.privateKey) {
+            this._authKeys.set(id, ecdsa);
+        }
+    }
+
+    /** Import a dehydrated pair without touching the store; {@link replaceOwnKeyPair} puts it in place. */
+    public async importKeyPair(dehydrated: DehydratedKeys): Promise<OwnKeyPair> {
         const ecdhPubJwk = JSON.parse(deserialize(dehydrated.ecdhPub));
         const ecdhPublicKey = await crypto.subtle.importKey(
             'jwk',
@@ -113,14 +152,10 @@ class KeyStore {
                 ['sign']
             );
         }
-        const existing = this._keys.get(id);
-        if (!existing || !existing.privateKey) {
-            this._keys.set(id, { privateKey: ecdhPrivateKey, publicKey: ecdhPublicKey });
-        }
-        const existingAuth = this._authKeys.get(id);
-        if (!existingAuth || !existingAuth.privateKey) {
-            this._authKeys.set(id, { privateKey: ecdsaPrivateKey, publicKey: ecdsaPublicKey });
-        }
+        return {
+            ecdh: { privateKey: ecdhPrivateKey, publicKey: ecdhPublicKey },
+            ecdsa: { privateKey: ecdsaPrivateKey, publicKey: ecdsaPublicKey },
+        };
     }
 
     public getKeyPair(id: string): KeyPair | null {
@@ -131,12 +166,58 @@ class KeyStore {
         return this._authKeys.get(id) || null;
     }
 
+    /** Record that the pair `id` holds now came from the seed-wrapped vault (ChatKeyVault). */
+    public markVaultBacked(id: string): void {
+        const ecdh = this._keys.get(id);
+        const ecdsa = this._authKeys.get(id);
+        if (ecdh && ecdsa) this._vaultBacked.set(id, { ecdh, ecdsa });
+    }
+
+    /**
+     * Put `pair` in place as `id`'s own pair and mark it vault-backed, in one
+     * synchronous step: whatever `id` held before is dropped, so a pair minted
+     * while the vault pair was being fetched or generated is never kept and
+     * marked in its place (design §3.3).
+     */
+    public replaceOwnKeyPair(id: string, pair: OwnKeyPair): void {
+        this.forget(id);
+        this._keys.set(id, pair.ecdh);
+        this._authKeys.set(id, pair.ecdsa);
+        this._vaultBacked.set(id, { ecdh: pair.ecdh, ecdsa: pair.ecdsa });
+    }
+
+    /**
+     * Whether `id`'s own pair was loaded from, or persisted to, the vault in this
+     * tab, and is still the very pair that was marked. A Space identity must be
+     * vault-backed (design §3.3): any other pair, such as one minted by a locked
+     * DM subscription, never takes part, even one that lands over the marked pair.
+     */
+    public isVaultBacked(id: string): boolean {
+        const marked = this._vaultBacked.get(id);
+        return !!marked && marked.ecdh.privateKey != null
+            && this._keys.get(id) === marked.ecdh && this._authKeys.get(id) === marked.ecdsa;
+    }
+
+    /** Drop every key held for `id` (SpecA §6.4 `KeyStore.forget`). */
+    public forget(id: string): void {
+        this._keys.delete(id);
+        this._authKeys.delete(id);
+        this._vaultBacked.delete(id);
+    }
+
     public async dehydrateKeyPair(id: string): Promise<DehydratedKeys> {
         const keyPair = this._keys.get(id);
         const authKeyPair = this._authKeys.get(id);
         if (!keyPair || !authKeyPair) {
             throw new Error(`No key pair for ${id}`);
         }
+        return this.exportKeyPair({ ecdh: keyPair, ecdsa: authKeyPair });
+    }
+
+    /** Dehydrate a pair that is not (yet) in the store, in the same format as {@link dehydrateKeyPair}. */
+    public async exportKeyPair(pair: OwnKeyPair): Promise<DehydratedKeys> {
+        const keyPair = pair.ecdh;
+        const authKeyPair = pair.ecdsa;
         const ecdhPubJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
         const ecdhPrivJwk = keyPair.privateKey ? await crypto.subtle.exportKey('jwk', keyPair.privateKey) : null;
         const ecdsaPubJwk = await crypto.subtle.exportKey('jwk', authKeyPair.publicKey);

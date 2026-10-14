@@ -13,6 +13,7 @@ T ACL
 T ACLEntry
 T AccessTokenInfo
 T AccessTokensNamespaceDeps
+T AdmissionState
 T AgentConfig
 T AgentCreateInput
 T AgentDbToolMode
@@ -24,6 +25,8 @@ T AgentTrigger
 T AgentTriggerType
 T AgentUpdateInput
 T AgentsNamespaceDeps
+T AppAccess
+T AppNamespaceDeps
 T AttachedPeerNetwork
 T AuthClientOptions
 T AuthKeyPair
@@ -38,6 +41,7 @@ T BroadcastChannelOptions
 T CachedSpaceMessage
 T Change
 T ChannelLike
+T ChatKeyCert
 T ChunkKeyMaterial
 T ChunkManifest
 T CipherFrame
@@ -113,6 +117,8 @@ T LogEntry
 T LoginOptions
 T LwwMap
 T LwwRegister
+T MemberView
+T MembershipEntry
 T Merge3Result
 T MergeRegionConflict
 T MergeResult
@@ -145,6 +151,7 @@ T PacketOptions
 T PairedDevice
 T Participant
 T PasskeyEnrollment
+T PaymentRequiredCode
 T PeerBlockSource
 T PeerExchangeOptions
 T PeerId
@@ -190,6 +197,7 @@ T SpaceKeyringDeps
 T SpaceMessageEvent
 T SpaceNamespaceDeps
 T SpaceOfflineAdapter
+T SpaceTrustCode
 T StartDevicePairingOptions
 T StorageChangeEvent
 T StoreName
@@ -229,7 +237,9 @@ V AES_GCM_IV_BYTES
 V AES_GCM_KEY_BYTES
 V AES_GCM_TAG_BYTES
 V AccessTokensNamespace
+V AdmissionDeniedError
 V AgentsNamespace
+V AppNamespace
 V AuthClient
 V AuthHttpError
 V AuthNamespace
@@ -271,10 +281,13 @@ V HashKnowledge
 V HostedAuth
 V HttpClient
 V HttpError
+V IdentityLockedError
+V IdentityUnavailableError
 V IndexedDbStore
 V KEEPER_MEMBER_ID
 V KeyStore
 V KeyringClient
+V KeyringHttpError
 V KvCache
 V KvNamespace
 V LocalEngineHost
@@ -288,6 +301,8 @@ V MuhkooAgent
 V MuhkooDB
 V MuhkooFunction
 V MuhkooSpace
+V NOT_MEMBER_CLOSE_CODE
+V NOT_MEMBER_RECHECK_MS
 V NoopStore
 V OfflineLockedError
 V OfflineManager
@@ -300,6 +315,7 @@ V PINNED_CIRCUIT_DIGESTS
 V PREIMAGE_POK_VERIFICATION_KEY
 V Packet
 V PasskeyOriginError
+V PaymentRequiredError
 V PeerExchange
 V PeerNetwork
 V PersonalSpaceClient
@@ -324,6 +340,7 @@ V SpaceKeyring
 V SpaceNamespace
 V SpacePacketCipher
 V SpaceSignaler
+V SpaceTrustError
 V StorageNamespace
 V SyncEngine
 V VERSION
@@ -413,6 +430,7 @@ V isNumber
 V isOfflineCapable
 V isP2pCapable
 V isProvisional
+V isSameOriginPath
 V loadDeviceIdentity
 V log
 V manifestToStat

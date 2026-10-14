@@ -194,8 +194,10 @@ const REQUIRED_VALUES = [
     'AgentsNamespace',
     'FunctionsNamespace',
     'AccessTokensNamespace',
+    'AppNamespace',
     'HostedAuth',
     'HttpClient',
+    'PaymentRequiredError',
     'SessionState',
     'Space',
 ];
@@ -209,6 +211,8 @@ const REQUIRED_TYPES = [
     'DbWhereCondition',
     'VfsStat',
     'AuthUser',
+    'AppAccess',
+    'PaymentRequiredCode',
 ];
 
 /**

@@ -176,9 +176,10 @@ export class AuthClient {
     }
 
     /**
-     * Gated split-key OPRF evaluation (M2 — email/google factors). Requires a
-     * live `verifyToken` from {@link emailOtpVerify}; returns BOTH trust
-     * domains' evaluations. The recover token is consumed by this call.
+     * Gated OPRF evaluation (M2 — email/google factors). Requires a live
+     * `verifyToken` from {@link emailOtpVerify}; returns BOTH keys'
+     * evaluations (K1 and K2, both operated by Muhkoo). The recover token is
+     * consumed by this call.
      */
     async oprfEvaluateGated(
         username: string,

@@ -51,6 +51,14 @@ export * from "./events";
 export * from "./sessions";
 export * from "./transport";
 
+// A write the accelerator refused for payment: a 402 carrying one of three
+// codes. Server-side callers of the accelerator, Workers among them, meet it
+// too. Its module imports only `./core/HttpError`, which imports nothing, so it
+// adds no package to the Workers closure. Named, not starred: the module's
+// helpers are internal.
+export { PaymentRequiredError } from "./core/PaymentRequiredError";
+export type { PaymentRequiredCode } from "./core/PaymentRequiredError";
+
 // Universal Groth16 verification. Drives bn128.wasm directly, with no snarkjs /
 // ffjavascript dependency, so it runs anywhere WebAssembly does. This is the
 // reason the Workers build exists at all.

@@ -79,6 +79,15 @@ export interface HostedAuthDeps {
 
 const PKCE_STORE_KEY = "muhkoo.hosted.pkce";
 
+/**
+ * A same-origin path the app may be sent back to after sign-in. It starts with
+ * "/", not "//", and has no backslash or control characters (design §4.4.9).
+ */
+export function isSameOriginPath(p: unknown): p is string {
+    return typeof p === "string" && p.startsWith("/") && !p.startsWith("//") && !p.includes("\\")
+        && ![...p].some((c) => c.charCodeAt(0) < 0x20);
+}
+
 // ---- device pairing: constants (tv-device-pairing-spec.md §4.5, §9) --------
 
 /** RFC-8628-style backoff step applied on every `slow_down` (spec §9.1). */
@@ -278,12 +287,14 @@ export class HostedAuth {
      * (App side) Begin hosted login: stash a PKCE verifier + state, then send
      * the browser to the hosted authorize page. Returns the URL it redirects to
      * (also useful for popup mode / tests). `redirectUri` must be registered for
-     * the app in the portal.
+     * the app in the portal. `returnTo`, a same-origin path, rides the stash and
+     * comes back from {@link handleCallback}; anything else is refused here.
      */
-    async login(opts: { appId: string; redirectUri: string; redirect?: boolean; prompt?: "login" }): Promise<string> {
+    async login(opts: { appId: string; redirectUri: string; redirect?: boolean; prompt?: "login"; returnTo?: string }): Promise<string> {
+        if (opts.returnTo !== undefined && !isSameOriginPath(opts.returnTo)) throw new Error('returnTo must be a same-origin path (start with "/", not "//").');
         const { codeVerifier, codeChallenge } = await generatePkce();
         const state = randomState();
-        this.store({ codeVerifier, state, appId: opts.appId, redirectUri: opts.redirectUri });
+        this.store({ codeVerifier, state, appId: opts.appId, redirectUri: opts.redirectUri, ...(opts.returnTo ? { returnTo: opts.returnTo } : {}) });
         const params: Record<string, string> = {
             app_id: opts.appId,
             redirect_uri: opts.redirectUri,
@@ -327,9 +338,10 @@ export class HostedAuth {
     /**
      * (App side) Complete login on the callback URL: verify state, exchange the
      * code (+ PKCE verifier) for the session, unseal the seed from the fragment,
-     * establish the session, and scrub the URL. Returns the signed-in user.
+     * establish the session, and scrub the URL. Returns the signed-in user, with
+     * the `returnTo` passed to {@link login} when it is still a same-origin path.
      */
-    async handleCallback(): Promise<AuthUser> {
+    async handleCallback(): Promise<AuthUser & { returnTo?: string }> {
         const loc = this.location();
         const query = new URLSearchParams(loc.search);
         const code = query.get("code");
@@ -349,7 +361,8 @@ export class HostedAuth {
         this.deps.session.setSeed(seed);
 
         this.scrubUrl();
-        return { username: res.username, commitment: res.commitment };
+        const returnTo = isSameOriginPath(stash.returnTo) ? stash.returnTo : undefined;
+        return { username: res.username, commitment: res.commitment, ...(returnTo ? { returnTo } : {}) };
     }
 
     /**
@@ -999,13 +1012,13 @@ export class HostedAuth {
         return loc;
     }
 
-    private store(v: { codeVerifier: string; state: string; appId: string; redirectUri: string }): void {
+    private store(v: { codeVerifier: string; state: string; appId: string; redirectUri: string; returnTo?: string }): void {
         const ss = (globalThis as { sessionStorage?: Storage }).sessionStorage;
         if (!ss) throw new Error("Hosted auth requires sessionStorage.");
         ss.setItem(PKCE_STORE_KEY, JSON.stringify(v));
     }
 
-    private take(): { codeVerifier: string; state: string; appId: string; redirectUri: string } | null {
+    private take(): { codeVerifier: string; state: string; appId: string; redirectUri: string; returnTo?: string } | null {
         const ss = (globalThis as { sessionStorage?: Storage }).sessionStorage;
         if (!ss) return null;
         const raw = ss.getItem(PKCE_STORE_KEY);

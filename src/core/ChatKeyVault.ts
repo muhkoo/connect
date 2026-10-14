@@ -51,49 +51,70 @@ export interface ChatKeyStore {
 /** Personal-space key holding the seed-wrapped, dehydrated ratchet keypair. */
 export const CHAT_KEYS_KEY = "chat-keys";
 
+/**
+ * The saved blob was read but does not unwrap, parse or import under this
+ * seed: it is damaged, or was saved under another seed. Unlike a store
+ * failure, retrying with the same seed fails the same way (design §9.2 I8).
+ */
+export class ChatKeysUnreadableError extends Error {
+    constructor(readonly reason: unknown) {
+        super("The saved chat keys do not unwrap under this seed.");
+        this.name = "ChatKeysUnreadableError";
+    }
+}
+
 export class ChatKeyVault {
     constructor(private readonly store: ChatKeyStore) {}
 
     /**
-     * Register-time: ensure a keypair exists for `memberId`, seed-wrap the
-     * dehydrated form, and persist it to the personal space. Idempotent — reuses
-     * an existing in-tab keypair rather than minting a second one.
+     * Register-time: ensure a vault-backed keypair exists for `memberId`,
+     * seed-wrap it and persist it. Idempotent for a pair that is already
+     * vault-backed. Otherwise a fresh pair is generated, persisted, and only
+     * then swapped in, replacing whatever the tab held: a throwaway key is never
+     * persisted as the stable one, and a failed persist leaves the tab's keys
+     * as they were, with nothing marked.
      */
     async provision(memberId: string, seedSecret: string): Promise<void> {
         const ks = KeyStore.getInstance();
-        if (!ks.getKeyPair(memberId)) {
-            try {
-                await ks.generateOwnKeyPair(memberId);
-            } catch (e) {
-                if (!String((e as Error)?.message ?? e).includes("already exists")) throw e;
-            }
-        }
-        const dehydrated = await ks.dehydrateKeyPair(memberId);
+        const fresh = ks.isVaultBacked(memberId) ? null : await ks.generateKeyPair();
+        const dehydrated = fresh ? await ks.exportKeyPair(fresh) : await ks.dehydrateKeyPair(memberId);
         const plaintext = new TextEncoder().encode(JSON.stringify(dehydrated));
         await this.store.put(CHAT_KEYS_KEY, await wrapWithPassphrase(seedSecret, plaintext));
+        if (fresh) ks.replaceOwnKeyPair(memberId, fresh);
         vlog(`provision: minted+persisted keypair fp=${await fingerprint(memberId)}`);
     }
 
     /**
-     * Sign-in / unlock time: fetch the wrapped blob, unwrap with the seed, and
-     * hydrate the `KeyStore` — restoring the SAME keypair the member had before.
-     * Returns `true` when a keypair is now in hand (already present or hydrated),
-     * `false` when there's no blob yet (a brand-new member → caller provisions).
-     * Throws only on a genuine unwrap failure (wrong secret / tampered blob).
+     * Sign-in / unlock time: fetch the wrapped blob, unwrap it with the seed, and
+     * hydrate the `KeyStore`, restoring the SAME keypair the member had before.
+     * Returns `true` when a vault-backed keypair is now in hand, and `false` when
+     * there is no blob yet (a brand-new member; the caller provisions). A store
+     * failure propagates as thrown; a blob that does not unwrap, parse or import
+     * throws `ChatKeysUnreadableError`. Nothing in the `KeyStore` changes until
+     * the saved pair is imported; it then replaces whatever pair the tab held,
+     * in one step, so a pair minted meanwhile is never kept in its place.
      */
     async rehydrate(memberId: string, seedSecret: string): Promise<boolean> {
-        // Already unlocked in this tab — nothing to do.
-        if (KeyStore.getInstance().getKeyPair(memberId)?.privateKey) return true;
+        const ks = KeyStore.getInstance();
+        if (ks.isVaultBacked(memberId)) return true;
         const wrapped = await this.store.get(CHAT_KEYS_KEY);
         if (!wrapped) {
             vlog("rehydrate: no chat-keys blob (new member → will provision)");
             return false;
         }
-        const bytes = await unwrapWithPassphrase(seedSecret, wrapped);
-        const dehydrated = JSON.parse(new TextDecoder().decode(bytes));
-        await KeyStore.getInstance().hydrateKeyPair(memberId, dehydrated);
+        ks.replaceOwnKeyPair(memberId, await this.unwrapPair(seedSecret, wrapped));
         vlog(`rehydrate: HIT — restored stable keypair fp=${await fingerprint(memberId)}`);
         return true;
+    }
+
+    /** Unwrap, parse and import a saved pair, outside the `KeyStore`. */
+    private async unwrapPair(seedSecret: string, wrapped: WrappedPayload) {
+        try {
+            const bytes = await unwrapWithPassphrase(seedSecret, wrapped);
+            return await KeyStore.getInstance().importKeyPair(JSON.parse(new TextDecoder().decode(bytes)));
+        } catch (e) {
+            throw new ChatKeysUnreadableError(e);
+        }
     }
 
     /**

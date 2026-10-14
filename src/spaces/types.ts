@@ -8,6 +8,8 @@
  * staying blind to their contents.
  */
 
+import type { ChatKeyCert } from "./trust/types";
+
 /**
  * How a space treats history across membership changes.
  *  - `static`: one group key for all time (epoch 0). New members can read the
@@ -58,6 +60,8 @@ export interface JoinRequest {
     /** Epoch the newcomer wants a key for (defaults to current). */
     desiredEpoch?: number;
     ts?: number;
+    /** The account IK's certificate over the two identity strings above (design §3.2). Optional: a join never requires one. */
+    keyCert?: ChatKeyCert;
 }
 
 /**

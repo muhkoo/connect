@@ -7,6 +7,8 @@ import { SyncEngine } from "../../src/offline/SyncEngine";
 import { ConnectivityManager } from "../../src/offline/ConnectivityManager";
 import { HttpError } from "../../src/core/HttpClient";
 import { pack } from "../../src/offline/clock/HlcTimestamp";
+import { EventCore, EventCoreEvents } from "../../src/events/EventCore";
+import { AdmissionDeniedError, IdentityLockedError } from "../../src/spaces/trust/errors";
 
 beforeEach(() => {
     globalThis.indexedDB = new IDBFactory();
@@ -44,6 +46,44 @@ describe("OutboundQueue", () => {
         await queue.drain();
         expect(ok).toEqual([2]); // the 4xx entry was dropped, the next one ran
         expect(await queue.pending()).toBe(0);
+    });
+
+    it.each(["not-member", "identity-mismatch"] as const)(
+        "drops a Space frame whose Space refused this member (%s), reports it, and keeps draining",
+        async (code) => {
+            const store = new IndexedDbStore();
+            const queue = new OutboundQueue(store);
+            const ok: string[] = [];
+            queue.register("space", async () => {
+                throw new AdmissionDeniedError(code);
+            });
+            queue.register("kv", async () => void ok.push("kv"));
+            await queue.enqueue({ hlc: pack(1, 0, "n"), clientId: "c", domain: "space", method: "sendRaw", args: {} });
+            await queue.enqueue({ hlc: pack(2, 0, "n"), clientId: "c", domain: "kv", method: "set", args: {} });
+            const errors: unknown[] = [];
+            const onError = (e: CustomEvent) => errors.push(e.detail);
+            EventCore.on(EventCoreEvents.SYNC_ERROR, onError);
+            try {
+                await queue.drain();
+            } finally {
+                EventCore.off(EventCoreEvents.SYNC_ERROR, onError);
+            }
+            expect(ok).toEqual(["kv"]); // the refused frame did not block the next domain's write
+            expect(await queue.pending()).toBe(0);
+            expect(errors).toEqual([expect.objectContaining({ domain: "space", method: "sendRaw", dropped: true })]);
+        },
+    );
+
+    it("keeps a Space frame refused because the session is locked, for after sign-in", async () => {
+        const store = new IndexedDbStore();
+        const queue = new OutboundQueue(store);
+        queue.register("space", async () => {
+            throw new IdentityLockedError();
+        });
+        await queue.enqueue({ hlc: pack(1, 0, "n"), clientId: "c", domain: "space", method: "sendRaw", args: {} });
+
+        await expect(queue.drain()).rejects.toBeInstanceOf(IdentityLockedError);
+        expect(await queue.pending()).toBe(1);
     });
 
     it("stops on a transient (network) failure and keeps the entry", async () => {

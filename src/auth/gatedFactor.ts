@@ -1,11 +1,17 @@
 /**
- * Verification-gated vault factors (M2 — email, later Google).
+ * Verification-gated vault factors (M2 — email and Google).
  *
  * These factors have NO client-side secret: the user proves *channel control*
- * (an email OTP) and the server releases a split-key OPRF evaluation —
- * `wrapKey = HKDF( OPRF(K1, input) ‖ OPRF(K2, input) )` where K1 lives on the
- * accelerator and K2 in a separate trust domain, so no single server-side
- * compromise can derive the wrap key offline. See accelerator
+ * (an email OTP, or a verified Google ID token) and the server releases a
+ * two-key OPRF evaluation —
+ * `wrapKey = HKDF( OPRF(K1, input) ‖ OPRF(K2, input) )`. Both keys are
+ * operated by Muhkoo (K1 is the accelerator's `OPRF_KEY`), and the accelerator
+ * relays K2's evaluation to the client verbatim, which folds it in with no
+ * verification. So the fold protects a stolen vault blob against outside
+ * attackers only — not against the operator, and not against an accelerator
+ * compromise. Muhkoo can recover the seed of any account with a gated factor;
+ * the hosted sign-in UI discloses this, and custom enroll UIs must too. See
+ * `docs/superpowers/specs/2026-09-25-vault-poprf-design.md` §2.4, and accelerator
  * `AUTH_M2_PLAN.md` §1; the canonical reference implementation is
  * accelerator `tests/gated-oprf.test.ts` — keep these derivations in
  * byte-exact lockstep with it.

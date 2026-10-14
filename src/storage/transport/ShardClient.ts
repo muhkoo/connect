@@ -20,6 +20,7 @@
  */
 
 import { toHex } from "../../utilities/bytes";
+import { paymentRequiredFrom } from "../../core/PaymentRequiredError";
 
 /**
  * How long concurrent shard reads are gathered before one batch is sent.
@@ -31,6 +32,40 @@ const SHARD_BATCH_WINDOW_MS = 6;
 
 /** Hashes per batch. Must not exceed what the server will accept. */
 const SHARD_BATCH_MAX = 256;
+
+/**
+ * Expected response bytes per batch, which a batch is split to stay under.
+ *
+ * The server refuses a batch above 24 MiB of shard bytes with a 413, and the
+ * reads in a refused batch fail. Counting hashes alone, about 25 one-MiB
+ * shards in one window - a few large files read at once - drew it. This
+ * leaves the server's ceiling well clear.
+ */
+const SHARD_BATCH_BUDGET_BYTES = 16 * 1024 * 1024;
+
+/** An entry's JSON around its base64: the quoted hash, a colon, quotes and a comma, rounded up. */
+const SHARD_BATCH_ENTRY_BYTES = 128;
+
+/**
+ * What a shard adds to a batch's response: base64 is 4 bytes for every 3.
+ *
+ * A shard whose size the caller did not give counts as its entry alone, so
+ * reads without sizes batch by count, as they always have — kept for the
+ * pinned "many concurrent reads → ONE request" test
+ * (`shard-batching.test.ts`). No SDK read path is size-less today:
+ * `FileStorage.readChunk` always passes `shardSize`. The server reads and
+ * base64-encodes every shard before it checks the total
+ * (`ShardsController.ts`), so a very large size-less batch can fail with a
+ * 5xx before the client ever sees a 413. The split in `sendShardBatch` is a
+ * best-effort net for that case, not a guarantee.
+ */
+function batchCost(size: number | undefined): number {
+    const bytes = typeof size === "number" && Number.isFinite(size) && size > 0 ? size : 0;
+    return Math.ceil(bytes / 3) * 4 + SHARD_BATCH_ENTRY_BYTES;
+}
+
+/** One caller of `getShard`, waiting on a batch. */
+type ShardWaiter = { resolve: (v: Uint8Array | null) => void; reject: (e: unknown) => void };
 
 /** Decode base64 without `atob`'s per-character loop cost on large shards. */
 function bytesFromBase64(b64: string): Uint8Array {
@@ -84,6 +119,15 @@ export interface ShardClientOptions {
      * Provided so callers can inject retries / auth / instrumentation.
      */
     fetch?: typeof fetch;
+    /**
+     * The same fetch with the client's silent re-authentication
+     * (`HttpClient.fetchWithRecovery`), used for uploads only. A paid-only
+     * app refuses a PUT made with a dead session with `401 session_required`;
+     * through this, the session is re-established once and the PUT sent
+     * again, which is safe because its bytes can be sent twice. Reads keep
+     * {@link fetch}. Defaults to {@link fetch}.
+     */
+    fetchWithRecovery?: typeof fetch;
     /**
      * Optional offline byte cache. When present, GETs are served cache-first and
      * populated on success, and PUTs write the cache before the network so a
@@ -139,9 +183,11 @@ export class ShardClient {
     private readonly baseUrl: string;
     private readonly pathPrefix: string;
     private readonly fetchFn: typeof fetch;
+    /** What a PUT goes through: {@link ShardClientOptions.fetchWithRecovery} when given, else {@link fetchFn}. */
+    private readonly putFn: typeof fetch;
     private readonly cache?: ShardByteCache;
-    /** Hashes waiting for the next batch, each with everyone awaiting it. */
-    private pendingShards!: Map<string, Array<{ resolve: (v: Uint8Array | null) => void; reject: (e: unknown) => void }>>;
+    /** Hashes waiting for the next batch, each with everyone awaiting it and its size if a caller gave it. */
+    private pendingShards!: Map<string, { size?: number; waiters: ShardWaiter[] }>;
     private batchTimer!: ReturnType<typeof setTimeout> | null;
     /** False once the server is known not to have the batch route. */
     private batchSupported!: boolean;
@@ -163,6 +209,7 @@ export class ShardClient {
             throw new Error("ShardClient: `globalThis.fetch` is unavailable; pass an explicit fetch.");
         }
         this.fetchFn = f.bind(globalThis);
+        this.putFn = opts.fetchWithRecovery ?? this.fetchFn;
         this.cache = opts.cache;
         // Coalescing state. `batchSupported` latches false against a deployment
         // without the batch route, so we degrade once rather than per request.
@@ -206,7 +253,7 @@ export class ShardClient {
         }
         let response: Response;
         try {
-            response = await this.fetchFn(url, {
+            response = await this.putFn(url, {
                 method: "PUT",
                 headers: { "content-type": "application/octet-stream" },
                 // BufferSource is what fetch's body expects; a Uint8Array satisfies it.
@@ -223,7 +270,10 @@ export class ShardClient {
         }
         if (!response.ok) {
             const text = await safeText(response);
-            throw new Error(`ShardClient.putShard(${hash}) failed (${response.status}): ${text}`);
+            // Refused for payment: its own class, which the offline queue keeps
+            // and an app can tell from any other failure.
+            throw paymentRequiredFrom(response.status, text)
+                ?? new Error(`ShardClient.putShard(${hash}) failed (${response.status}): ${text}`);
         }
         let dedup = false;
         try {
@@ -266,29 +316,33 @@ export class ShardClient {
     /** PUT the shard bytes to origin, verifying the server accepted them.
      *  Used by the background-upload path; throws on network/HTTP failure. */
     private async uploadToOrigin(url: string, hash: string, bytes: Uint8Array): Promise<void> {
-        const response = await this.fetchFn(url, {
+        const response = await this.putFn(url, {
             method: "PUT",
             headers: { "content-type": "application/octet-stream" },
             body: bytes as BodyInit,
         });
         if (!response.ok) {
             const text = await safeText(response);
-            throw new Error(`ShardClient.putShard(${hash}) failed (${response.status}): ${text}`);
+            throw paymentRequiredFrom(response.status, text)
+                ?? new Error(`ShardClient.putShard(${hash}) failed (${response.status}): ${text}`);
         }
     }
 
     /**
      * Fetch a shard by hash. Throws if the server returns a non-200; returns
      * `null` for 404 so callers can distinguish "missing" from "errored".
+     *
+     * `size`, the shard's byte length when known (a manifest's `shardSize`),
+     * lets concurrent reads be batched within what the server will send.
      */
-    async getShard(hash: string): Promise<Uint8Array | null> {
+    async getShard(hash: string, opts: { size?: number } = {}): Promise<Uint8Array | null> {
         // Cache-first: a hit is content-verified by construction (key == hash).
         if (this.cache) {
             const cached = await this.cache.get(hash);
             if (cached) return cached;
         }
         // No peers → straight to origin.
-        if (!this.peers) return this.fetchFromOrigin(hash);
+        if (!this.peers) return this.fetchFromOrigin(hash, opts.size);
 
         // HEDGED RACE: prefer a peer (saves origin egress) but never let a slow
         // or missing peer stall delivery — give the peer a short head start, then
@@ -311,7 +365,7 @@ export class ShardClient {
                 if (originStarted || done) return;
                 originStarted = true;
                 if (timer) { clearTimeout(timer); timer = null; }
-                this.fetchFromOrigin(hash).then(win, fail);
+                this.fetchFromOrigin(hash, opts.size).then(win, fail);
             };
             timer = setTimeout(startOrigin, HEDGE_MS);
             peers.getBlock(hash).then(
@@ -347,12 +401,16 @@ export class ShardClient {
      * Falls back permanently to one-at-a-time if the server has no batch route,
      * so a new SDK keeps working against an older deployment.
      */
-    private fetchFromOrigin(hash: string): Promise<Uint8Array | null> {
+    private fetchFromOrigin(hash: string, size?: number): Promise<Uint8Array | null> {
         if (!this.batchSupported) return this.fetchOneFromOrigin(hash);
         return new Promise<Uint8Array | null>((resolve, reject) => {
-            const waiting = this.pendingShards.get(hash);
-            if (waiting) { waiting.push({ resolve, reject }); return; }
-            this.pendingShards.set(hash, [{ resolve, reject }]);
+            const pending = this.pendingShards.get(hash);
+            if (pending) {
+                pending.waiters.push({ resolve, reject });
+                pending.size ??= size;
+                return;
+            }
+            this.pendingShards.set(hash, { size, waiters: [{ resolve, reject }] });
             if (this.batchTimer === null) {
                 this.batchTimer = setTimeout(() => { void this.flushShardBatch(); }, SHARD_BATCH_WINDOW_MS);
             }
@@ -364,18 +422,31 @@ export class ShardClient {
         this.batchTimer = null;
         if (this.pendingShards.size === 0) return;
 
-        const hashes = [...this.pendingShards.keys()].slice(0, SHARD_BATCH_MAX);
-        const waiters = hashes.map((h) => {
-            const w = this.pendingShards.get(h)!;
-            this.pendingShards.delete(h);
-            return [h, w] as const;
-        });
-        // Anything over the cap waits for the next window rather than being
-        // dropped or silently truncated.
+        // As many as fit: at most SHARD_BATCH_MAX hashes, and a response
+        // expected to stay within SHARD_BATCH_BUDGET_BYTES. One that does not
+        // fit is skipped for a smaller one behind it. The first always goes,
+        // so a shard over the budget by itself is fetched alone.
+        const waiters: Array<readonly [string, ShardWaiter[]]> = [];
+        let cost = 0;
+        for (const [h, pending] of this.pendingShards) {
+            if (waiters.length === SHARD_BATCH_MAX) break;
+            const next = batchCost(pending.size);
+            if (waiters.length > 0 && cost + next > SHARD_BATCH_BUDGET_BYTES) continue;
+            waiters.push([h, pending.waiters]);
+            cost += next;
+        }
+        for (const [h] of waiters) this.pendingShards.delete(h);
+        // Anything over the cap or the budget waits for the next window
+        // rather than being dropped or silently truncated.
         if (this.pendingShards.size > 0 && this.batchTimer === null) {
             this.batchTimer = setTimeout(() => { void this.flushShardBatch(); }, SHARD_BATCH_WINDOW_MS);
         }
+        await this.sendShardBatch(waiters);
+    }
 
+    /** POST one batch and settle everyone waiting on it. Never throws. */
+    private async sendShardBatch(waiters: ReadonlyArray<readonly [string, ShardWaiter[]]>): Promise<void> {
+        const hashes = waiters.map(([h]) => h);
         let shards: Record<string, string>;
         try {
             const res = await this.fetchFn(`${this.baseUrl}${this.pathPrefix}/batch`, {
@@ -383,6 +454,21 @@ export class ShardClient {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ hashes }),
             });
+            if (res.status === 413 && waiters.length > 1) {
+                // Too large for the server after all: a size was not given,
+                // or was wrong. Ask for each half on its own. Halving reaches
+                // one hash per batch within log2(n) levels, and one hash the
+                // server refuses is an error like any other, below.
+                // Release the body first: under undici (the CLI, Node), an
+                // unread body holds the connection until garbage collection.
+                await res.body?.cancel().catch(() => {});
+                const half = Math.ceil(waiters.length / 2);
+                await Promise.all([
+                    this.sendShardBatch(waiters.slice(0, half)),
+                    this.sendShardBatch(waiters.slice(half)),
+                ]);
+                return;
+            }
             if (res.status === 404 || res.status === 405) {
                 // No batch route on this deployment. Stop trying, and serve
                 // everyone individually — including the batch we just gathered.

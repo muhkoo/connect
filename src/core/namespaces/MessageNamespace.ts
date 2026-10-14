@@ -153,6 +153,7 @@ export class MessageNamespace {
             wsBaseUrl: this.deps.wsBaseUrl,
             httpBaseUrl: this.deps.http.baseUrl,
             fetch: this.deps.http.fetch,
+            fetchWithRecovery: this.deps.http.fetchWithRecovery,
             myId: () => this.myId(),
             fetchTicket: () => this.fetchTicket(),
         });

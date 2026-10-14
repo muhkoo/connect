@@ -21,6 +21,7 @@
  */
 
 import type { FileManifest, FileStat } from "../types";
+import { paymentRequiredFrom } from "../../core/PaymentRequiredError";
 
 export interface SharedSpaceClientOptions {
     /** Base URL of the accelerator (e.g. `https://api.muhkoo.dev`). */
@@ -102,6 +103,9 @@ async function parseOrThrow<T>(response: Response, op: string): Promise<T> {
         // non-JSON body
     }
     if (!response.ok) {
+        // A manifest write refused for payment (a gated Space write): its own class.
+        const refused = paymentRequiredFrom(response.status, parsed);
+        if (refused) throw refused;
         const msg =
             parsed && typeof parsed === "object" && "error" in (parsed as object)
                 ? String((parsed as { error: unknown }).error)

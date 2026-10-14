@@ -27,7 +27,12 @@ import type { OfflineManager } from "../../offline/OfflineManager";
 import { SpaceCache } from "../../offline/SpaceCache";
 import { PeerNetwork } from "../../p2p/PeerNetwork";
 import { isP2pCapable } from "../../p2p/detect";
-import type { ChatKeyVault } from "../ChatKeyVault";
+import { ChatKeysUnreadableError, type ChatKeyVault } from "../ChatKeyVault";
+import { IdentityLockedError, IdentityUnavailableError } from "../trust/errors";
+import type { TrustContext } from "../trust/TrustContext";
+import { mintKeyCert } from "../../spaces/trust/chatCert";
+import { LogSync, logCanWrapTo } from "../../spaces/trust/LogSync";
+import type { ChatKeyCert } from "../../spaces/trust/types";
 import { toBase64 } from "../../utilities";
 
 /** Thrown by `joinChannel` when no channel with that name is registered. */
@@ -58,6 +63,9 @@ export interface SpaceNamespaceDeps {
     /** SDK-owned ratchet-keypair vault — gives a STABLE member keypair across
      *  reloads (rehydrate-or-provision) instead of a fresh one each session. */
     chatKeys?: ChatKeyVault;
+    /** The Client's trust context. Present, every join request carries the IK
+     *  certificate over this member's chat keys (design §3.2). */
+    trust?: TrustContext;
     /** P2P swarm config — enables peer block exchange among Space members. */
     p2p?: {
         enabled?: boolean;
@@ -73,6 +81,10 @@ export class SpaceNamespace {
     private spaceCache?: SpaceCache;
     /** Spaces built this session, by id — used to route offline send replays. */
     private readonly openSpaces = new Map<string, Space>();
+    /** In-flight identity loads, by member id; each entry is deleted once it settles. */
+    private readonly identityInFlight = new Map<string, Promise<{ ecdhPub: string; ecdsaPub: string }>>();
+    /** Chat-key certificates, by member and the exact key strings; a failed mint is dropped so the next join retries. */
+    private readonly certs = new Map<string, Promise<ChatKeyCert>>();
     /** Unique id for THIS device/session — the P2P peer identity. A user's own
      *  devices share a member id, so the mesh MUST distinguish them by this or a
      *  device treats its siblings' signals as its own echo and never connects. */
@@ -87,7 +99,8 @@ export class SpaceNamespace {
             deps.offline.registerReplayer("space", async (entry) => {
                 const { spaceId, frame } = entry.args as { spaceId: string; frame: unknown };
                 let space = this.openSpaces.get(spaceId);
-                if (!space) space = await this.get(spaceId);
+                // A Space built while the session was locked never connects: build it again now (design §3.3).
+                if (!space || space.admission === "locked") space = await this.get(spaceId);
                 await space.connect();
                 if (!space.isConnected()) throw new Error(`space ${spaceId} not connected for replay`);
                 space.sendRaw(frame);
@@ -112,6 +125,7 @@ export class SpaceNamespace {
     async createSpace(
         opts: { historyPolicy?: HistoryPolicy; private?: boolean; messaging?: boolean } = {},
     ): Promise<Space> {
+        if (opts.messaging !== false && !this.deps.session.seed) throw new IdentityLockedError();
         const historyPolicy = opts.historyPolicy ?? "static";
         const identity = await generateSpaceIdentity();
         // Register the space (server records pubkey + policy; the DO is lazy).
@@ -121,7 +135,7 @@ export class SpaceNamespace {
             `/api/spaces/${encodeURIComponent(identity.id)}/metadata`,
             { spacePubKey: identity.id, historyPolicy, visibility: opts.private ? "private" : "public" },
         );
-        const space = await this.build(identity.id, historyPolicy);
+        const space = await this.build(identity.id, historyPolicy, opts.private ? "private" : "public", { messaging: opts.messaging });
         if (opts.messaging !== false) await space.create();
         return space;
     }
@@ -134,9 +148,13 @@ export class SpaceNamespace {
         return space;
     }
 
-    /** A handle to a space without auto-connecting (uses cached keys on demand). */
-    async get(spaceId: string, historyPolicy: HistoryPolicy = "static"): Promise<Space> {
-        return this.build(spaceId, historyPolicy);
+    /**
+     * A handle to a space without auto-connecting (uses cached keys on demand).
+     * `messaging: false` opens a files-only space, as {@link createSpace} makes:
+     * no keyring and no identity, so it opens whether or not the session is locked.
+     */
+    async get(spaceId: string, historyPolicy: HistoryPolicy = "static", opts: { messaging?: boolean } = {}): Promise<Space> {
+        return this.build(spaceId, historyPolicy, undefined, opts);
     }
 
     // -------------------------------------------------------------------------
@@ -244,6 +262,7 @@ export class SpaceNamespace {
      * Returns the open {@link Space}.
      */
     async joinByInvite(spaceId: string, token: string, opts: { timeoutMs?: number } = {}): Promise<Space> {
+        if (!this.deps.session.seed) throw new IdentityLockedError();
         const memberId = this.myId();
         const { ecdhPub, ecdsaPub } = await this.ensureIdentity(memberId);
         await this.keyringFor(spaceId).redeemInvite({ token, identityEcdhPub: ecdhPub, identityEcdsaPub: ecdsaPub });
@@ -260,6 +279,7 @@ export class SpaceNamespace {
             spaceId,
             httpBaseUrl: this.deps.http.baseUrl,
             fetch: this.deps.http.fetch,
+            fetchWithRecovery: this.deps.http.fetchWithRecovery,
         });
     }
 
@@ -267,14 +287,64 @@ export class SpaceNamespace {
     // Internals
     // -------------------------------------------------------------------------
 
-    private async build(spaceId: string, historyPolicy: HistoryPolicy): Promise<Space> {
+    private async build(
+        spaceId: string,
+        historyPolicy: HistoryPolicy,
+        visibility?: "private" | "public",
+        opts: { messaging?: boolean } = {},
+    ): Promise<Space> {
         const memberId = this.myId();
+        const filesOnly = opts.messaging === false;
+        if (filesOnly || !this.deps.session.seed) {
+            // Locked (design §3.3): no identity, no keyring, no join request. The
+            // Space reports admission "locked"; the app re-opens it after sign-in.
+            // A files-only Space (`messaging: false`) is built the same way whether
+            // or not the session is locked, and is never marked locked: its file
+            // chunks carry their own keys, so it needs no identity at all.
+            const keyless = new Space({
+                name: spaceId,
+                wsBaseUrl: this.deps.wsBaseUrl,
+                httpBaseUrl: this.deps.http.baseUrl,
+                fetch: this.deps.http.fetch,
+                fetchWithRecovery: this.deps.http.fetchWithRecovery,
+                myId: () => memberId,
+                fetchTicket: () => this.fetchTicket(),
+                historyPolicy,
+                locked: !filesOnly,
+                shardCache: this.deps.offline?.fileCache,
+                deferShardUpload: this.deps.offline
+                    ? (hash: string) => this.deps.offline!.deferShardUpload(hash)
+                    : undefined,
+            });
+            this.openSpaces.set(spaceId, keyless);
+            return keyless;
+        }
         const { ecdhPub, ecdsaPub } = await this.ensureIdentity(memberId);
         const transport = new KeyringClient({
             spaceId,
             httpBaseUrl: this.deps.http.baseUrl,
             fetch: this.deps.http.fetch,
+            // The 4403 state check runs after the HttpClient's 401 recovery (design §6.9).
+            fetchWithRecovery: this.deps.http.fetchWithRecovery,
         });
+        // The Space's membership log (design §3.6–§3.7), when this client has trust wired.
+        const trust = this.deps.trust;
+        const logSync = trust
+            ? new LogSync({
+                  spaceId,
+                  me: () => memberId,
+                  appId: () => trust.appId(),
+                  commitment: () => this.deps.session.commitment,
+                  transport: {
+                      fetchLog: (s, l) => transport.fetchLog(s, l),
+                      postLogEntry: (e, ec) => transport.postLogEntry(e, ec),
+                  },
+                  signer: trust.signer,
+                  directory: trust.directory,
+                  pins: trust.pins,
+                  store: () => trust.store(),
+              })
+            : undefined;
         const keyring = new SpaceKeyring({
             spaceId,
             memberId,
@@ -284,16 +354,24 @@ export class SpaceNamespace {
             transport,
             cache: this.deps.cache,
             historyPolicy,
+            keyCert: this.deps.trust ? () => this.certFor(memberId, ecdhPub, ecdsaPub) : undefined,
+            canWrapTo: logSync ? logCanWrapTo(logSync) : undefined,
         });
         const space = new Space({
             name: spaceId,
             wsBaseUrl: this.deps.wsBaseUrl,
             httpBaseUrl: this.deps.http.baseUrl,
             fetch: this.deps.http.fetch,
+            fetchWithRecovery: this.deps.http.fetchWithRecovery,
             myId: () => memberId,
             fetchTicket: () => this.fetchTicket(),
             keyring,
             historyPolicy,
+            logSync,
+            visibility,
+            appId: trust ? () => trust.appId() : undefined,
+            probeState: () => transport.probeState(),
+            hasSession: () => !!this.deps.session.token,
             offline: this.spaceCache,
             shardCache: this.deps.offline?.fileCache,
             deferShardUpload: this.deps.offline
@@ -318,33 +396,69 @@ export class SpaceNamespace {
         return space;
     }
 
-    /** Ensure the member has an identity keypair; return its public ECDH + ECDSA keys. */
-    private async ensureIdentity(memberId: string): Promise<{ ecdhPub: string; ecdsaPub: string }> {
+    /**
+     * The member's stable chat identity (design §3.3). A locked session (no
+     * seed) throws `IdentityLockedError`. A vault failure throws
+     * `IdentityUnavailableError`: `retryable` when the vault could not be
+     * reached (§9.2 I8), and not when the saved keys do not unwrap under this
+     * seed. A throwaway pair is never minted: doing so is what hid a reloaded
+     * member's earlier messages from everyone else.
+     *
+     * Concurrent calls for one member share a single load, so two first opens
+     * can never interleave their forget/generate steps and persist a second or
+     * mixed pair.
+     */
+    private ensureIdentity(memberId: string): Promise<{ ecdhPub: string; ecdsaPub: string }> {
+        let pending = this.identityInFlight.get(memberId);
+        if (!pending) {
+            pending = this.loadIdentity(memberId).finally(() => this.identityInFlight.delete(memberId));
+            this.identityInFlight.set(memberId, pending);
+        }
+        return pending;
+    }
+
+    private async loadIdentity(memberId: string): Promise<{ ecdhPub: string; ecdsaPub: string }> {
         const store = KeyStore.getInstance();
-        if (!store.getKeyPair(memberId)) {
-            // Unlocked (seed in hand): rehydrate the member's STABLE keypair from
-            // the vault, or provision + persist one on first use. This keeps the
-            // member the same identity across reloads — no re-admit each session,
-            // and the group-key cache round-trips. Best-effort: a personal-space
-            // hiccup falls through to an ephemeral keypair (today's behavior).
-            const seed = this.deps.session.seed;
-            const staging = (() => { try { return typeof location !== "undefined" && /(^|\.)staging\./.test(location.hostname); } catch { return false; } })();
-            if (staging) console.info(`[muhkoo:vault] ensureIdentity: unlocked=${!!seed} vault=${!!this.deps.chatKeys}`);
-            if (this.deps.chatKeys && seed) {
-                try {
-                    await this.deps.chatKeys.ensure(memberId, toBase64(seed));
-                } catch (e) {
-                    if (staging) console.info(`[muhkoo:vault] ensureIdentity: vault.ensure failed — ${e instanceof Error ? e.message : e}`);
+        const seed = this.deps.session.seed;
+        if (!seed) throw new IdentityLockedError();
+        if (!store.isVaultBacked(memberId)) {
+            if (!this.deps.chatKeys) {
+                throw new IdentityUnavailableError(
+                    "This client has no chat-key vault; sign in with a session first.",
+                    undefined,
+                    false,
+                );
+            }
+            try {
+                await this.deps.chatKeys.ensure(memberId, toBase64(seed));
+            } catch (e) {
+                if (e instanceof ChatKeysUnreadableError) {
+                    throw new IdentityUnavailableError(
+                        "Your saved chat keys could not be unlocked with this session's key: they are damaged, " +
+                            "or were saved under a different key. Trying again will not fix this.",
+                        e,
+                        false,
+                    );
                 }
+                throw new IdentityUnavailableError(undefined, e);
             }
-            if (!store.getKeyPair(memberId)) {
-                if (staging) console.info("[muhkoo:vault] ensureIdentity: EPHEMERAL keypair (locked / no vault) → will re-admit");
-                await store.generateOwnKeyPair(memberId);
-            }
+            if (!store.isVaultBacked(memberId)) throw new IdentityUnavailableError();
         }
         const ecdhPub = await exportEcdhPublicKey(store.getKeyPair(memberId)!.publicKey);
         const ecdsaPub = await exportEcdsaPublicKey(store.getAuthKeyPair(memberId)!.publicKey);
         return { ecdhPub, ecdsaPub };
+    }
+
+    /** One certificate per (member, chat keys) for the life of the Client (design §3.2: global, not per Space). */
+    private certFor(memberId: string, ecdh: string, ecdsa: string): Promise<ChatKeyCert> {
+        const k = `${memberId}\n${ecdh}\n${ecdsa}`;
+        let p = this.certs.get(k);
+        if (!p) {
+            p = mintKeyCert(this.deps.trust!.signer, memberId, ecdh, ecdsa);
+            p.catch(() => this.certs.delete(k));
+            this.certs.set(k, p);
+        }
+        return p;
     }
 
     private async fetchPolicy(spaceId: string): Promise<HistoryPolicy> {

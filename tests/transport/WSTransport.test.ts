@@ -27,10 +27,10 @@ class FakeWebSocket {
         FakeWebSocket.instances.push(this);
     }
     send(data: string): void { this.sent.push(data); }
-    close(): void {
+    close(code?: number, reason?: string): void {
         if (this.closed) return;
         this.closed = true;
-        this.onclose?.();
+        this.onclose?.({ code: code ?? 1006, reason: reason ?? '' } as CloseEvent);
     }
     // -- test drivers --
     fireOpen(): void { this.onopen?.(); }
@@ -194,5 +194,91 @@ describe('WSTransport — event scoping', () => {
         expect(aMsgs).toEqual(['only-a']);
 
         a.off(EventCoreEvents.MESSAGE, ha);
+    });
+});
+
+describe('terminal close codes (design §6.9, AV12; Review Focus 2)', () => {
+    const cleanups: Array<() => void> = [];
+
+    beforeEach(() => {
+        FakeWebSocket.reset();
+        (globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket;
+        vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+        cleanups.splice(0).forEach((fn) => fn());
+        vi.useRealTimers();
+    });
+
+    it('a 4403 with terminalCloseCodes [4403] schedules no reconnect and reports the code', async () => {
+        const { transport } = await connected({ url: 'ws://x', terminalCloseCodes: [4403], maxReconnectAttempts: 0 });
+        const seen: unknown[] = [];
+        const onDisc = (e: CustomEvent) => seen.push(e.detail);
+        transport.on(EventCoreEvents.DISCONNECTED, onDisc);
+        cleanups.push(() => transport.off(EventCoreEvents.DISCONNECTED, onDisc));
+        FakeWebSocket.last().close(4403, 'not-member');
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(seen).toEqual([{ code: 4403, reason: 'not-member' }]);
+        expect(FakeWebSocket.instances.length).toBe(1);
+    });
+
+    it('a 1006 still reconnects', async () => {
+        await connected({ url: 'ws://x', terminalCloseCodes: [4403], maxReconnectAttempts: 0, reconnectDelay: 100 });
+        FakeWebSocket.last().close(1006);
+        await vi.advanceTimersByTimeAsync(150);
+        expect(FakeWebSocket.instances.length).toBe(2);
+    });
+
+    it('resume() reconnects through a fresh urlProvider call', async () => {
+        let n = 0;
+        const { transport } = await connected({
+            url: 'ws://x?t=0',
+            urlProvider: async () => `ws://x?t=${++n}`,
+            terminalCloseCodes: [4403],
+            maxReconnectAttempts: 0,
+            reconnectDelay: 100,
+        });
+        FakeWebSocket.last().close(4403, 'not-member');
+        transport.resume();
+        await vi.advanceTimersByTimeAsync(150);
+        expect(FakeWebSocket.last().url).toBe('ws://x?t=1');
+    });
+
+    it('resume() while a reconnect is already pending schedules no second one', async () => {
+        const { transport } = await connected({
+            url: 'ws://x',
+            urlProvider: async () => 'ws://x?fresh',
+            terminalCloseCodes: [4403],
+            maxReconnectAttempts: 0,
+            reconnectDelay: 100,
+            heartbeatInterval: 0,
+        });
+        const attempts: unknown[] = [];
+        const onReconn = (e: CustomEvent) => attempts.push(e.detail);
+        transport.on(EventCoreEvents.RECONNECTING, onReconn);
+        cleanups.push(() => transport.off(EventCoreEvents.RECONNECTING, onReconn));
+        FakeWebSocket.last().close(4403, 'not-member');
+        transport.resume();
+        transport.resume(); // a second resume while the first reconnect is pending
+        await vi.advanceTimersByTimeAsync(150);
+        expect(FakeWebSocket.instances.length).toBe(2);
+        FakeWebSocket.last().fireOpen();
+        await vi.advanceTimersByTimeAsync(1000); // a duplicate timer would keep re-dialling a live socket
+        expect(transport.isConnected()).toBe(true);
+        expect(attempts).toEqual([{ attempt: 1 }]);
+    });
+
+    it('a close without an event object reports no detail and still reconnects', async () => {
+        const { transport, socket } = await connected({ url: 'ws://x', terminalCloseCodes: [4403], maxReconnectAttempts: 0, reconnectDelay: 100 });
+        const seen: unknown[] = [];
+        const onDisc = (e: CustomEvent) => seen.push(e.detail);
+        transport.on(EventCoreEvents.DISCONNECTED, onDisc);
+        cleanups.push(() => transport.off(EventCoreEvents.DISCONNECTED, onDisc));
+        socket.closed = true;
+        socket.onclose?.();
+        await vi.advanceTimersByTimeAsync(150);
+        expect(seen).toEqual([null]); // a CustomEvent without a detail reads null
+        expect(FakeWebSocket.instances.length).toBe(2);
     });
 });

@@ -19,7 +19,7 @@ import type { SessionState } from "../core/Session";
 import { HLC, type HlcState } from "./clock/HLC";
 import { unpack } from "./clock/HlcTimestamp";
 import { ConnectivityManager, type ConnectivityState } from "./ConnectivityManager";
-import { OutboundQueue, type Replayer } from "./OutboundQueue";
+import { OutboundQueue, type Replayer, type TryLock } from "./OutboundQueue";
 import { SyncEngine } from "./SyncEngine";
 import { SnapshotNamespace } from "./namespaces/SnapshotNamespace";
 import { ShardCache } from "./cache/ShardCache";
@@ -31,9 +31,24 @@ export interface OfflineManagerDeps {
     session: SessionState;
     /** Whether offline support is active (browser) vs a no-op (Node/Workers). */
     enabled: boolean;
+    /**
+     * The drain lock the tabs of this origin share - Web Locks in a browser
+     * tab. Absent, every tab drains the shared queue itself, as before. See
+     * `OutboundQueue`.
+     */
+    locks?: TryLock;
 }
 
 const HLC_STATE_KEY = "global";
+
+/**
+ * A random suffix for this tab's HLC node id, held in memory only - see
+ * `OfflineManager.boot`. 48 bits: two tabs of one device never draw the same.
+ */
+function tabSuffix(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(6));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 export class OfflineManager {
     /** True in browsers with IndexedDB; false when running over a NoopStore. */
@@ -55,7 +70,10 @@ export class OfflineManager {
     constructor(deps: OfflineManagerDeps) {
         this.enabled = deps.enabled;
         this.store = deps.store;
-        this.queue = new OutboundQueue(deps.store);
+        this.queue = new OutboundQueue(deps.store, {
+            tryLock: deps.locks,
+            commitment: () => deps.session.commitment,
+        });
         this.connectivity = new ConnectivityManager({
             onReconnect: () => void this.sync.run(),
         });
@@ -91,6 +109,21 @@ export class OfflineManager {
             method: "putShard",
             args: { hash },
         });
+    }
+
+    /**
+     * Replay the queue now, as a reconnect does, if anything is waiting in it.
+     * `client.app.access()` calls this each time it reports the app allowed,
+     * so writes kept after a refusal for payment go out once the user or the
+     * app owner has paid, without waiting for the next reconnect. One drain per
+     * call, never on a timer. With nothing of the signed-in user's queued it
+     * does not drain at all, so the app sees no "syncing". A drain also runs the
+     * catch-up tasks (Space history paging), as a reconnect does.
+     */
+    async resume(): Promise<void> {
+        if (!this.enabled) return;
+        if ((await this.queue.waiting()).length === 0) return;
+        await this.sync.run();
     }
 
     /** Resolve once the clock + node id are loaded. */
@@ -166,14 +199,22 @@ export class OfflineManager {
             this.hlc = new HLC(this.nodeId);
             return;
         }
-        let nodeId = await this.store.get<string>("meta", META_NODE_ID);
-        if (!nodeId) {
-            nodeId = generateId();
-            await this.store.put("meta", META_NODE_ID, nodeId);
+        let deviceId = await this.store.get<string>("meta", META_NODE_ID);
+        if (!deviceId) {
+            deviceId = generateId();
+            await this.store.put("meta", META_NODE_ID, deviceId);
         }
-        this.nodeId = nodeId;
+        // One node id per TAB, under the device's. Every tab of an origin
+        // loads the same stored id, and two tabs stamping with it in the same
+        // millisecond minted identical HLCs: the node id is the tiebreak, and
+        // the server keeps the first of two equal stamps, so the second write
+        // was dropped. The suffix lives in memory only. The clock state below
+        // stays shared, so the clock never goes back across tabs, and stamps
+        // stored already stay valid: every comparison reads a packed stamp as
+        // one string and never parses the node id.
+        this.nodeId = `${deviceId}.${tabSuffix()}`;
         const state = await this.store.get<HlcState>("hlc-state", HLC_STATE_KEY);
-        this.hlc = new HLC(nodeId, { state });
+        this.hlc = new HLC(this.nodeId, { state });
     }
 
     /** Coalesce HLC-state writes — a burst of stamps persists once. */

@@ -81,11 +81,15 @@ export class KvCache {
         await this.store.put("kv-cache", k, mergeRegister(local, incoming));
     }
 
-    /** Non-tombstoned full keys for a commitment (used for offline `list`). */
-    async liveKeys(commitment: string): Promise<string[]> {
-        const prefix = `${commitment}|`;
-        const rows = await this.store.prefix<KvEntry>("kv-cache", prefix);
-        return rows.filter((r) => !r.value.deleted).map((r) => r.key.slice(prefix.length));
+    /**
+     * Non-tombstoned full keys for a commitment that start with `prefix` (all
+     * of them by default), for offline `list`. The store scans the key range
+     * `${commitment}|${prefix}`, so other collections are never read.
+     */
+    async liveKeys(commitment: string, prefix = ""): Promise<string[]> {
+        const scope = `${commitment}|`;
+        const rows = await this.store.prefix<KvEntry>("kv-cache", scope + prefix);
+        return rows.filter((r) => !r.value.deleted).map((r) => r.key.slice(scope.length));
     }
 
     /** Queue a kv mutation for replay on reconnect. */

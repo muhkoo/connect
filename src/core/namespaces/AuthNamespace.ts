@@ -416,15 +416,16 @@ export class ZkAuth {
 
     /**
      * Add an **email** as a recovery + login factor (M2 verification-gated:
-     * the server only releases the split-key OPRF eval after the address is
+     * the server only releases the gated OPRF eval after the address is
      * OTP-verified). Sends the code, then returns a `confirm` continuation:
      *
      *   const { confirm } = await client.auth.zk.enrollEmailFactor("me@x.com");
      *   await confirm(codeFromInbox);
      *
      * Requires being signed in with the seed held (like the other enrolls).
-     * Custody note: gated factors trade some custody for recoverability — the
-     * trade-off should be disclosed in the enroll UI.
+     * Custody note: Muhkoo holds the keys behind gated factors, so it can
+     * recover the seed of any account with an email or Google factor. The
+     * hosted sign-in UI discloses this; a custom enroll UI must too.
      */
     async enrollEmailFactor(email: string): Promise<{ email: string; confirm: (code: string) => Promise<void> }> {
         const seed = this.deps.session.seed;
@@ -455,7 +456,7 @@ export class ZkAuth {
     /**
      * Recover an account via its enrolled **email** factor. Sends a code to the
      * enrolled address (the response never reveals whether one exists), then
-     * `confirm(code)` completes: gated read + split-key eval → unwrap seed →
+     * `confirm(code)` completes: gated read + gated OPRF eval → unwrap seed →
      * normal ZK login. After this, call {@link changePassword} to set a new
      * password.
      *
@@ -486,13 +487,16 @@ export class ZkAuth {
 
     // --- Google factor (M2.3) ------------------------------------------------
     // Google is pure authentication UX: its verified ID token gates the
-    // split-key OPRF eval that releases the master seed. The ZK identity layer
+    // OPRF eval that releases the master seed. The ZK identity layer
     // is unchanged. The app obtains `idToken` via Google Identity Services and
     // passes it in; the SDK never renders Google UI.
 
     /**
      * Link a Google account as a recovery + login factor. Requires being signed
      * in with the seed held. `idToken` is a fresh Google ID token (GIS).
+     * Custody note: as with {@link enrollEmailFactor}, Muhkoo holds the keys
+     * behind this factor and can recover the seed of an account that has it.
+     * The hosted sign-in UI discloses this; a custom enroll UI must too.
      */
     async enrollGoogleFactor(idToken: string): Promise<void> {
         const seed = this.deps.session.seed;
@@ -514,7 +518,7 @@ export class ZkAuth {
 
     /**
      * Sign in with Google — verify the ID token, unlock the seed via the gated
-     * split-key eval, and establish a session. Same machinery serves "Sign in
+     * OPRF eval, and establish a session. Same machinery serves "Sign in
      * with Google" and "recover with Google"; the account must have linked the
      * factor first.
      */
@@ -537,7 +541,8 @@ export class ZkAuth {
      * Register a brand-new, **passwordless** account whose only factor is Google.
      * A random master seed is generated and wrapped under the Google-gated key;
      * the user can add a password / passkey / phrase later. The ZK registration
-     * is identical to a password signup.
+     * is identical to a password signup. Custody note: see
+     * {@link enrollGoogleFactor} — Muhkoo can recover this account's seed.
      */
     async registerWithGoogle(username: string, idToken: string): Promise<AuthUser> {
         const seed = randomSeed();

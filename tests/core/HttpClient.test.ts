@@ -98,6 +98,78 @@ describe('HttpClient — 401 recovery', () => {
     });
 });
 
+describe('HttpClient.fetchWithRecovery — the raw fetch with the same 401 recovery (design §6.9)', () => {
+    const STATE_URL = `${BASE_URL}/api/spaces/s/keyring/state`;
+
+    it('re-authenticates once on a 401 and returns the replayed response, whatever its status', async () => {
+        let token = 'stale-token';
+        const { fetchFn, calls } = sequencedFetch([
+            { status: 401, json: { error: 'stale session' } },
+            { status: 404, json: { error: 'Not found' } },
+        ]);
+        const onUnauthorized = vi.fn(async () => {
+            token = 'fresh-token';
+            return true;
+        });
+        const http = new HttpClient({ baseUrl: BASE_URL, getSessionToken: () => token, fetch: fetchFn, onUnauthorized });
+
+        const res = await http.fetchWithRecovery(STATE_URL);
+        expect(res.status).toBe(404); // a non-2xx comes back as a Response, never thrown
+        expect(onUnauthorized).toHaveBeenCalledTimes(1);
+        expect(calls.map((c) => c.headers.get('X-Muhkoo-Session'))).toEqual(['stale-token', 'fresh-token']);
+    });
+
+    it('returns the 401 when recovery fails, without a retry', async () => {
+        const { fetchFn, calls } = sequencedFetch([{ status: 401, json: { error: 'stale' } }]);
+        const onUnauthorized = vi.fn(async () => false);
+        const http = new HttpClient({ baseUrl: BASE_URL, getSessionToken: () => 'stale-token', fetch: fetchFn, onUnauthorized });
+
+        expect((await http.fetchWithRecovery(STATE_URL)).status).toBe(401);
+        expect(onUnauthorized).toHaveBeenCalledTimes(1);
+        expect(calls).toHaveLength(1);
+    });
+
+    it('does not attempt recovery without a session token', async () => {
+        const { fetchFn, calls } = sequencedFetch([{ status: 401, json: { error: 'no auth' } }]);
+        const onUnauthorized = vi.fn(async () => true);
+        const http = new HttpClient({ baseUrl: BASE_URL, getSessionToken: () => null, fetch: fetchFn, onUnauthorized });
+
+        expect((await http.fetchWithRecovery(STATE_URL)).status).toBe(401);
+        expect(onUnauthorized).not.toHaveBeenCalled();
+        expect(calls).toHaveLength(1);
+    });
+
+    it('does not loop when the replay still 401s', async () => {
+        const { fetchFn, calls } = sequencedFetch([{ status: 401, json: { error: 'stale' } }]);
+        const onUnauthorized = vi.fn(async () => true);
+        const http = new HttpClient({ baseUrl: BASE_URL, getSessionToken: () => 'stale-token', fetch: fetchFn, onUnauthorized });
+
+        expect((await http.fetchWithRecovery(STATE_URL)).status).toBe(401);
+        expect(onUnauthorized).toHaveBeenCalledTimes(1);
+        expect(calls).toHaveLength(2);
+    });
+
+    it('passes any other status straight through', async () => {
+        const { fetchFn, calls } = sequencedFetch([{ status: 403, json: { error: 'Not a member' } }]);
+        const onUnauthorized = vi.fn(async () => true);
+        const http = new HttpClient({ baseUrl: BASE_URL, getSessionToken: () => 'tok', fetch: fetchFn, onUnauthorized });
+
+        expect((await http.fetchWithRecovery(STATE_URL)).status).toBe(403);
+        expect(onUnauthorized).not.toHaveBeenCalled();
+        expect(calls).toHaveLength(1);
+    });
+
+    it('leaves the raw fetch as it was: a 401 passes straight through', async () => {
+        const { fetchFn, calls } = sequencedFetch([{ status: 401, json: { error: 'stale' } }]);
+        const onUnauthorized = vi.fn(async () => true);
+        const http = new HttpClient({ baseUrl: BASE_URL, getSessionToken: () => 'stale-token', fetch: fetchFn, onUnauthorized });
+
+        expect((await http.fetch(STATE_URL)).status).toBe(401);
+        expect(onUnauthorized).not.toHaveBeenCalled();
+        expect(calls).toHaveLength(1);
+    });
+});
+
 describe('Client — session recovery orchestration', () => {
     it('fires session-expired when recovery is not possible', async () => {
         const client = new Client({ baseUrl: BASE_URL });
