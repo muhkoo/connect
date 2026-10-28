@@ -77,28 +77,30 @@ export class Field {
 let poseidonModule: any = null;
 let poseidonF: any = null;
 
+/**
+ * Thrown (internal; match on `name`) when circomlibjs cannot be loaded or built. There is deliberately no
+ * fallback hash: any substitute yields values that differ from real Poseidon,
+ * silently producing wrong commitments and weakened crypto.
+ */
+class PoseidonUnavailableError extends Error {
+    constructor(cause?: unknown) {
+        super('Poseidon unavailable: circomlibjs failed to load', { cause });
+        this.name = 'PoseidonUnavailableError';
+    }
+}
+
 async function loadPoseidon() {
     if (!poseidonModule) {
         try {
-            // Try to load circomlibjs poseidon
             const buildPoseidon = (await import('circomlibjs')).buildPoseidon;
             const poseidonBuilder = await buildPoseidon();
             poseidonModule = poseidonBuilder;
             poseidonF = poseidonBuilder.F;
         } catch (error) {
-            console.warn('Failed to load circomlibjs poseidon, using fallback:', error);
-            // Fallback implementation for testing - this is NOT cryptographically secure
-            poseidonModule = async (inputs: any[]) => {
-                const data = inputs.map(i => i.toString()).join('');
-                const encoder = new TextEncoder();
-                const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(data));
-                const hashArray = Array.from(new Uint8Array(hashBuffer));
-                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-                return BigInt('0x' + hashHex) % Field.FIELD_SIZE;
-            };
-            poseidonF = {
-                toString: (val: any) => val.toString()
-            };
+            // Leave module state unset so a later call retries.
+            poseidonModule = null;
+            poseidonF = null;
+            throw new PoseidonUnavailableError(error);
         }
     }
     return { poseidon: poseidonModule, F: poseidonF };

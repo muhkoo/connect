@@ -12,6 +12,16 @@ whole 0.14 line, so every default install, including the `npx -y @muhkoo/cli` in
 the preview deploy script, ran without shard batching or `loginWithDevice`.
 `npm run release` publishes and moves both tags together.
 
+## 0.15.0-alpha.10 — Poseidon fails loudly (2026-10-28)
+
+### Security
+
+- **Poseidon no longer falls back to a fake hash.** If `circomlibjs` failed to load, `loadPoseidon()` in `src/crypto/ZeroKnowledge.ts` silently substituted a SHA-256-mod-field "hash" (with only a `console.warn`), so commitments, ratchet and lockout values were computed with non-Poseidon output and no error. It now throws `PoseidonUnavailableError` (the original failure is on `cause`) and does not cache the failure, so a later call retries.
+
+### Changed
+
+- Dev-dependency resolutions raised for patched `ajv` and `yaml` (lint and docs tooling only; not in the built bundles).
+
 ## 0.15.0-alpha.9 — Dependency security patches (2026-10-14)
 
 No changes to the SDK's behaviour; the built bundles are byte-identical to 0.15.0-alpha.8 apart from the version stamp.

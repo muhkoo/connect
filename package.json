@@ -1,6 +1,6 @@
 {
   "name": "@muhkoo/connect",
-  "version": "0.15.0-alpha.9",
+  "version": "0.15.0-alpha.10",
   "description": "Simple client SDK for building distributed edge based applications",
   "main": "dist/server/index.js",
   "module": "dist/server/index.js",
@@ -113,7 +113,11 @@
     "shell-quote": "^1.9.0",
     "underscore": "^1.13.8",
     "vite": "^7.3.5",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "eslint/ajv": "^6.14.0",
+    "@eslint/eslintrc/ajv": "^6.14.0",
+    "eslint-plugin-tsdoc/@microsoft/tsdoc-config/ajv": "^8.18.0",
+    "typedoc/yaml": "^2.8.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
