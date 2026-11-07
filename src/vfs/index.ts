@@ -10,6 +10,7 @@ export {
     type DirNode,
     type FileEntry,
     type DirEntry,
+    type LinkEntry,
     type Entry,
 } from "./types";
 export { globToRegExp } from "./glob";

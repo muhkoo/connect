@@ -46,6 +46,7 @@ import {
     type Entry,
     type FileEntry,
     type HistoryRecord,
+    type LinkEntry,
     type VfsStat,
     type VfsStore,
 } from "./types";
@@ -56,10 +57,15 @@ import {
     assertValidName, basename, contentTypeFor, dirname, isSafeName, isUnder, join, printable, resolveFrom, segments,
 } from "./paths";
 import { globToRegExp } from "./glob";
+import { onShareRotated, registerSharing, sharingDropped, type SharingFinished, type SharingMoved, type SharingPlan } from "./sharingAccess";
 import {
     DEFAULT_MAX_ENTRIES, DEFAULT_MAX_PATH_CHARS, MAX_DEPTH, MAX_TIME, nextTurn, WALK_CONCURRENCY, YIELD_EVERY,
 } from "./bounds";
 import type { VfsCoordinator } from "./coordinator";
+import {
+    acrossBoundary, HOME, HOME_PATH, SHARED, SHARED_PATH, SHARED_YOURS, SharesMount, SPACE_ID,
+    type ShareRoute, type SharesSource,
+} from "./sharesMount";
 
 /**
  * The slice of content storage the VFS needs.
@@ -125,6 +131,24 @@ export interface VfsNamespaceDeps {
      * namespace only. See `VfsCoordinator`.
      */
     coordinator?: VfsCoordinator;
+    /**
+     * The signed-in user's shares (`client.shares`). With it, `/Home/Shared` lists them and paths below
+     * `/Home/Shared/<name>`, or below a link, are served by the share; `/Home` is the user's own `/Home` folder
+     * with `Shared` added. Without it - a CLI or a test with no shares - a link is listed, moved, copied and
+     * deleted like any entry, but nothing below it can be reached.
+     */
+    shares?: SharesSource;
+}
+
+/**
+ * Where a path leads, once shares are wired: the user's own tree (`real`, with the path to use there), the
+ * virtual `/Home` or `/Home/Shared`, or a path inside one share. See `VfsNamespace.route`.
+ */
+type Route = { kind: "real"; path: string } | { kind: "home" } | { kind: "shared" } | ShareRoute;
+
+/** A folder that exists only in listings: `/Home` (without a real one) and `/Home/Shared`. */
+function virtualDir(path: string, mtime = 0): VfsStat {
+    return { path, name: basename(path), kind: "dir", size: 0, mtime, versions: 0 };
 }
 
 /** A directory record plus the key it was opened with. */
@@ -463,7 +487,7 @@ function assertNotHidden(dir: OpenDir, name: string, path: string): void {
 function sameEntry(before: Entry | undefined, now: Entry | undefined): boolean {
     if (!before || !now) return before === now;
     if (before.kind !== now.kind || before.id !== now.id) return false;
-    return before.kind === "dir" || (now.kind === "file" && now.manifest.id === before.manifest.id);
+    return before.kind !== "file" || (now.kind === "file" && now.manifest.id === before.manifest.id);
 }
 
 /**
@@ -499,6 +523,62 @@ function beingMoved(path: string, inside = false): VfsConflictError {
 function heldElsewhere(path: string, inside = false): VfsConflictError {
     const what = inside ? `${path}, or something in it, is` : `${path} is`;
     return new VfsConflictError(`${what} being moved or deleted in this app, in this tab or another; nothing was changed - try again once that has finished`);
+}
+
+/** Refuse to share `path`: it is (or holds) one half of a move that did not finish. See `DirEntry.moving`. */
+function unfinishedMove(path: string): VfsConflictError {
+    return new VfsConflictError(`${path} is part of a move that did not finish; move it again, then share it`);
+}
+
+/** Refuse to finish sharing `path`: something in it is not in the share yet. See `VfsNamespace.finishSharing`. */
+function changedWhileSharing(path: string): VfsConflictError {
+    return new VfsConflictError(`${path} changed while it was being shared; nothing was removed - share it again to move what is new`);
+}
+
+/** The share a folder entry is marked as being moved into (`DirEntry.sharing`), if the mark is well formed. */
+function sharingOf(entry: Entry): { spaceId: string } | null {
+    if (entry.kind !== "dir") return null;
+    const s = (entry as { sharing?: unknown }).sharing;
+    return isObject(s) && typeof s.spaceId === "string" && SPACE_ID.test(s.spaceId) ? { spaceId: s.spaceId } : null;
+}
+
+/** The shares `entry` and every folder named in `dirs` were marked as being moved into (`DirEntry.sharing`). */
+function sharingMarks(entry: Entry, dirs: OpenDir[]): Set<string> {
+    const out = new Set<string>();
+    const mark = sharingOf(entry);
+    if (mark) out.add(mark.spaceId);
+    for (const dir of dirs) {
+        for (const [, e] of followable(dir)) {
+            const m = sharingOf(e);
+            if (m) out.add(m.spaceId);
+        }
+    }
+    return out;
+}
+
+/**
+ * Whether a folder record, as read from the store, holds only what sharing moved: files with the manifest they
+ * were moved with, and folders being removed with it. Nothing this version cannot read.
+ */
+function holdsOnlyMoved(dir: OpenDir, doomed: ReadonlySet<string>, moved: SharingMoved): boolean {
+    if (Object.keys(dir.hidden).length > 0) return false;
+    for (const e of Object.values(dir.node.entries)) {
+        if (e.kind === "file" ? moved.files.get(e.id) !== e.manifest.id : e.kind !== "dir" || !doomed.has(e.id)) return false;
+    }
+    return true;
+}
+
+/** What `deleteReal` is asked to do instead of a delete when it finishes sharing a folder. */
+interface SharingSwap {
+    dirId: string;
+    spaceId: string;
+    /** What takes the folder's place. */
+    link: LinkEntry;
+    /** Throws when the folder's records, as they are at the swap, hold anything that is not in the share. */
+    verify: (dirs: OpenDir[]) => void;
+    moved: SharingMoved;
+    /** Set once the swap is written and the records are removed. */
+    finished?: SharingFinished;
 }
 
 /** A JSON object, as opposed to null, an array or a scalar. */
@@ -626,10 +706,15 @@ const ENTRY_ID = /^[A-Za-z0-9_-]{1,64}$/;
  * kind, a missing field, a bare scalar - is not an error in the RECORD, only
  * in that one entry, and hiding one entry is the same outcome as someone
  * deleting it.
+ *
+ * A link needs a target that is a share's Space id (see SPACE_ID): it is followed into a URL. A link that is not
+ * that shape is hidden like any other unreadable entry - kept, and its name still refused - which is also what an
+ * SDK from before links does with every link.
  */
 function readableEntry(value: unknown): value is Entry {
     if (!isObject(value) || typeof value.id !== "string" || !ENTRY_ID.test(value.id)) return false;
     if (value.kind === "file") return isObject(value.manifest) && typeof value.manifest.id === "string";
+    if (value.kind === "link") return isObject(value.target) && typeof value.target.spaceId === "string" && SPACE_ID.test(value.target.spaceId);
     if (value.kind !== "dir" || typeof value.key !== "string") return false;
     try {
         return fromBase64(value.key).length === 32;
@@ -785,13 +870,29 @@ export class VfsNamespace {
     private readonly historyLimit: number;
     private readonly maxEntries: number;
     private readonly maxPathChars: number;
+    /** `/Home/Shared` and the shares below it and below links. See `sharesMount.ts`. */
+    private readonly mount: SharesMount;
 
     constructor(private readonly deps: VfsNamespaceDeps) {
         this.historyLimit = deps.historyLimit ?? DEFAULT_HISTORY_LIMIT;
         this.maxEntries = deps.limits?.entries ?? DEFAULT_MAX_ENTRIES;
         this.maxPathChars = deps.limits?.pathChars ?? DEFAULT_MAX_PATH_CHARS;
+        this.mount = new SharesMount(deps.shares, (message) => this.warn(message), {
+            entries: this.maxEntries,
+            pathChars: this.maxPathChars,
+        });
         // Another tab's write of a record leaves this tab's copy of it out of date: see `heard`.
         deps.coordinator?.onAnnounce((id) => this.heard(id));
+        // A share `client.shares` rotated is closed: stop serving the copy kept open, so links reach its successor.
+        onShareRotated(this, (from) => this.mount.forget(from));
+        // The steps behind `client.shares.shareFolder`, for it alone: see `sharingAccess.ts`.
+        registerSharing(this, {
+            sharingPlan: (path) => this.sharingPlan(path),
+            markSharing: (path, dirId, spaceId) => this.markSharing(path, dirId, spaceId),
+            finishSharing: (path, dirId, spaceId, moved, linkId) => this.finishSharing(path, dirId, spaceId, moved, linkId),
+            releaseManifest: (manifest) => this.deps.content.release(manifest),
+            readLink: (path) => this.readLinkEntry(path),
+        });
     }
 
     /**
@@ -818,9 +919,15 @@ export class VfsNamespace {
     async cd(path: string): Promise<string> {
         const target = this.resolve(path);
         if (target !== "/") {
-            const found = await this.find(target);
-            if (!found) throw new VfsNotFoundError(target);
-            if (found.entry.kind !== "dir") throw new VfsConflictError(`${target} is not a directory`);
+            // Into a share, by `/Home/Shared` or a link, as into any folder.
+            const r: Route = this.deps.shares ? await this.route(target, { follow: true }) : { kind: "real", path: target };
+            if (r.kind === "share") {
+                if ((await this.mount.stat(r)).kind !== "dir") throw new VfsConflictError(`${target} is not a directory`);
+            } else if (r.kind === "real") {
+                const found = await this.find(r.path);
+                if (!found) throw new VfsNotFoundError(target);
+                if (found.entry.kind !== "dir") throw new VfsConflictError(`${target} is not a directory`);
+            }
         }
         this._cwd = target;
         return target;
@@ -851,6 +958,7 @@ export class VfsNamespace {
         this.heardAt.clear();
         this.rootKey = null;
         this._cwd = "/";   // a different identity's tree has different directories
+        this.mount.clear();   // and different shares
     }
 
     /**
@@ -897,6 +1005,21 @@ export class VfsNamespace {
     // ---- reads --------------------------------------------------------------
 
     async exists(path: string): Promise<boolean> {
+        if (!this.deps.shares) return this.existsReal(path);
+        let r: Route;
+        try {
+            r = await this.route(path, { follow: false });
+        } catch (err) {
+            if (err instanceof VfsNotFoundError) return false;   // no share by that name
+            throw err;
+        }
+        if (r.kind === "real") return this.existsReal(r.path);
+        if (r.kind === "share") return this.mount.exists(r);
+        await this.root();   // a locked filesystem says so, as for any path
+        return true;
+    }
+
+    private async existsReal(path: string): Promise<boolean> {
         // The root has no entry of its own, so `find` cannot see it — and
         // answering false here told `vfs mount` at "/" that the whole remote
         // tree was missing on every pass. It always exists once the filesystem
@@ -910,6 +1033,16 @@ export class VfsNamespace {
     }
 
     async stat(path: string): Promise<VfsStat> {
+        if (!this.deps.shares) return this.statReal(path);
+        const target = this.resolve(path);
+        const r = await this.route(target, { follow: false });
+        if (r.kind === "share") return this.mount.stat(r);
+        if (r.kind === "shared") return virtualDir(SHARED_PATH);
+        if (r.kind === "home") return virtualDir(HOME_PATH, asTime((await this.realHome()).entry?.mtime));
+        return { ...(await this.statReal(r.path)), path: target, name: basename(target) };
+    }
+
+    private async statReal(path: string): Promise<VfsStat> {
         // The root, as `exists` sees it: a directory, there whenever the
         // filesystem can be opened. The two used to disagree about it.
         if (this.resolve(path) === "/") {
@@ -921,8 +1054,20 @@ export class VfsNamespace {
         return toStat(this.resolve(path), found.name, found.entry);
     }
 
-    /** Immediate children of a directory. One record fetch. */
+    /**
+     * Immediate children of a directory. One record fetch. A link is listed as `kind: "link"` with its
+     * `target`; listing the link's own path lists the share it stands for.
+     */
     async list(path = "."): Promise<VfsStat[]> {
+        if (!this.deps.shares) return this.listReal(path);
+        const r = await this.route(path, { follow: true });
+        if (r.kind === "share") return this.mount.list(r);
+        if (r.kind === "shared") return this.mount.listShared();
+        if (r.kind === "home") return this.listHome();
+        return (await this.listReal(r.path)).map(await this.shownPaths());
+    }
+
+    private async listReal(path: string): Promise<VfsStat[]> {
         const dir = await this.openDir(path);
         const base = this.resolve(path);
         return this.children(dir).map(({ name, entry }) => toStat(join(base, name), name, entry));
@@ -974,7 +1119,7 @@ export class VfsNamespace {
      */
     async walkEntries(path = "."): Promise<VfsStat[]> {
         const out: VfsStat[] = [];
-        await this.eachEntry(path, (stat) => void out.push(stat));
+        await this.visitTree(path, (stat) => void out.push(stat), true);
         return out;
     }
 
@@ -989,8 +1134,50 @@ export class VfsNamespace {
      * whole walk beside the whole commit, and a map of one beside a map of
      * the other, ran a 512MB heap out of memory inside the default budgets.
      * The same guards and budgets as `walk`, which is built on this.
+     *
+     * A link is visited as `kind: "link"` (with a null manifest) and not walked into: it is the user's entry,
+     * while what is below it is a share's. A walk of `/Home` covers only the user's own `/Home` folder, not
+     * `/Home/Shared`.
+     *
+     * Throws VfsConflictError for a path at a link, at `/Home/Shared` or inside a share: a share's files are not
+     * content handles of the user's, so there is no manifest to hand over, and a caller that reads a null
+     * manifest as "a directory" - version control does - would record a tree with no files in it. `walk` and
+     * `walkEntries` do walk shares.
      */
     async eachEntry(path: string, visit: (stat: VfsStat, manifest: FileManifest | null) => void): Promise<void> {
+        return this.visitTree(path, visit, false);
+    }
+
+    /** `eachEntry`, and with `intoShares` (for `walkEntries`) also a walk of a share: every file's manifest null. */
+    private async visitTree(
+        path: string,
+        visit: (stat: VfsStat, manifest: FileManifest | null) => void,
+        intoShares: boolean,
+    ): Promise<void> {
+        if (!this.deps.shares) return this.eachReal(path, visit);
+        const target = this.resolve(path);
+        const r = await this.route(target, { follow: true });
+        if (!intoShares && (r.kind === "share" || r.kind === "shared")) {
+            throw new VfsConflictError(`${target} is in a shared folder, which has no content handles to walk; use walk or walkEntries`);
+        }
+        if (r.kind === "share") return this.mount.each(r, visit);
+        if (r.kind === "shared") {
+            for (const { name, share } of await this.mount.sortedNames()) {
+                const at = `${SHARED_PATH}/${name}`;
+                visit(virtualDir(at), null);
+                await this.mount.each({ kind: "share", spaceId: share.spaceId, at, rest: "", path: at }, visit);
+            }
+            return;
+        }
+        const shown = await this.shownPaths();
+        if (r.kind === "home") {
+            if (!(await this.realHome()).dir) return;
+            return this.eachReal(HOME_PATH, (stat, manifest) => visit(shown(stat), manifest));
+        }
+        return this.eachReal(r.path, (stat, manifest) => visit(shown(stat), manifest));
+    }
+
+    private async eachReal(path: string, visit: (stat: VfsStat, manifest: FileManifest | null) => void): Promise<void> {
         /**
          * One directory at a time, depth-first, with the records it is about to
          * need fetched ahead of it.
@@ -1074,8 +1261,13 @@ export class VfsNamespace {
                 }
                 const { name, entry } = frame.children[frame.next++];
                 const at = childPath(frame.path, name);
-                if (entry.kind !== "dir") {
+                if (entry.kind === "file") {
                     visit(toStat(at, name, entry), entry.manifest);
+                    continue;
+                }
+                // Reported, never walked into: what is below a link is a share's, not the user's.
+                if (entry.kind === "link") {
+                    visit(toStat(at, name, entry), null);
                     continue;
                 }
                 // A directory that is one of ITS OWN ancestors is a true cycle:
@@ -1106,6 +1298,15 @@ export class VfsNamespace {
     }
 
     async readFile(path: string): Promise<Uint8Array> {
+        if (!this.deps.shares) return this.readFileReal(path);
+        const target = this.resolve(path);
+        const r = await this.route(target, { follow: true });
+        if (r.kind === "share") return this.mount.read(r);
+        if (r.kind !== "real") throw new VfsConflictError(`${target} is a directory`);
+        return this.readFileReal(r.path);
+    }
+
+    private async readFileReal(path: string): Promise<Uint8Array> {
         const entry = await this.expectFile(path);
         return this.deps.content.read(entry.manifest);
     }
@@ -1121,7 +1322,7 @@ export class VfsNamespace {
      * a hash and a reference, not a copy.
      */
     async statManifest(path: string): Promise<{ manifest: FileManifest; size: number }> {
-        const entry = await this.expectFile(path);
+        const entry = await this.expectFile(await this.ownPath(path, "has no content handles"));
         return { manifest: entry.manifest, size: entry.size };
     }
 
@@ -1157,13 +1358,23 @@ export class VfsNamespace {
      * shards.
      */
     async writeManifest(path: string, manifest: FileManifest, size: number): Promise<VfsStat> {
+        if (!this.deps.shares) return this.writeManifestReal(path, manifest, size);
+        const target = this.resolve(path);
+        const real = await this.ownPath(target, "has no content handles", true);
+        if (real === HOME_PATH) throw new VfsConflictError(`${target} is kept for your Home folder`);
+        return { ...(await this.writeManifestReal(real, manifest, size)), path: target, name: basename(target) };
+    }
+
+    private async writeManifestReal(path: string, manifest: FileManifest, size: number): Promise<VfsStat> {
         const target = this.resolve(path);
         const name = basename(target);
         assertValidName(name);
-        await this.mkdir(dirname(target), { recursive: true });
+        await this.mkdirReal(dirname(target), { recursive: true });
 
         const parent = await this.openDir(dirname(target));
-        if (entryIn(parent.node, name)?.kind === "dir") throw new VfsConflictError(`${target} is a directory`);
+        const there = entryIn(parent.node, name);
+        if (there?.kind === "dir") throw new VfsConflictError(`${target} is a directory`);
+        if (there?.kind === "link") throw isLink(target);
 
         await this.deps.content.retain(manifest);
         let entry!: FileEntry;
@@ -1172,6 +1383,7 @@ export class VfsNamespace {
             // this replaces - and what it takes the id and history from.
             const prior = entryIn(node, name);
             if (prior?.kind === "dir") throw new VfsConflictError(`${target} is a directory`);
+            if (prior?.kind === "link") throw isLink(target);
             entry = {
                 kind: "file",
                 id: prior?.id ?? newId(),
@@ -1194,6 +1406,17 @@ export class VfsNamespace {
      * existing target, matching `mkdir -p`.
      */
     async mkdir(path: string, opts: { recursive?: boolean } = {}): Promise<void> {
+        if (!this.deps.shares) return this.mkdirReal(path, opts);
+        const target = this.resolve(path);
+        const r = await this.route(target, { follow: false, write: true });
+        if (r.kind === "share") return this.mount.mkdir(r, opts.recursive === true);
+        if (r.kind === "real") return this.mkdirReal(r.path, opts);
+        // `/Home/Shared`: there already, as `mkdir -p` may find it; never made.
+        if (opts.recursive) return;
+        throw new VfsConflictError(`${target} is where your shared folders are listed; it cannot be created`);
+    }
+
+    private async mkdirReal(path: string, opts: { recursive?: boolean } = {}): Promise<void> {
         const target = this.resolve(path);
         if (target === "/") return;
         // Before anything is created. This is also the whole of the check for
@@ -1228,6 +1451,12 @@ export class VfsNamespace {
             if (existing) {
                 if (existing.kind === "file") throw new VfsConflictError(`${next} is a file`);
                 if (isLast && !opts.recursive) throw new VfsConflictError(`${next} already exists`);
+                // `mkdir -p` of a link is satisfied, as of a symlink to a folder. Nothing is made THROUGH one
+                // here: what is below a link is a share's, and the caller routes those paths to it.
+                if (existing.kind === "link") {
+                    if (isLast) return;
+                    throw isLink(next);
+                }
             } else {
                 if (!isLast && !opts.recursive) throw new VfsNotFoundError(current);
                 await this.createDir(current, name, next, opts.recursive === true);
@@ -1246,6 +1475,17 @@ export class VfsNamespace {
      * not refused: such an operation removes those first.
      */
     async assertCreatable(dirs: Iterable<string>): Promise<void> {
+        if (!this.deps.shares) return this.assertCreatableReal(dirs);
+        const real: string[] = [];
+        for (const dir of new Set([...dirs].map((d) => this.resolve(d)))) {
+            const r = await this.route(dir, { follow: false, write: true });
+            if (r.kind !== "real") throw new VfsConflictError(`${dir} is in a shared folder, which this cannot write to`);
+            real.push(r.path);
+        }
+        return this.assertCreatableReal(real);
+    }
+
+    private async assertCreatableReal(dirs: Iterable<string>): Promise<void> {
         let checked = 0;
         for (const target of new Set([...dirs].map((dir) => this.resolve(dir)))) {
             assertWritableDepth(target);
@@ -1258,6 +1498,8 @@ export class VfsNamespace {
                     assertNotHidden(dir, name, at);
                     break;   // everything below it is to be created
                 }
+                // Not a file to be removed first: removing a link would lose it.
+                if (entry.kind === "link") throw isLink(at);
                 if (entry.kind !== "dir") break;
                 dir = await this.openDirById(entry.id, fromBase64(entry.key), at);
             }
@@ -1279,11 +1521,28 @@ export class VfsNamespace {
         data: Uint8Array | string | Blob,
         opts: { type?: string; onProgress?: (done: number, total: number) => void } = {},
     ): Promise<VfsStat> {
+        if (!this.deps.shares) return this.writeFileReal(path, data, opts);
+        const target = this.resolve(path);
+        const r = await this.route(target, { follow: false, write: true });
+        if (r.kind === "share") return this.mount.write(r, data, opts);
+        if (r.kind !== "real") throw new VfsConflictError(`${target} is a directory`);
+        if (r.path === HOME_PATH) throw new VfsConflictError(`${target} is kept for your Home folder`);
+        return { ...(await this.writeFileReal(r.path, data, opts)), path: target, name: basename(target) };
+    }
+
+    private async writeFileReal(
+        path: string,
+        data: Uint8Array | string | Blob,
+        opts: { type?: string; onProgress?: (done: number, total: number) => void } = {},
+    ): Promise<VfsStat> {
         const target = this.resolve(path);
         const name = basename(target);
         assertValidName(name);
         const parentPath = dirname(target);
-        await this.mkdir(parentPath, { recursive: true });
+        await this.mkdirReal(parentPath, { recursive: true });
+        // A link is never written over (a file there would take the share's place in the user's tree), and is
+        // refused before any bytes are uploaded.
+        if (entryIn((await this.openDir(parentPath)).node, name)?.kind === "link") throw isLink(target);
 
         const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
         const { manifest, size } = await this.deps.content.write(
@@ -1295,6 +1554,7 @@ export class VfsNamespace {
         const parent = await this.openDir(parentPath);
         const prior = entryIn(parent.node, name);
         if (prior?.kind === "dir") throw new VfsConflictError(`${target} is a directory`);
+        if (prior?.kind === "link") throw isLink(target);
 
         const id = prior?.id ?? newId();
         let versions = asCount(prior?.versions);
@@ -1308,6 +1568,7 @@ export class VfsNamespace {
             // lose that write - from the file, and from its history.
             const now = entryIn(node, name);
             if (now?.kind === "dir") throw new VfsConflictError(`${target} is a directory`);
+            if (now?.kind === "link") throw isLink(target);
             if (!sameEntry(prior, now)) throw changedMeanwhile(target);
             entry = {
                 kind: "file", id, manifest, size, mtime: Date.now(), versions,
@@ -1328,6 +1589,25 @@ export class VfsNamespace {
      * manifest, and releasing would free content history depends on.
      */
     async delete(path: string, opts: { recursive?: boolean; keepContent?: boolean } = {}): Promise<void> {
+        if (!this.deps.shares) return this.deleteReal(path, opts);
+        const target = this.resolve(path);
+        // A link's own path is the link, which is the user's to delete; never the share behind it.
+        const r = await this.route(target, { follow: false, write: true });
+        if (r.kind === "share") return this.mount.delete(r, opts.recursive === true);
+        if (r.kind !== "real") throw new VfsConflictError(`${target} is where your shared folders are listed; it cannot be deleted`);
+        return this.deleteReal(r.path, opts);
+    }
+
+    /**
+     * `swap`: instead of deleting the folder, put `swap.link` in its place (see `finishSharing`). Everything else
+     * a recursive delete does to keep a concurrent move or write from being lost is the same; what it would let
+     * go of, or detach unread, it refuses instead.
+     */
+    private async deleteReal(
+        path: string,
+        opts: { recursive?: boolean; keepContent?: boolean } = {},
+        swap?: SharingSwap,
+    ): Promise<void> {
         const target = this.resolve(path);
         if (target === "/") throw new VfsConflictError("the root directory cannot be deleted");
         const name = basename(target);
@@ -1336,7 +1616,7 @@ export class VfsNamespace {
         const parent = opened.dir;
         const entry = entryIn(parent.node, name);
         if (!entry) {
-            if (!Object.hasOwn(parent.hidden, name)) throw new VfsNotFoundError(target);
+            if (swap || !Object.hasOwn(parent.hidden, name)) throw new VfsNotFoundError(target);
             // An entry this version cannot read, asked for by its exact name.
             // It may be a newer version's, and what it holds cannot be known,
             // so only a recursive delete removes it - and only detaches it,
@@ -1353,6 +1633,10 @@ export class VfsNamespace {
         // and on its way to a second place. Letting go of it here would let
         // go of what the move puts there. See `inMotion`.
         if (this.inMotion.has(entry.id)) throw beingMoved(target);
+        // Sharing: still the folder the share was filled from, still marked as going to that share.
+        if (swap && (entry.kind !== "dir" || entry.id !== swap.dirId || sharingOf(entry)?.spaceId !== swap.spaceId)) {
+            throw changedMeanwhile(target);
+        }
         // And from here until it is done, a move of it, or of anything below
         // it, that begins in this namespace is refused. See `deleting`.
         const claim = new Set([entry.id]);
@@ -1390,7 +1674,7 @@ export class VfsNamespace {
                 // this entry's own parent. Removing the pointer is what was asked
                 // for; clearing out what it points at would delete everything
                 // around the target, the target included.
-                if (!opts.recursive) throw new VfsConflictError(`${target} is not empty`);
+                if (!opts.recursive || swap) throw new VfsConflictError(`${target} is not empty`);
                 this.warn(`detaching ${target} without clearing it out: it is a directory above it in the tree`);
             } else if (entry.kind === "dir") {
                 const child = await this.openDirById(entry.id, fromBase64(entry.key), target).catch((err) => {
@@ -1399,7 +1683,7 @@ export class VfsNamespace {
                     // cannot be enumerated, so it is detached rather than purged and
                     // whatever it holds is left for sweep(). Only when asked for
                     // recursively: without that we cannot know it is empty.
-                    if (!(err instanceof VfsCorruptRecordError) || !opts.recursive) throw err;
+                    if (!(err instanceof VfsCorruptRecordError) || !opts.recursive || swap) throw err;
                     this.warn(`detaching ${target} without clearing it out: its record cannot be read`);
                     return null;
                 });
@@ -1419,6 +1703,8 @@ export class VfsNamespace {
                     moving = entry.moving === true || found.moving;
                 }
             }
+            // Sharing never settles a move: the other copy may hold what the share does not.
+            if (swap && moving) throw unfinishedMove(target);
 
             // On this device, the move lock of the target and of everything read
             // below it, held from here until what they held has been let go of.
@@ -1526,8 +1812,20 @@ export class VfsNamespace {
                 const current = this.currentSubtree(doomed, shape, coordinator ? ids : undefined);
                 if (!current) throw changedMeanwhile(target);
                 purging = current;
-                delete node.entries[name];
+                if (swap) {
+                    swap.verify(current);
+                    node.entries[name] = swap.link;
+                } else {
+                    delete node.entries[name];
+                }
             });
+
+            if (swap) {
+                swap.finished = await this.purgeShared(purging, swap.moved);
+                return;
+            }
+            // A folder that was being shared is gone: what `client.shares` kept for that run no longer applies.
+            for (const spaceId of sharingMarks(entry, purging)) sharingDropped(this, spaceId);
 
             if (elsewhere === null) {
                 // Part of the tree cannot be read, so it is unknown whether the
@@ -1537,7 +1835,8 @@ export class VfsNamespace {
                 return;
             }
             if (entry.kind === "dir") await this.purge(purging, elsewhere, opts.keepContent);
-            else await this.letGo(new Map([[entry.id, [{ dir: parent, entry }]]]), elsewhere, opts.keepContent);
+            else if (entry.kind === "file") await this.letGo(new Map([[entry.id, [{ dir: parent, entry }]]]), elsewhere, opts.keepContent);
+            // A link holds nothing of the user's: detaching it was the whole of deleting it.
             if (elsewhere && entry.moving === true) await this.settle(entry.id, elsewhere);
         } finally {
             release?.();
@@ -1555,6 +1854,17 @@ export class VfsNamespace {
      * first: what is below must still be inside MAX_DEPTH once it is moved.
      */
     async rename(from: string, to: string): Promise<void> {
+        if (!this.deps.shares) return this.renameReal(from, to);
+        const [a, b] = await this.routeEnds(from, to);
+        if (a.kind === "real" && b.kind === "real") {
+            if (b.path === HOME_PATH) await this.refuseNonDirAtHome(a.path);
+            return this.renameReal(a.path, b.path);
+        }
+        if (a.kind === "share" && b.kind === "share" && a.spaceId === b.spaceId) return this.mount.rename(a, b);
+        throw acrossBoundary();
+    }
+
+    private async renameReal(from: string, to: string): Promise<void> {
         const src = this.resolve(from);
         const dst = this.resolve(to);
         if (src === dst) return;
@@ -1627,7 +1937,7 @@ export class VfsNamespace {
                 assertWritableDepth(dst);
                 if (segments(dst).length > segments(src).length) await this.assertFitsAt(src, dst);
             }
-            await this.mkdir(dirname(dst), { recursive: true });
+            await this.mkdirReal(dirname(dst), { recursive: true });
             const way = await this.openChain(dirname(dst));
             if (!way) throw new VfsNotFoundError(dirname(dst));
             let dstParent = way.dir;
@@ -1777,7 +2087,7 @@ export class VfsNamespace {
     private async assertFitsAt(src: string, dst: string): Promise<void> {
         const room = MAX_DEPTH - segments(dst).length;
         try {
-            await this.eachEntry(src, ({ kind, path }) => {
+            await this.eachReal(src, ({ kind, path }) => {
                 if (kind !== "dir") return;
                 const below = path.slice(src.length);
                 if (below.split("/").length - 1 <= room) return;
@@ -1801,6 +2111,18 @@ export class VfsNamespace {
      * onto the other.
      */
     async copy(from: string, to: string): Promise<VfsStat> {
+        if (!this.deps.shares) return this.copyReal(from, to);
+        const [a, b] = await this.routeEnds(from, to, true);
+        if (a.kind === "real" && b.kind === "real") {
+            if (b.path === HOME_PATH) await this.refuseNonDirAtHome(a.path);
+            const target = this.resolve(to);
+            return { ...(await this.copyReal(a.path, b.path)), path: target, name: basename(target) };
+        }
+        if (a.kind === "share" && b.kind === "share" && a.spaceId === b.spaceId) return this.mount.copy(a, b);
+        throw acrossBoundary();
+    }
+
+    private async copyReal(from: string, to: string): Promise<VfsStat> {
         const src = this.resolve(from);
         const dst = this.resolve(to);
         if (src === "/") throw new VfsConflictError("the root directory cannot be copied");
@@ -1812,7 +2134,7 @@ export class VfsNamespace {
 
         const dstName = basename(dst);
         assertValidName(dstName);
-        await this.mkdir(dirname(dst), { recursive: true });
+        await this.mkdirReal(dirname(dst), { recursive: true });
         const dstParent = await this.openDir(dirname(dst));
         if (entryIn(dstParent.node, dstName)) throw new VfsConflictError(`${dst} already exists`);
         assertNotHidden(dstParent, dstName, dst);
@@ -1929,7 +2251,7 @@ export class VfsNamespace {
 
     /** Prior versions of a file, newest first. One record fetch. */
     async history(path: string): Promise<Array<{ size: number; mtime: number }>> {
-        const target = this.resolve(path);
+        const target = await this.ownPath(path, "keeps no version history");
         const entry = await this.expectFile(target);
         const { record } = await this.readHistory(await this.openDir(dirname(target)), basename(target), entry, target);
         return record.versions.map(({ size, mtime }) => ({ size: asCount(size), mtime: asTime(mtime) }));
@@ -1942,6 +2264,13 @@ export class VfsNamespace {
      * undoable rather than a one-way door.
      */
     async restore(path: string, index = 0): Promise<VfsStat> {
+        if (!this.deps.shares) return this.restoreReal(path, index);
+        const target = this.resolve(path);
+        const real = await this.ownPath(target, "keeps no version history", true);
+        return { ...(await this.restoreReal(real, index)), path: target, name: basename(target) };
+    }
+
+    private async restoreReal(path: string, index: number): Promise<VfsStat> {
         const target = this.resolve(path);
         const name = basename(target);
         const parent = await this.openDir(dirname(target));
@@ -1972,11 +2301,393 @@ export class VfsNamespace {
         return toStat(target, name, restored);
     }
 
+    // ---- links and shares -----------------------------------------------------
+
+    /**
+     * Put a link to a share at `path` in the user's own files. Paths below it are then served by that share,
+     * as paths below `/Home/Shared/<name>` are. The link holds nothing else: deleting it, moving it or copying it
+     * touches only the link, never the share.
+     *
+     * Throws VfsConflictError when anything is at `path` already (including an entry this version cannot read),
+     * and for a place a link cannot go: `/Home/Shared`, `/Home`, or inside a share.
+     */
+    async link(path: string, spaceId: string): Promise<void> {
+        if (typeof spaceId !== "string" || !SPACE_ID.test(spaceId)) {
+            throw new Error(`VFS: ${JSON.stringify(printable(String(spaceId), 140))} is not a share id`);
+        }
+        const target = this.resolve(path);
+        let real = target;
+        if (this.deps.shares) {
+            const r = await this.route(target, { follow: false, write: true });
+            if (r.kind === "share") throw new VfsConflictError(`${target} is inside a shared folder; a link goes in your own files`);
+            if (r.kind !== "real") throw new VfsConflictError(`${target} already exists`);
+            if (r.path === HOME_PATH) throw new VfsConflictError(`${target} is kept for your Home folder`);
+            real = r.path;
+        }
+        if (real === "/") throw new VfsConflictError("/ already exists");
+        const name = basename(real);
+        assertValidName(name);
+        await this.mkdirReal(dirname(real), { recursive: true });
+        const parent = await this.openDir(dirname(real));
+        const free = (node: DirNode, record: OpenDir) => {
+            if (entryIn(node, name)) throw new VfsConflictError(`${target} already exists`);
+            assertNotHidden(record, name, target);
+        };
+        free(parent.node, parent);
+        const entry: LinkEntry = { kind: "link", id: newId(), target: { spaceId }, mtime: Date.now() };
+        await this.mutate(parent, (node, record) => {
+            // Looked at before the wait above: another write may have taken the name since.
+            free(node, record);
+            node.entries[name] = entry;
+        });
+    }
+
+    /** The share a link at `path` stands for. VfsConflictError when what is there is not a link. */
+    async readLink(path: string): Promise<{ spaceId: string }> {
+        const { spaceId } = await this.readLinkEntry(path);
+        return { spaceId };
+    }
+
+    /** `readLink`, with the link entry's own id (for `client.shares.shareFolder`: see `sharingAccess.ts`). */
+    private async readLinkEntry(path: string): Promise<{ spaceId: string; linkId: string }> {
+        const target = this.resolve(path);
+        let real = target;
+        if (this.deps.shares) {
+            const r = await this.route(target, { follow: false });
+            if (r.kind !== "real") throw new VfsConflictError(`${target} is not a link`);
+            real = r.path;
+        }
+        const found = await this.find(real);
+        if (!found) throw new VfsNotFoundError(target);
+        if (found.entry.kind !== "link") throw new VfsConflictError(`${target} is not a link`);
+        return { spaceId: found.entry.target.spaceId, linkId: found.entry.id };
+    }
+
+    // ---- sharing a folder (`client.shares.shareFolder`) -------------------------
+    //
+    // Sharing a folder moves its files into a share and leaves a link where the folder was. It is three steps,
+    // each of which `client.shares.shareFolder` drives: read the folder (`sharingPlan`), mark it with the share it
+    // is going to (`markSharing`), post each file's manifest to the share, replace the folder with the link
+    // (`finishSharing`), and only then let go of each removed file's personal reference. Until the
+    // link is in place nothing of the user's is removed or let go of, and a run that stops anywhere before it is
+    // resumed by running it again.
+
+    /**
+     * Read a folder of the user's own for sharing: every file below it with its manifest, the empty folders, and
+     * the share an unfinished earlier run was moving it into. Changes nothing.
+     *
+     * Refused (VfsConflictError) for anything a share cannot take whole: not a folder; `/`, `/Home`, a link, or
+     * a place in a share; a folder holding a link, an entry this version cannot read, or one half of a move that
+     * did not finish; a folder or file named in two places inside it.
+     */
+    private async sharingPlan(path: string): Promise<SharingPlan> {
+        const target = this.resolve(path);
+        const real = await this.ownPath(target, "is shared already", true);
+        if (real === "/" || real === HOME_PATH) throw new VfsConflictError(`${target} cannot be shared; share a folder inside it`);
+        const opened = await this.openChain(dirname(real));
+        if (!opened) throw new VfsNotFoundError(target);
+        const name = basename(real);
+        const entry = entryIn(opened.dir.node, name);
+        if (!entry) {
+            if (Object.hasOwn(opened.dir.hidden, name)) throw new VfsConflictError(`${printable(target, 1024)} cannot be read by this version`);
+            throw new VfsNotFoundError(target);
+        }
+        if (entry.kind === "link") throw new VfsConflictError(`${target} is shared already`);
+        if (entry.kind !== "dir") throw new VfsConflictError(`${target} is not a folder`);
+        if (entry.moving === true || this.inMotion.has(entry.id)) throw unfinishedMove(target);
+        const above = new Set(opened.chain);
+        if (above.has(entry.id)) throw new VfsConflictError(`${target} is a folder above itself in the tree`);
+
+        const files: SharingPlan["files"] = [];
+        const folders: SharingPlan["folders"] = [];
+        const seen = new Set<string>([entry.id]);
+        let budget = this.maxEntries;
+        const pending: Array<{ dir: OpenDir; rel: string; depth: number }> = [
+            { dir: await this.openDirById(entry.id, fromBase64(entry.key), real), rel: "", depth: 0 },
+        ];
+        for (let frame = pending.pop(); frame; frame = pending.pop()) {
+            const { dir, rel, depth } = frame;
+            const where = rel ? `${real}/${rel}` : real;
+            if (Object.keys(dir.hidden).length > 0) {
+                throw new VfsConflictError(`${printable(where, 1024)} holds entries this version cannot read; nothing was shared`);
+            }
+            const children = Object.entries(dir.node.entries);
+            budget -= children.length;
+            if (budget < 0) throw new VfsLimitError("entries", this.maxEntries, real, where, "sharing");
+            if (children.length === 0 && rel) folders.push({ dirId: dir.id, path: rel });
+            for (const [childName, child] of children) {
+                const at = rel ? `${rel}/${childName}` : childName;
+                if (child.moving === true) throw unfinishedMove(`${real}/${at}`);
+                if (child.kind === "link") {
+                    throw new VfsConflictError(`${real}/${at} is a shared folder, and a shared folder cannot hold another; move it out first`);
+                }
+                if (seen.has(child.id) || above.has(child.id)) {
+                    throw new VfsConflictError(`${real}/${at} is also named somewhere else in ${target}; nothing was shared`);
+                }
+                seen.add(child.id);
+                if (child.kind === "file") {
+                    files.push({ fileId: child.id, path: at, manifest: child.manifest, size: child.size });
+                    continue;
+                }
+                if (depth + 1 > MAX_DEPTH) throw new VfsLimitError("depth", MAX_DEPTH, real, `${real}/${at}`, "sharing");
+                pending.push({ dir: await this.openDirById(child.id, fromBase64(child.key), `${real}/${at}`), rel: at, depth: depth + 1 });
+            }
+        }
+        files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+        folders.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+        const counted = new Map<string, number>();
+        for (const f of files) if (!counted.has(f.manifest.id)) counted.set(f.manifest.id, asCount(f.manifest.size ?? f.size));
+        let bytes = 0;
+        for (const n of counted.values()) bytes += n;
+        return { path: real, name, dirId: entry.id, sharing: sharingOf(entry), files, folders, bytes };
+    }
+
+    /**
+     * Mark the folder at `path` (still the folder `dirId`) as being moved into the share `spaceId`, so a run that
+     * stops part-way resumes into the same share. Replaces an earlier mark (a share that moved on to a successor).
+     */
+    private async markSharing(path: string, dirId: string, spaceId: string): Promise<void> {
+        if (typeof spaceId !== "string" || !SPACE_ID.test(spaceId)) throw new Error(`VFS: ${JSON.stringify(printable(String(spaceId), 140))} is not a share id`);
+        const target = this.resolve(path);
+        const real = await this.ownPath(target, "is shared already", true);
+        const parent = await this.openDir(dirname(real));
+        const name = basename(real);
+        await this.mutate(parent, (node) => {
+            const now = entryIn(node, name);
+            if (!now || now.kind !== "dir" || now.id !== dirId) throw changedMeanwhile(target);
+            if (sharingOf(now)?.spaceId === spaceId) return false;
+            node.entries[name] = { ...now, sharing: { spaceId } };
+            return true;
+        });
+    }
+
+    /**
+     * The last step of sharing a folder: replace the folder at `path` - still the folder `dirId`, still marked as
+     * going to `spaceId` - with a link to that share, then remove its records. Each file's current content is
+     * NOT let go of here: the files whose records were removed are returned (`detached`) for the caller to let
+     * go of. What is let go of here is each such file's earlier versions, which a share does not keep, and its
+     * history record. A record that, read again from the store just before its removal, holds anything not in
+     * `moved` (another device wrote into it) is left in place and listed in `kept`.
+     *
+     * Refused with VfsConflictError, changing nothing, unless the folder holds exactly what `moved` lists: a file
+     * saved, changed, moved out or deleted since (by its id and manifest id), a new empty folder, a link, an
+     * entry this version cannot read, or a move that did not finish. Read the folder again first.
+     */
+    private async finishSharing(
+        path: string,
+        dirId: string,
+        spaceId: string,
+        moved: SharingMoved,
+        linkId: string,
+    ): Promise<SharingFinished> {
+        if (typeof spaceId !== "string" || !SPACE_ID.test(spaceId)) throw new Error(`VFS: ${JSON.stringify(printable(String(spaceId), 140))} is not a share id`);
+        if (typeof linkId !== "string" || !ENTRY_ID.test(linkId)) throw new Error("VFS: not a link id");
+        const target = this.resolve(path);
+        const real = await this.ownPath(target, "is shared already", true);
+        // The caller's id, so that it can tell later that a link at `path` is the one this swap wrote.
+        const link: LinkEntry = { kind: "link", id: linkId, target: { spaceId }, mtime: Date.now() };
+        const verify = (dirs: OpenDir[]) => {
+            const ids = new Set(dirs.map((d) => d.id));
+            const present = new Set<string>();
+            for (const dir of dirs) {
+                if (Object.keys(dir.hidden).length > 0) throw changedWhileSharing(target);
+                const entries = Object.values(dir.node.entries);
+                if (entries.length === 0 && dir.id !== dirId && !moved.emptyDirs.has(dir.id)) throw changedWhileSharing(target);
+                for (const e of entries) {
+                    if (e.moving === true || e.kind === "link") throw changedWhileSharing(target);
+                    if (e.kind === "dir" && !ids.has(e.id)) throw changedWhileSharing(target);
+                    if (e.kind === "file" && moved.files.get(e.id) !== e.manifest.id) throw changedWhileSharing(target);
+                    if (e.kind === "file") present.add(e.id);
+                }
+            }
+            // Symmetric: a file moved out or deleted since is not to be let go of, and not to be counted as moved.
+            if (present.size !== moved.files.size) throw changedWhileSharing(target);
+        };
+        const swap: SharingSwap = { dirId, spaceId, link, verify, moved };
+        await this.deleteReal(real, { recursive: true }, swap);
+        return swap.finished ?? { detached: [], kept: [] };
+    }
+
+    /**
+     * Whether `path` is a link, `/Home/Shared`, or inside a share - somewhere the user's own files are not, and
+     * that only `list`, `stat`, `readFile`, `writeFile`, `mkdir`, `delete`, `rename`, `copy` and walks serve.
+     * True for a link even with no shares wired. Version control refuses a project there.
+     */
+    async inShare(path: string): Promise<boolean> {
+        const target = this.resolve(path);
+        if (!this.deps.shares) return (await this.linkOnTheWay(segments(target), segments(target).length)) !== null;
+        try {
+            const r = await this.route(target, { follow: true });
+            return r.kind === "share" || r.kind === "shared";
+        } catch (err) {
+            if (err instanceof VfsNotFoundError && isUnder(target, SHARED_PATH)) return true;
+            throw err;
+        }
+    }
+
+    /**
+     * Where `path` leads, with shares wired.
+     *
+     * - `/Home` is virtual for reads: the user's own `/Home` folder (if there is one) plus `Shared`. For a write
+     *   (`write`), it is that real folder, made when first written into. A real `/Home` that is not a folder is
+     *   just that entry.
+     * - `/Home/Shared` lists the shares; `/Home/Shared/<name>/...` is inside the share listed as `<name>`
+     *   (VfsNotFoundError when there is none). The user's own `/Home/Shared`, if they have one, is reached as
+     *   `/Home/Shared (yours)` (see `sharedAlias`).
+     * - A path that passes through a link is inside that link's share. `follow` also follows a link AT the path
+     *   (list, walk, read, cd); without it the path is the link itself (stat, delete, rename, writeFile).
+     * - Anything else is the user's own tree, unchanged.
+     *
+     * Records that cannot be read on the way are left to the operation to report, as it always has.
+     *
+     * A write (`write`, unless `guard` is false - a copy's source is only read) to `/Home/Shared/<X>/...` is
+     * refused when the user's own `/Home/Shared` holds `<X>`: until shares came, that path WAS their folder, and
+     * a mount, a script or a bookmark that still means it would otherwise write personal files into a share, or
+     * delete a share's files. Reads still go to the share.
+     */
+    private async route(path: string, opts: { follow: boolean; write?: boolean; guard?: boolean }): Promise<Route> {
+        const target = this.resolve(path);
+        const parts = segments(target);
+        const real = [...parts];
+        if (parts[0] === HOME) {
+            if (parts.length === 1) {
+                if (opts.write) return { kind: "real", path: target };
+                const home = await this.realHome();
+                return home.entry && home.entry.kind !== "dir" ? { kind: "real", path: target } : { kind: "home" };
+            }
+            if (parts[1] === SHARED) {
+                if (parts.length === 2) return { kind: "shared" };
+                if (opts.write && opts.guard !== false) await this.refuseStaleSharedPath(target, parts[2]);
+                const share = await this.mount.byName(parts[2]);
+                if (!share) throw new VfsNotFoundError(`${SHARED_PATH}/${parts[2]}`);
+                return { kind: "share", spaceId: share.spaceId, at: `${SHARED_PATH}/${parts[2]}`, rest: parts.slice(3).join("/"), path: target };
+            }
+            const alias = await this.sharedAlias();
+            if (alias !== null && parts[1] === alias) real[1] = SHARED;
+        }
+        const through = await this.linkOnTheWay(real, opts.follow ? real.length : real.length - 1);
+        if (through) {
+            const at = `/${parts.slice(0, through.depth + 1).join("/")}`;
+            return { kind: "share", spaceId: through.spaceId, at, rest: parts.slice(through.depth + 1).join("/"), path: target };
+        }
+        return { kind: "real", path: `/${real.join("/")}` };
+    }
+
+    /** The first link among the first `upto` names of `parts`, followed from the root, and where it is. */
+    private async linkOnTheWay(parts: string[], upto: number): Promise<{ spaceId: string; depth: number } | null> {
+        try {
+            let dir = await this.root();
+            for (let i = 0; i < upto; i++) {
+                const entry = entryIn(dir.node, parts[i]);
+                if (entry?.kind === "link") return { spaceId: entry.target.spaceId, depth: i };
+                if (entry?.kind !== "dir") return null;
+                dir = await this.openDirById(entry.id, fromBase64(entry.key), `/${parts.slice(0, i + 1).join("/")}`);
+            }
+        } catch (err) {
+            if (err instanceof VfsLockedError) throw err;
+        }
+        return null;
+    }
+
+    /**
+     * The user's own `/Home/Shared` holds `name`: refuse a write to `target`, which is `/Home/Shared/<name>/...`.
+     * See `route`.
+     */
+    private async refuseStaleSharedPath(target: string, name: string): Promise<void> {
+        const alias = await this.sharedAlias();
+        if (alias === null) return;
+        const { dir: home } = await this.realHome();
+        const own = home && entryIn(home.node, SHARED);
+        if (own?.kind !== "dir") return;
+        const dir = await this.openDirById(own.id, fromBase64(own.key), SHARED_PATH);
+        if (!Object.hasOwn(dir.node.entries, name) && !Object.hasOwn(dir.hidden, name)) return;
+        const yours = `${HOME_PATH}/${alias}/${name}`;
+        throw new VfsConflictError(
+            `${printable(target, 1024)} is in a shared folder, but your own folder of the same name is now ${printable(yours, 1024)}; ` +
+                `nothing was changed. Use ${printable(yours, 1024)} for your own files`,
+        );
+    }
+
+    /**
+     * Both ends of a move or a copy. A destination in `/Home/Shared` that names no share is across a boundary.
+     * `sourceIsRead`: a copy, whose source is only read.
+     */
+    private async routeEnds(from: string, to: string, sourceIsRead = false): Promise<[Route, Route]> {
+        const a = await this.route(from, { follow: false, write: true, guard: !sourceIsRead });
+        const b = await this.route(to, { follow: false, write: true }).catch((err) => {
+            if (err instanceof VfsNotFoundError && isUnder(this.resolve(to), SHARED_PATH)) throw acrossBoundary();
+            throw err;
+        });
+        return [a, b];
+    }
+
+    /**
+     * `path` in the user's own tree, for an operation that has no meaning in a share (`what` says why). Without
+     * shares, the path as it is.
+     */
+    private async ownPath(path: string, what: string, write = false): Promise<string> {
+        const target = this.resolve(path);
+        if (!this.deps.shares) return target;
+        const r = await this.route(target, { follow: false, write });
+        if (r.kind === "real") return r.path;
+        if (r.kind === "share") throw new VfsConflictError(`${target} is in a shared folder, which ${what}`);
+        throw new VfsConflictError(`${target} is a directory`);
+    }
+
+    /** `/Home` is the Home folder: only a folder may be moved or copied there. */
+    private async refuseNonDirAtHome(src: string): Promise<void> {
+        const found = await this.find(src);
+        if (found && found.entry.kind !== "dir") throw new VfsConflictError(`${HOME_PATH} is kept for your Home folder`);
+    }
+
+    /** The user's own `/Home` entry, and its record when it is a folder. */
+    private async realHome(): Promise<{ entry: Entry | undefined; dir: OpenDir | null }> {
+        const root = await this.root();
+        const entry = entryIn(root.node, HOME);
+        if (entry?.kind !== "dir") return { entry, dir: null };
+        return { entry, dir: await this.openDirById(entry.id, fromBase64(entry.key), HOME_PATH) };
+    }
+
+    /**
+     * The name the user's own `/Home/Shared` is shown and reached under - `Shared (yours)`, or the first of
+     * `Shared (yours 2)`, `Shared (yours 3)`... not taken in `/Home` - or null when they have none.
+     */
+    private async sharedAlias(): Promise<string | null> {
+        const { dir } = await this.realHome();
+        if (!dir || !entryIn(dir.node, SHARED)) return null;
+        const used = (name: string) => Object.hasOwn(dir.node.entries, name) || Object.hasOwn(dir.hidden, name);
+        let alias = SHARED_YOURS;
+        for (let n = 2; used(alias); n++) alias = `${SHARED} (yours ${n})`;
+        return alias;
+    }
+
+    /** Rewrites a stat of the user's own `/Home/Shared`, or of anything in it, to the path it is shown under. */
+    private async shownPaths(): Promise<(stat: VfsStat) => VfsStat> {
+        // Unreadable or locked here, the operation itself says so.
+        const alias = await this.sharedAlias().catch(() => null);
+        if (alias === null) return (stat) => stat;
+        const to = `${HOME_PATH}/${alias}`;
+        return (stat) => {
+            if (stat.path === SHARED_PATH) return { ...stat, path: to, name: alias };
+            if (stat.path.startsWith(`${SHARED_PATH}/`)) return { ...stat, path: to + stat.path.slice(SHARED_PATH.length) };
+            return stat;
+        };
+    }
+
+    /** `/Home`'s listing: the user's own `/Home` folder, if any, and `Shared`. */
+    private async listHome(): Promise<VfsStat[]> {
+        const { dir } = await this.realHome();
+        const shown = await this.shownPaths();
+        const own = dir ? this.children(dir).map(({ name, entry }) => shown(toStat(`${HOME_PATH}/${name}`, name, entry))) : [];
+        return [...own, virtualDir(SHARED_PATH)].sort(byDirsThenName);
+    }
+
     // ---- internals ----------------------------------------------------------
 
     private async expectFile(path: string): Promise<FileEntry> {
         const found = await this.find(path);
         if (!found) throw new VfsNotFoundError(this.resolve(path));
+        if (found.entry.kind === "link") throw isLink(this.resolve(path));
         if (found.entry.kind !== "file") throw new VfsConflictError(`${this.resolve(path)} is a directory`);
         return found.entry;
     }
@@ -2609,6 +3320,7 @@ export class VfsNamespace {
             const now = entryIn(node, name);
             there = now;
             if (now?.kind === "dir" && recursive) return false;
+            if (now?.kind === "link") throw isLink(path);
             if (now) throw new VfsConflictError(`${path} ${now.kind === "dir" ? "already exists" : "is a file"}`);
             assertNotHidden(record, name, path);
             node.entries[name] = entry;
@@ -2786,6 +3498,54 @@ export class VfsNamespace {
     }
 
     /**
+     * Remove the records of a folder that has just been replaced by a link to the share its files went to (see
+     * `finishSharing`), and return the files whose records went, for the caller to let go of their content.
+     *
+     * Each record is read again from the store, past the cache, just before it is removed: the checks before the
+     * swap looked at this device's copies, and another device may have written into one since. A record that now
+     * holds anything not in `moved` (or cannot be read) is left in place, with a warning, and its files are not
+     * returned. Otherwise each file's earlier versions are let go of and its history record removed. Best-effort,
+     * like `purge`: a failure leaks storage, never loses anything.
+     */
+    private async purgeShared(dirs: OpenDir[], moved: SharingMoved): Promise<SharingFinished> {
+        const doomed = new Set(dirs.map((d) => d.id));
+        const gone: OpenDir[] = [];
+        const kept: string[] = [];
+        for (const dir of dirs) {
+            const fresh = await this.fetchRecord(dir.id, dir.key, this.generation, dir.path, null).catch(() => null);
+            if (fresh && holdsOnlyMoved(fresh, doomed, moved)) gone.push(fresh);
+            else kept.push(dir.path ?? dir.id);
+            this.cache.delete(dir.id);
+        }
+        if (kept.length > 0) {
+            this.warn(`left ${kept.length} folder record(s) of a shared folder in place: changed elsewhere while it was being shared (${kept.map((k) => printable(k, 200)).join(", ")})`);
+        }
+        const files: Leaving = new Map();
+        for (const dir of gone) {
+            for (const [, entry] of followable(dir)) {
+                if (entry.kind !== "file") continue;
+                let copies = files.get(entry.id);
+                if (!copies) files.set(entry.id, (copies = []));
+                copies.push({ dir, entry });
+            }
+        }
+        const detached: SharingFinished["detached"] = [];
+        for (const [id, copies] of files) {
+            detached.push({ fileId: id, manifest: copies[0].entry.manifest });
+            const current = new Set(copies.map(({ entry }) => entry.manifest.id));
+            const record = await this.openHistory(id, copies.map(({ dir }) => dir.key)).catch(() => null);
+            const older = new Map<string, FileManifest>();
+            for (const { manifest } of readableHistory(record?.value).record.versions) {
+                if (!current.has(manifest.id) && !older.has(manifest.id)) older.set(manifest.id, manifest);
+            }
+            for (const manifest of older.values()) await this.deps.content.release(manifest).catch(() => {});
+            await this.deps.store.delete(historyKey(id)).catch(() => {});
+        }
+        for (const dir of gone) await this.deps.store.delete(dirKey(dir.id)).catch(() => {});
+        return { detached, kept };
+    }
+
+    /**
      * Unmark what is left of an interrupted move once a delete has removed
      * the other copy. Marked, a file keeps every version that falls off its
      * history, because the other copy might hold it - for good, once there
@@ -2888,6 +3648,9 @@ export class VfsNamespace {
                 }
                 if (entry.kind === "file") {
                     if (!files.has(entry.id)) files.set(entry.id, dir);
+                } else if (entry.kind === "link") {
+                    // Nothing to follow: a link references a share, nothing in this store. It is understood,
+                    // so it is not counted as unknown either - an old SDK counts it there, and its sweep refuses.
                 } else if (!dirs.has(entry.id)) {
                     dirs.add(entry.id);
                     // No path is ever built from an unusable name.
@@ -2952,6 +3715,8 @@ export class VfsNamespace {
             if (run.write) await this.deps.content.retain(entry.manifest);
             return { kind: "file", id: newId(), manifest: entry.manifest, size: entry.size, mtime: Date.now(), versions: 0 };
         }
+        // A second link to the same share. Nothing of the share is copied.
+        if (entry.kind === "link") return { kind: "link", id: newId(), target: { spaceId: entry.target.spaceId }, mtime: Date.now() };
         // The most expensive walker to leave unguarded: it mints a NEW id, key
         // and stored record at every level, so a cyclic tree does not merely
         // hang - it writes records to the store, and to the user's bill, in an
@@ -3167,11 +3932,21 @@ function toStat(path: string, name: string, entry: Entry): VfsStat {
         size: entry.kind === "file" ? asCount(entry.size) : 0,
         mtime: asTime(entry.mtime),
         versions: entry.kind === "file" ? asCount(entry.versions) : 0,
+        ...(entry.kind === "link" ? { target: { spaceId: entry.target.spaceId } } : {}),
     };
 }
 
-/** Directories first, then alphabetical — what every file explorer does. */
+/** Refuse to treat the link at `path` as a file or a folder of the user's own. */
+function isLink(path: string): VfsConflictError {
+    return new VfsConflictError(`${printable(path, 1024)} is a link to a shared folder`);
+}
+
+/**
+ * Directories first, then alphabetical — what every file explorer does. A link is a folder to look at, so it
+ * sorts with the directories.
+ */
 function byDirsThenName(a: { kind: Entry["kind"]; name: string }, b: { kind: Entry["kind"]; name: string }): number {
-    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+    const folder = (kind: Entry["kind"]) => kind !== "file";
+    if (folder(a.kind) !== folder(b.kind)) return folder(a.kind) ? -1 : 1;
     return a.name.localeCompare(b.name);
 }

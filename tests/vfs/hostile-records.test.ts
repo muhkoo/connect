@@ -1989,3 +1989,103 @@ describe("isSafeName", () => {
         }
     });
 });
+
+/**
+ * `readableEntry` as it was before the VFS learned the `link` kind (0.15.0-alpha.10), copied verbatim. The whole
+ * previous `VfsNamespace` is in tests/vfs/fixtures, with this function in it unchanged; that copy is what the
+ * old-reader tests below run.
+ */
+const LEGACY_ENTRY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+function legacyReadableEntry(value: unknown): boolean {
+    const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+    if (!isObj(value) || typeof value.id !== "string" || !LEGACY_ENTRY_ID.test(value.id)) return false;
+    if (value.kind === "file") return isObj(value.manifest) && typeof value.manifest.id === "string";
+    if (value.kind !== "dir" || typeof value.key !== "string") return false;
+    try {
+        return Buffer.from(value.key, "base64").length === 32;
+    } catch {
+        return false;
+    }
+}
+
+describe("a link, read by an SDK from before links", () => {
+    // What a NEW SDK writes, read by the OLD one. The old reader treats an entry kind it does not know as hidden:
+    // left out of every read, written back by every write, and its name refused to mkdir, rename and copy. A link
+    // relies on exactly that, so it must stay a shape the old reader hides rather than one it misreads.
+    async function linkedTree() {
+        const { VfsNamespace: LegacyVfs } = await import("./fixtures/legacy-VfsNamespace-0.15.0-alpha.10");
+        const made = makeVfs({ seed: SEED });
+        await made.vfs.writeFile("/Photos/mine.txt", "mine");
+        await made.vfs.link("/Photos/Halloween", "space_party");
+        const old = new LegacyVfs({ store: made.store, content: made.content, seed: () => SEED });
+        const d = await locate(made.store, "/Photos");
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        return { ...made, old, d, warn };
+    }
+
+    it("is an entry the old readableEntry rejects (so it is hidden, never misread)", async () => {
+        const { store, d } = await linkedTree();
+        const link = (await readRecord(store, d.id, d.key)).entries.Halloween;
+        expect(link).toMatchObject({ kind: "link", target: { spaceId: "space_party" } });
+        expect(link.id).toMatch(LEGACY_ENTRY_ID);
+        expect(legacyReadableEntry(link)).toBe(false);
+        // The record itself stays readable to the old SDK: format version 1.
+        expect((await readRecord(store, d.id, d.key)).v).toBe(1);
+    });
+
+    it("is hidden from the old SDK's reads", async () => {
+        const { old } = await linkedTree();
+        expect((await old.list("/Photos")).map((e: { name: string }) => e.name)).toEqual(["mine.txt"]);
+        expect(await old.walk("/")).toEqual(["/Photos/mine.txt"]);
+        expect(await old.exists("/Photos/Halloween")).toBe(false);
+    });
+
+    it("survives the old SDK's writes to its siblings", async () => {
+        const { vfs, old, store, d } = await linkedTree();
+        const before = (await readRecord(store, d.id, d.key)).entries.Halloween;
+        await old.writeFile("/Photos/new.txt", "n");
+        await old.mkdir("/Photos/sub");
+        await old.delete("/Photos/mine.txt");
+        await old.rename("/Photos/new.txt", "/Photos/renamed.txt");
+        expect((await readRecord(store, d.id, d.key)).entries.Halloween).toEqual(before);
+        vfs.clearCache();
+        expect(await vfs.readLink("/Photos/Halloween")).toEqual({ spaceId: "space_party" });
+        expect((await vfs.list("/Photos")).map((e) => [e.name, e.kind])).toEqual([
+            ["Halloween", "link"], ["sub", "dir"], ["renamed.txt", "file"],
+        ]);
+    });
+
+    it("protects its name from the old SDK's mkdir, rename and copy", async () => {
+        const { vfs, old, store, d } = await linkedTree();
+        await old.writeFile("/other.txt", "o");
+        await expect(old.mkdir("/Photos/Halloween")).rejects.toThrow(VfsConflictError);
+        await expect(old.mkdir("/Photos/Halloween/inside", { recursive: true })).rejects.toThrow(VfsConflictError);
+        await expect(old.rename("/other.txt", "/Photos/Halloween")).rejects.toThrow(VfsConflictError);
+        await expect(old.copy("/other.txt", "/Photos/Halloween")).rejects.toThrow(VfsConflictError);
+        // A non-recursive delete refuses it too; only a recursive delete of that exact name detaches it.
+        await expect(old.delete("/Photos/Halloween")).rejects.toThrow(VfsConflictError);
+        expect((await readRecord(store, d.id, d.key)).entries.Halloween.kind).toBe("link");
+        vfs.clearCache();
+        expect(await vfs.readLink("/Photos/Halloween")).toEqual({ spaceId: "space_party" });
+    });
+
+    it("makes the old SDK's sweep refuse rather than guess, and a forced one keep the tree", async () => {
+        const { old, store, d } = await linkedTree();
+        await expect(old.sweep()).rejects.toThrow(VfsConflictError);
+        await old.sweep({ force: true });
+        expect((await readRecord(store, d.id, d.key)).entries.Halloween.kind).toBe("link");
+        expect(await old.readText("/Photos/mine.txt")).toBe("mine");
+    });
+
+    it("a link whose target is malformed is hidden and preserved by THIS version too", async () => {
+        const { vfs, store, d } = await linkedTree();
+        const record = await readRecord(store, d.id, d.key);
+        const bad = { kind: "link", id: newId(), target: { spaceId: "no spaces/allowed" }, mtime: 1 };
+        await plantValue(store, d.id, d.key, { ...record, entries: { ...record.entries, Bad: bad } });
+        vfs.clearCache();
+        expect((await vfs.list("/Photos")).map((e) => e.name)).toEqual(["Halloween", "mine.txt"]);
+        await vfs.writeFile("/Photos/sibling.txt", "s");
+        expect((await readRecord(store, d.id, d.key)).entries.Bad).toEqual(bad);
+        await expect(vfs.mkdir("/Photos/Bad")).rejects.toThrow(VfsConflictError);
+    });
+});

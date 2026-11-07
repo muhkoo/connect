@@ -23,6 +23,14 @@ import { OPRF_PROTOCOL, type OprfProtocol } from "./oprf";
  * one meant regex-matching a sentence the server is free to reword. See
  * `VaultUnavailableError`, which still does exactly that for rate limits.
  */
+/** One Google account matched: the single-use token, the Google `sub`, and (when the lookup named it) the username. */
+interface GoogleVerifyOne {
+    verifyToken: string;
+    sub: string;
+    emailHint: string | null;
+    username?: string;
+}
+
 export class AuthHttpError extends Error {
     constructor(
         readonly label: string,
@@ -221,11 +229,21 @@ export class AuthClient {
      * gate; without, it's RECOVER/LOGIN (the Google account must already be
      * linked). Returns a single-use verifyToken bound to the account's `sub`.
      */
-    async googleVerify(opts: { idToken: string; token?: string; username?: string }): Promise<{ verifyToken: string; sub: string; emailHint: string | null }> {
+    googleVerify(opts: { idToken: string; token?: string; username: string }): Promise<GoogleVerifyOne>;
+    googleVerify(opts: { idToken: string; token: string; username?: string }): Promise<GoogleVerifyOne>;
+    googleVerify(opts: { idToken: string }): Promise<GoogleVerifyOne | { usernames: string[] }>;
+    async googleVerify(opts: { idToken: string; token?: string; username?: string }): Promise<GoogleVerifyOne | { usernames: string[] }> {
         const init = this.json("POST", { idToken: opts.idToken, username: opts.username });
         if (opts.token) (init.headers as Record<string, string>)["X-Muhkoo-Session"] = opts.token;
         const res = await this.fetchFn(`${this.baseUrl}/api/auth/google/verify`, init);
-        return await this.parse<{ verifyToken: string; sub: string; emailHint: string | null }>("googleVerify", res);
+        return await this.parse<GoogleVerifyOne | { usernames: string[] }>("googleVerify", res);
+    }
+
+    /** Is `redirectUri` registered for `appId`? (Public; used before sending a user to a logout target.) */
+    async redirectCheck(appId: string, redirectUri: string): Promise<{ allowed: boolean }> {
+        const qs = new URLSearchParams({ app_id: appId, redirect_uri: redirectUri }).toString();
+        const res = await this.fetchFn(`${this.baseUrl}/api/auth/redirect-check?${qs}`, { method: "GET" });
+        return await this.parse<{ allowed: boolean }>("redirectCheck", res);
     }
 
     // ---- Hosted-auth authorization-code flow (H0) ---------------------------

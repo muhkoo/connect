@@ -33,6 +33,7 @@ import { DbNamespace } from "./namespaces/DbNamespace";
 import { StorageNamespace } from "./namespaces/FileNamespace";
 import { MessageNamespace } from "./namespaces/MessageNamespace";
 import { SpaceNamespace } from "./namespaces/SpaceNamespace";
+import { SharesNamespace, defaultSharesStore, type SharesLocalStore } from "./namespaces/SharesNamespace";
 import { AgentsNamespace } from "./namespaces/AgentsNamespace";
 import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
 import { AccessTokensNamespace } from "./namespaces/AccessTokensNamespace";
@@ -40,6 +41,7 @@ import { AppNamespace } from "./namespaces/AppNamespace";
 import { TrustContext } from "./trust/TrustContext";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 import { VfsNamespace } from "../vfs/VfsNamespace";
+import { linkSharing } from "../vfs/sharingAccess";
 import { VcsNamespace } from "../vcs/VcsNamespace";
 import { listPersonalKeys } from "./personalList";
 import { drainLock, vfsCoordinator } from "./crossTab";
@@ -103,6 +105,12 @@ export interface ClientOptions {
     sessionStore?: SessionStore;
     /** Custom fetch — defaults to `globalThis.fetch`. */
     fetch?: typeof fetch;
+    /**
+     * Where `client.shares` keeps its per-device state: the device login of a guest account it made (see
+     * {@link SharesNamespace.joinWithPassword}), an unfinished guest setup or rotation. Defaults to `localStorage`
+     * in a browser (keyed by the app key and accelerator), memory elsewhere.
+     */
+    sharesStore?: SharesLocalStore;
     /** Optional log level for the SDK logger. */
     logLevel?: string;
     /**
@@ -178,6 +186,8 @@ export class Client {
     readonly message: MessageNamespace;
     /** Fan-out group spaces — `client.space.createSpace(...)`, etc. */
     readonly space: SpaceNamespace;
+    /** Shared folders — `client.shares.create(...)`, `client.shares.joinWithPassword(...)`, etc. */
+    readonly shares: SharesNamespace;
     /** Trust records shared by every Space: pins and per-Space log heads (design §3.4, §6.9). */
     readonly trust: { readonly persistent: boolean; unpin(username: string): Promise<void>; resetSpacePins(spaceId: string): Promise<void> };
     /** Programmable Agents — `client.agents.create(appId, …)`, etc. */
@@ -361,6 +371,12 @@ export class Client {
             // Share the personal space's socket with `client.kv` rather than
             // opening a second one to the same Durable Object.
             subscribe: (handler) => this.kv.onRaw(handler),
+            // `/Home/Shared` and links. `this.shares` is made below; these run only once the VFS is used.
+            shares: {
+                list: () => this.shares.list(),
+                open: (spaceId) => this.shares.open(spaceId),
+                me: () => (this.session.token ? this.session.username : null),
+            },
             content: {
                 // `putFile` needs no WebSocket and commits the shards, so the
                 // bytes are metered to the owning app and reference-counted for
@@ -460,6 +476,16 @@ export class Client {
             chatKeys,
             trust: trustContext,
         });
+        this.shares = new SharesNamespace({
+            http: this.http,
+            me: () => (this.session.token ? this.session.username : null),
+            unlocked: () => !!this.session.seed,
+            spaces: this.space,
+            auth: this.auth.zk,
+            store: options.sharesStore ?? defaultSharesStore(`muhkoo.shares.v1:${options.apiKey ?? ""}@${this.baseUrl}:`),
+        });
+        // `client.shares.shareFolder` drives steps of `client.vfs` that apps cannot call: see `vfs/sharingAccess.ts`.
+        linkSharing(this.shares, this.vfs);
         this.agents = new AgentsNamespace({ http: this.http });
         this.functions = new FunctionsNamespace({ http: this.http, fnHostSuffix: options.functionsHostSuffix });
         this.accessTokens = new AccessTokensNamespace({ http: this.http });

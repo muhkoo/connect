@@ -314,6 +314,16 @@ export class HostedAuth {
     }
 
     /**
+     * (App side) Sign the browser out of the hosted page too, then land on
+     * `redirectUri`. The hosted page only honours a `redirectUri` the app has
+     * registered; any other lands on its own page. Redirects the browser.
+     */
+    logout(opts: { appId: string; redirectUri: string }): void {
+        const url = `${this.deps.authBaseUrl}/logout?` + new URLSearchParams({ app_id: opts.appId, redirect_uri: opts.redirectUri }).toString();
+        this.location().assign(url);
+    }
+
+    /**
      * (App side) Send the user to centralized account & security management on
      * the hosted page (auth.muhkoo.dev/security) — manage passkeys, recovery
      * phrase, email, Google, change password, and remove login methods, all in

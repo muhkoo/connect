@@ -100,9 +100,35 @@ export interface DirEntry {
      * storage cost, never a loss.
      */
     moving?: true;
+    /**
+     * Set while `client.shares.shareFolder` is moving this folder's files into the share named here, until the
+     * folder is replaced by a link to it. A run that stops part-way resumes into the same share. An SDK from
+     * before shares keeps the field (entries are written back whole) and otherwise ignores it.
+     */
+    sharing?: { spaceId: string };
 }
 
-export type Entry = FileEntry | DirEntry;
+/**
+ * A link: a name in the user's own tree that stands for a shared folder (a share), the way a symlink stands for
+ * a directory. Paths below it are served by that share; the link itself holds nothing of the user's, so deleting
+ * or moving it touches only the link.
+ *
+ * Added after `file` and `dir` without a new record version (`DirNode.v` stays 1): an SDK from before links
+ * sees an entry kind it does not know, hides it, writes it back unchanged with every write of the directory, and
+ * refuses to put anything else at its name with `mkdir`, `rename` or `copy`.
+ */
+export interface LinkEntry {
+    kind: "link";
+    /** Stable identity, like a file's or a directory's. Never a store key: a link has no record of its own. */
+    id: string;
+    /** The share's Space. */
+    target: { spaceId: string };
+    mtime: number;
+    /** See `DirEntry.moving`. */
+    moving?: true;
+}
+
+export type Entry = FileEntry | DirEntry | LinkEntry;
 
 /** One directory record, as stored (before encryption). */
 export interface DirNode {
@@ -122,10 +148,12 @@ export interface HistoryRecord {
 export interface VfsStat {
     path: string;
     name: string;
-    kind: "file" | "dir";
+    kind: "file" | "dir" | "link";
     size: number;
     mtime: number;
     versions: number;
+    /** For a link: the share it stands for. */
+    target?: { spaceId: string };
 }
 
 /** The encrypted envelope every record is stored in. */

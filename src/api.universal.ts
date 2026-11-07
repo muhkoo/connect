@@ -59,6 +59,10 @@ export * from "./transport";
 export { PaymentRequiredError } from "./core/PaymentRequiredError";
 export type { PaymentRequiredCode } from "./core/PaymentRequiredError";
 
+// Shared folders: the `/api/shares` wire client, its types and typed refusals. Imports only
+// `core/HttpClient` (+ `HttpError`, `PaymentRequiredError`), so it adds nothing to the Workers closure.
+export * from "./shares";
+
 // Universal Groth16 verification. Drives bn128.wasm directly, with no snarkjs /
 // ffjavascript dependency, so it runs anywhere WebAssembly does. This is the
 // reason the Workers build exists at all.

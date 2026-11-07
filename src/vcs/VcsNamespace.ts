@@ -185,6 +185,17 @@ export class Repo {
         return `/apps/${this.slug}`;
     }
 
+    /**
+     * Refuse a project whose working tree is a link or inside a shared folder. A share's files have no content
+     * handles the repository could record, so a commit there would hold no files, and a checkout of it would
+     * delete every file in the share.
+     */
+    private async assertOwnTree(): Promise<void> {
+        if (await this.deps.vfs.inShare(this.root)) {
+            throw new VcsError(`${this.root} is a link to a shared folder or inside one; version control works only on your own files`);
+        }
+    }
+
     // ---- objects ------------------------------------------------------------
 
     /** Store an object, returning its hash and whether it was new. */
@@ -455,6 +466,7 @@ export class Repo {
      */
     async commit(message: string, parents?: string[]): Promise<string> {
         if (!message.trim()) throw new VcsError("a commit needs a message");
+        await this.assertOwnTree();
         const tree = await this.writeTree(this.root);
         const parent = await this.current();
 
@@ -548,6 +560,8 @@ export class Repo {
             // the commit without a word.
             const entries: Record<string, TreeEntry> = Object.create(null);
             for (const { stat, manifest } of byParent.get(dir) ?? []) {
+                // A link stands for a share, not for files of this project: it is not recorded at all.
+                if (stat.kind === "link") continue;
                 if (!manifest) entries[stat.name] = { kind: "tree", hash: await write(stat.path) };
                 else entries[stat.name] = { kind: "file", manifest, size: stat.size };
             }
@@ -685,8 +699,9 @@ export class Repo {
         // path three times over: a hostile HEAD and working tree, each inside
         // both budgets, needed about 600MB.
         const changes: Change[] = [];
+        await this.assertOwnTree();
         await this.deps.vfs.eachEntry(this.root, ({ path: abs }, manifest) => {
-            if (!manifest) return;   // a directory
+            if (!manifest) return;   // a directory, or a link
             const path = abs.slice(this.root.length);
             const was = before.get(path);
             if (!was) {
@@ -757,6 +772,7 @@ export class Repo {
      * mean rewinding everything else you have done since.
      */
     async restore(path: string, rev = "HEAD"): Promise<void> {
+        await this.assertOwnTree();
         const hash = await this.resolve(rev);
         const files = await this.filesOf(hash);
         const key = path.startsWith(this.root) ? path.slice(this.root.length) : path.startsWith("/") ? path : `/${path}`;
@@ -776,6 +792,7 @@ export class Repo {
 
     /** Make the working tree match a commit, leaving HEAD alone. */
     private async materialise(commitHash: string): Promise<void> {
+        await this.assertOwnTree();
         // Collected in full BEFORE anything is touched, so a tree that cannot
         // be read throws with the working tree exactly as it was.
         const wanted = await this.filesOf(commitHash);
@@ -791,6 +808,13 @@ export class Repo {
         // files gone, HEAD unchanged, and a message about a directory that
         // listings said was not there.
         await this.deps.vfs.assertCreatable(new Set([...wanted.keys()].map((path) => dirname(this.abs(path)))));
+        // A link where the commit has a file: writing the file would fail - after the deletions below - and the
+        // link is never removed to make room. Refused while nothing has changed.
+        for (const entry of present) {
+            if (entry.kind === "link" && wanted.has(entry.path.slice(this.root.length))) {
+                throw new VcsError(`${entry.path} is a link to a shared folder, and this commit has a file there; nothing was changed`);
+            }
+        }
 
         // Remove what the commit does not have BEFORE writing what it does —
         // otherwise a file replaced by a directory of the same name collides.
@@ -911,6 +935,7 @@ export class Repo {
     async merge(name: string, opts: { discardChanges?: boolean } = {}): Promise<MergeResult> {
         const theirs = await this.readRef(name);
         if (!theirs) throw new VcsError(`no branch named "${name}"`);
+        await this.assertOwnTree();
         // A merge writes to the working tree as freely as a switch does.
         await this.guardWorkingTree(opts.discardChanges);
         const ours = await this.current();

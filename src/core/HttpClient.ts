@@ -163,6 +163,19 @@ export class HttpClient {
         return this.fetch(input, init);
     };
 
+    /**
+     * A client for the same accelerator and key that never sends a session token and never recovers one. For routes
+     * that need only the app key (a public share's pre-admission info).
+     */
+    withoutSession(): HttpClient {
+        return new HttpClient({
+            baseUrl: this.baseUrl,
+            apiKey: this.apiKey ?? undefined,
+            accessToken: this.accessToken ?? undefined,
+            fetch: this.fetchFn,
+        });
+    }
+
     /** True when `input` resolves to {@link baseOrigin} (relative URLs always do). */
     private isSameOrigin(input: RequestInfo | URL): boolean {
         try {

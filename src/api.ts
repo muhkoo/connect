@@ -54,6 +54,10 @@ export * from "./auth/passkey";
 export * from "./personal";
 export * from "./storage";
 
+// A shared folder's file view (`Share`). Here and not in `./api.universal` with the rest of `./shares`,
+// because it builds on the file storage above, which the Workers build does not carry.
+export * from "./shares/Share";
+
 // The unified Client and its transport/session plumbing.
 export * from "./core/Client";
 export * from "./core/HttpClient";
@@ -69,6 +73,7 @@ export * from "./core/namespaces/DbNamespace";
 export * from "./core/namespaces/FileNamespace";
 export * from "./core/namespaces/MessageNamespace";
 export * from "./core/namespaces/SpaceNamespace";
+export * from "./core/namespaces/SharesNamespace";
 export * from "./core/namespaces/AgentsNamespace";
 export * from "./core/namespaces/FunctionsNamespace";
 export * from "./core/namespaces/AccessTokensNamespace";

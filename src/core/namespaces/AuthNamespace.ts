@@ -15,7 +15,7 @@
  * at-rest encryption and the messaging ratchet without re-deriving.
  */
 
-import { AuthClient } from "../../auth/AuthClient";
+import { AuthClient, AuthHttpError } from "../../auth/AuthClient";
 import { deriveIdentity, deriveIdentityFromSeed, deriveMasterSeedFromPassword, type ZkIdentity } from "../../auth/identity";
 import { seedToMnemonic, mnemonicToSeed } from "../../auth/recoveryPhrase";
 import { generateAuthProof, buildCommitment, type CircuitUrls } from "../../auth/proof";
@@ -99,6 +99,17 @@ export class DeviceRevokedError extends Error {
     constructor() {
         super("This device is no longer paired — its access was revoked. Sign in again to re-pair.");
         this.name = "DeviceRevokedError";
+    }
+}
+
+/**
+ * `signInWithGoogle` without a username found no Muhkoo account linked to this
+ * Google account. Ask for the username and call again with `{ username }`.
+ */
+export class GoogleNotLinkedError extends Error {
+    constructor() {
+        super("No Muhkoo account is linked to this Google account.");
+        this.name = "GoogleNotLinkedError";
     }
 }
 
@@ -524,6 +535,10 @@ export class ZkAuth {
      */
     async loginWithGoogle(username: string, idToken: string, opts: LoginOptions = {}): Promise<AuthUser> {
         const { verifyToken, sub } = await this.deps.auth.googleVerify({ idToken, username });
+        return this.completeGoogleLogin(username, verifyToken, sub, opts);
+    }
+
+    private async completeGoogleLogin(username: string, verifyToken: string, sub: string, opts: LoginOptions): Promise<AuthUser> {
         const { factor } = await this.deps.auth.vaultRead(username, "google", verifyToken);
         if (!factor?.wrap || !factor?.iv) throw new Error("No Google account is linked to this username.");
         const input = await googleFactorInput(username, sub);
@@ -535,6 +550,27 @@ export class ZkAuth {
         const user = await this.proveAndStore(username, identity, opts);
         this.deps.session.setSeed(seed);
         return user;
+    }
+
+    /**
+     * Sign in with Google, naming no account. One linked account completes the
+     * sign-in; several return `{ chooseAccount }` (call again with `{ username }`);
+     * none throws {@link GoogleNotLinkedError}. With `username` this is
+     * {@link loginWithGoogle}.
+     */
+    async signInWithGoogle(idToken: string, opts: { username?: string } & LoginOptions = {}): Promise<AuthUser | { chooseAccount: string[] }> {
+        const { username: named, ...loginOpts } = opts;
+        if (named) return this.loginWithGoogle(named, idToken, loginOpts);
+        let res: Awaited<ReturnType<AuthClient["googleVerify"]>>;
+        try {
+            res = await this.deps.auth.googleVerify({ idToken });
+        } catch (err) {
+            if (err instanceof AuthHttpError && err.status === 404 && /google_not_linked/.test(err.message)) throw new GoogleNotLinkedError();
+            throw err;
+        }
+        if ("usernames" in res) return { chooseAccount: res.usernames };
+        if (!res.username) throw new Error("Google sign-in did not name an account.");
+        return this.completeGoogleLogin(res.username, res.verifyToken, res.sub, loginOpts);
     }
 
     /**
@@ -655,6 +691,20 @@ export class ZkAuth {
         const user = await this.proveAndStore(username, identity, opts);
         this.deps.session.setSeed(seed);
         return user;
+    }
+
+    /**
+     * Can a passkey unlock `username` from THIS origin? `"usable"`, `"none"` (no
+     * passkey enrolled) or `"other-origin"` (enrolled, but for another host).
+     * The vault answers a decoy for absent accounts, so an unknown username
+     * reads like a real one; callers must still handle a failed prompt.
+     */
+    async passkeyStatus(username: string): Promise<"usable" | "none" | "other-origin"> {
+        const host = defaultRpId();
+        const { factor } = await this.deps.auth.vaultRead(username, "passkey", undefined, host);
+        const params = factor?.params as { credentialId?: string; prfSalt?: string; rpId?: string } | undefined;
+        if (!factor?.wrap || !factor?.iv || !params?.credentialId || !params?.prfSalt) return "none";
+        return rpIdUsableForOrigin(params.rpId ?? host, host) ? "usable" : "other-origin";
     }
 
     /**
