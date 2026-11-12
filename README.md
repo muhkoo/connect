@@ -4,7 +4,7 @@ Client SDK for the Muhkoo Accelerator. The headline surface is a single
 **`Client`** that hangs everything off its namespaces —
 `client.auth` / `client.kv` / `client.db` / `client.storage` / `client.vfs` /
 `client.vcs` / `client.message` / `client.space` / `client.agents` /
-`client.functions` / `client.accessTokens` / `client.offline` — backed by
+`client.functions` / `client.accessTokens` / `client.vectors` / `client.offline` — backed by
 end-to-end-encrypted messaging (fan-out group channels with history, plus Double
 Ratchet + ECDH P-384 for direct messages), ZK identity + personal/shared spaces,
 server-side Programmable Agents, developer-authored serverless functions, and an
@@ -25,7 +25,8 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for what's new.
   (pub/sub + E2E direct messages), `space` (fan-out group channels with
   history), `agents` (server-side Programmable Agents), `functions`
   (developer-authored serverless functions), `accessTokens` (scoped machine
-  credentials), and `offline` (CRDT sync). This is the supported surface;
+  credentials), `vectors` (vector search over the app's collections), and
+  `offline` (CRDT sync). This is the supported surface;
   everything below is a building block it composes.
 
 - **App-describing decorators** — `@MuhkooAgent` / `@MuhkooSpace` / `@MuhkooDB` /
@@ -443,6 +444,48 @@ This is a mitigation, not a fix: apps being handed the seed is still the root
 cause. The limits, messages and every behaviour change are listed under
 *Filesystem and version control* in [`API_REFERENCE.md`](./API_REFERENCE.md);
 [`CHANGELOG.md`](./CHANGELOG.md) says why each one changed.
+
+### Vector search (`client.vectors`)
+
+Collections hold entries you search by meaning. In text mode Muhkoo makes the
+vectors from your text; in vectors mode you send your own. The store is
+**server-readable**: Muhkoo can read entries, text and data, so don't put
+anything there you need kept from the server. The app owner creates collections
+(`client.vectors.createCollection(appId, name, definition)` then
+`waitForCollection`, which waits up to 10 minutes) or in the portal.
+
+```ts
+const docs = client.vectors.collection("docs");
+
+// Writes are accepted at once and become searchable shortly after,
+// usually within a minute or two.
+const { mutationId } = await docs.upsert([
+    { id: "a", text: "How to reset a password", data: { category: "help" } },
+]);
+await docs.waitFor(mutationId); // polls status; waits up to 5 minutes
+
+const matches = await docs.query({ text: "forgot my password", topK: 5, filter: { category: "help" } });
+
+// To wait on a ready notice instead of polling, the Space must be registered
+// as a notice Space for the environment. The app owner does this once:
+const space = await client.space.joinChannel("docs-updates");
+await client.vectors.setNotices(appId, "docs", "live", { spaces: [space.id], defaultSpace: space.id });
+
+// Name it with `notify` (or rely on the defaultSpace) and listen on it.
+await docs.upsertAndWait([{ id: "b", text: "Changing your email" }], {
+    space,
+    notify: { space: space.id },
+});
+```
+
+The server sends the ready notice only to a registered notice Space: the one named
+in `notify.space`, or the environment's `defaultSpace`. Naming a Space that isn't
+registered fails the upsert with a 400 `notice_space_not_registered`. Any other
+Space you pass as `space` never receives the notice, so the wait still completes,
+by polling, usually within a minute or two.
+
+A wait that runs out throws `VectorWaitTimeoutError` (with the `mutationId`); the
+write itself still went through, and `docs.status(mutationId)` tells you later.
 
 > The sections below document the lower-level building blocks the client is
 > composed from (`BroadcastChannel`, `EncryptedSession`, `PersonalSpaceClient`,

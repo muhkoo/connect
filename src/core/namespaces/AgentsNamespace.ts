@@ -50,6 +50,8 @@ export interface AgentToolsConfig {
     functions: string[];
     /** Whether the agent may resolve the app's PUBLIC channels. */
     channels: boolean;
+    /** Allowlisted collection names the agent may search with its `search_collection` tool (text-mode collections only, at most 20). */
+    collections?: string[];
     /** Max tool-call rounds per reply (1..6). */
     maxIterations: number;
 }

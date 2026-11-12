@@ -78,6 +78,7 @@ export * from "./core/namespaces/AgentsNamespace";
 export * from "./core/namespaces/FunctionsNamespace";
 export * from "./core/namespaces/AccessTokensNamespace";
 export * from "./core/namespaces/AppNamespace";
+export * from "./core/namespaces/VectorsNamespace";
 
 // The encrypted filesystem and its history.
 export * from "./vfs/VfsNamespace";

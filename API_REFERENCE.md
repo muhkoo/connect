@@ -3,7 +3,7 @@
 > **The canonical docs are the [`muhkoo/docs`](../docs) site (`docs.muhkoo.dev`).**
 > Start there for the unified `Client` (`client.auth` / `client.kv` /
 > `client.db` / `client.storage` / `client.message` / `client.space` /
-> `client.agents` / `client.functions`), the `@MuhkooAgent`/`@MuhkooSpace`/
+> `client.agents` / `client.functions` / `client.vectors`), the `@MuhkooAgent`/`@MuhkooSpace`/
 > `@MuhkooDB`/`@MuhkooFunction` decorators, guides, and worked examples. This
 > file is the low-level **export inventory** — the building blocks the `Client`
 > composes — kept for contributors working in-tree.

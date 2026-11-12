@@ -38,6 +38,7 @@ import { AgentsNamespace } from "./namespaces/AgentsNamespace";
 import { FunctionsNamespace } from "./namespaces/FunctionsNamespace";
 import { AccessTokensNamespace } from "./namespaces/AccessTokensNamespace";
 import { AppNamespace } from "./namespaces/AppNamespace";
+import { VectorsNamespace } from "./namespaces/VectorsNamespace";
 import { TrustContext } from "./trust/TrustContext";
 import type { SpaceKeyCache } from "../spaces/SpaceKeyring";
 import { VfsNamespace } from "../vfs/VfsNamespace";
@@ -198,6 +199,8 @@ export class Client {
     readonly accessTokens: AccessTokensNamespace;
     /** This app — `client.app.access()`: may the signed-in user add data here? */
     readonly app: AppNamespace;
+    /** Vector search — `client.vectors.collection("docs").query({ text })`, plus owner management of collections. */
+    readonly vectors: VectorsNamespace;
     /** Offline cache + sync — `client.offline.status`, `client.offline.snapshot`, etc. */
     readonly offline: OfflineManager;
 
@@ -489,6 +492,7 @@ export class Client {
         this.agents = new AgentsNamespace({ http: this.http });
         this.functions = new FunctionsNamespace({ http: this.http, fnHostSuffix: options.functionsHostSuffix });
         this.accessTokens = new AccessTokensNamespace({ http: this.http });
+        this.vectors = new VectorsNamespace({ http: this.http });
         // Each "allowed" sends what the offline queue kept after a refusal for
         // payment, without waiting for the next reconnect.
         this.app = new AppNamespace({ http: this.http, onAllowed: () => this.offline.resume() });

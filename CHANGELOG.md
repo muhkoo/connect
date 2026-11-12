@@ -12,6 +12,20 @@ whole 0.14 line, so every default install, including the `npx -y @muhkoo/cli` in
 the preview deploy script, ran without shard batching or `loginWithDevice`.
 `npm run release` publishes and moves both tags together.
 
+## 0.15.0-alpha.13
+
+No SDK changes. Released so `@muhkoo/cli` 0.15.0-alpha.13, which keeps its version in step with the SDK, can ship a CLI fix.
+
+## 0.15.0-alpha.12
+
+### Added
+
+- **`client.vectors`**: vector search over the app's collections. `client.vectors.collection(name)` returns a `VectorCollection` with `upsert`, `query`, `get`, `delete` and `status(mutationId)`. Writes are accepted at once and usually become searchable within a minute or two. The store is server-readable: don't put anything there you need kept from the server.
+- **`VectorCollection.waitFor(mutationId, { space?, timeoutMs? })`** and **`upsertAndWait(entries, opts)`**: wait until a write is searchable, up to 5 minutes by default. With a connected Space they listen for its ready notice (only notices from `__muhkoo__` count) and poll every 5 s as a backstop; without one they poll. The server sends the notice only to a notice Space the owner registered with `setNotices`: the one named in `notify.space`, or the environment's `defaultSpace` (naming an unregistered Space is a 400 `notice_space_not_registered`). Any other Space never gets the notice, and the wait completes by polling, usually within a minute or two. Running out throws **`VectorWaitTimeoutError`**, carrying the `mutationId`; the write itself still succeeded.
+- **`VectorCollection.onReady(space, handler)`**: subscribe to ready notices on a Space.
+- **Collection management** for the app owner: `client.vectors.listCollections`, `getCollection`, `createCollection`, `dropCollection`, `setNotices`, and `waitForCollection` (up to 10 minutes by default; a failed collection throws **`VectorCollectionFailedError`**). A Free owner gets a plain `HttpError` 402 with `body.requiresPaidTier`.
+- **`AgentToolsConfig.collections`**: an allowlist of text-mode collections an agent may search with its `search_collection` tool, at most 20 names. The server deduplicates the list and drops invalid names.
+
 ## 0.15.0-alpha.11
 
 ### Added
